@@ -27,7 +27,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--smooth] [--snapshot COLSxROWS]
+usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--smooth | --smooth-shift] [--snapshot COLSxROWS]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL
                 (default: OpenFreeMap planet)
@@ -37,6 +37,8 @@ usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--smooth] [--snapsho
   --smooth      pixel smooth trackpad panning on terminals with the smooth-scroll region
                 protocol (tlpinney/ghostty); also MAPTERM_SMOOTH=1. The trackpad then pans
                 up/down instead of zooming; zoom with +/-, double-click, right-click
+  --smooth-shift  --smooth plus pixel-exact dragging: the terminal shifts the map by the
+                sub-cell remainder (needs smooth protocol v3); also MAPTERM_SMOOTH=shift
   --snapshot    render one frame to stdout as text and exit
 
 keys: arrows/hjkl pan · +/- zoom · wheel zooms at cursor · swipe sideways/drag/shift+wheel pan ·
@@ -49,10 +51,13 @@ struct Args {
     light: bool,
     snapshot: Option<(u16, u16)>,
     smooth: bool,
+    /// Also send the sub-cell remainder for the terminal to shift by (protocol v3).
+    shift: bool,
 }
 
 fn args() -> Result<Args> {
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, smooth: smooth::env_enabled("MAPTERM_SMOOTH") };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, smooth: smooth::env_enabled("MAPTERM_SMOOTH"), shift: std::env::var("MAPTERM_SMOOTH").is_ok_and(|v| v == "shift") };
+    a.smooth |= a.shift;
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -64,6 +69,10 @@ fn args() -> Result<Args> {
             "-z" | "--zoom" => a.zoom = Some(it.next().context("-z ZOOM")?.parse()?),
             "--light" => a.light = true,
             "--smooth" => a.smooth = true,
+            "--smooth-shift" => {
+                a.smooth = true;
+                a.shift = true;
+            }
             "--snapshot" => {
                 let v = it.next().context("--snapshot COLSxROWS")?;
                 let (c, r) = v.split_once('x').context("--snapshot COLSxROWS")?;
@@ -164,6 +173,7 @@ async fn main() -> Result<()> {
     let mut errors = 0usize;
     let mut labels = true;
     let mut smooth_on = a.smooth;
+    let shift = a.shift;
     // Last drag position (cells, or pixels in pixel-mouse mode) and the sub-dot remainder.
     let mut drag: Option<(u16, u16)> = None;
     let mut drag_rem = (0.0f64, 0.0f64);
@@ -184,11 +194,13 @@ async fn main() -> Result<()> {
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
             let t0 = Instant::now();
+            // With shift, render on the cell grid and let the terminal draw the sub-cell rest.
+            let (draw_cam, ox, oy) = if smooth_on && shift { smooth::snap(&cam) } else { (cam, 0, 0) };
             term.draw(|f| {
                 let [m, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
                 map_area = m;
                 f.render_widget(
-                    MapWidget { store: &store, camera: &cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &[], labels },
+                    MapWidget { store: &store, camera: &draw_cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &[], labels },
                     m,
                 );
                 let vp = Viewport::new(&cam, m);
@@ -208,7 +220,12 @@ async fn main() -> Result<()> {
                     spans.push(Span::styled(format!("{errors} failed "), TStyle::new().fg(Color::Red)));
                 }
                 if smooth_on {
-                    let tag = if px.is_some() { "smooth·px " } else { "smooth " };
+                    let tag = match (shift, px.is_some()) {
+                        (true, true) => "smooth·shift·px ",
+                        (true, false) => "smooth·shift ",
+                        (false, true) => "smooth·px ",
+                        (false, false) => "smooth ",
+                    };
                     spans.push(Span::styled(tag, TStyle::new().fg(Color::Cyan)));
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
@@ -219,7 +236,12 @@ async fn main() -> Result<()> {
             if smooth_on {
                 // Declare after drawing, in the same synchronized update as the cells.
                 let mut out = std::io::stdout();
-                out.write_all(smooth::declare(0, map_area, &cam).as_bytes())?;
+                let decl = if shift {
+                    smooth::declare_shift(0, map_area, &draw_cam, ox, oy)
+                } else {
+                    smooth::declare(0, map_area, &cam)
+                };
+                out.write_all(decl.as_bytes())?;
                 crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;
             }
 
@@ -340,7 +362,14 @@ async fn main() -> Result<()> {
                                         drag_rem = (drag_rem.0 + dx, drag_rem.1 + dy);
                                         let whole = (drag_rem.0.trunc(), drag_rem.1.trunc());
                                         drag_rem = (drag_rem.0 - whole.0, drag_rem.1 - whole.1);
-                                        cam.pan_dots(whole.0, whole.1);
+                                        if smooth_on && shift {
+                                            // The terminal shifts by the sub-cell rest, so follow
+                                            // the pointer exactly.
+                                            cam.pan_dots(dx, dy);
+                                            drag_rem = (0.0, 0.0);
+                                        } else {
+                                            cam.pan_dots(whole.0, whole.1);
+                                        }
                                         drag = Some(cur);
                                         last_click = None;
                                     }
