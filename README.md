@@ -42,20 +42,6 @@ Roads, rivers and boundaries are braille lines (2x4 dots per character); water,
 parks and buildings fill the cell background; labels avoid each other. While
 sharper tiles load, lower-zoom tiles stand in for them.
 
-## Smooth scrolling (experimental, opt-in)
-
-Terminals move content a whole character at a time. With the experimental
-smooth-scroll protocol of [Ghostty Smooth](https://github.com/tlpinney/ghostty)
-(relayed through the [herdr](https://github.com/tlpinney/herdr) multiplexer),
-mapterm can move by single pixels:
-
-- `--smooth-shift` (or `MAPTERM_SMOOTH=shift`): dragging follows the pointer
-  pixel by pixel; scrolling still zooms.
-- `--smooth` (or `MAPTERM_SMOOTH=1`): two-finger up/down pans smoothly instead
-  of zooming.
-- `s` toggles it at runtime. Other terminals ignore the protocol and behave as
-  usual.
-
 ## Use it in your own app
 
 The crate's library has the pieces mapterm is built from:
@@ -68,6 +54,27 @@ The crate's library has the pieces mapterm is built from:
 
 `src/bin/mapterm.rs` is a complete example: about 300 lines that fetch the
 tiles the view needs, feed input to the controller, and draw the widget.
+
+## Experimental: smooth scrolling
+
+Terminals move content a whole character at a time. As an experiment, mapterm
+can move the map by single pixels on terminals that support an experimental
+smooth-scroll protocol. Today that is only
+[Ghostty Smooth](https://github.com/tlpinney/ghostty/tree/smooth), a personal
+fork of Ghostty (see its
+[`SMOOTH.md`](https://github.com/tlpinney/ghostty/blob/smooth/SMOOTH.md)), and
+the [herdr fork](https://github.com/tlpinney/herdr/tree/tlpinney) relays it
+from herdr panes. Both are experimental and may change.
+
+It is off unless you turn it on with an environment variable:
+
+- `MAPTERM_SMOOTH=shift`: dragging follows the pointer pixel by pixel;
+  scrolling still zooms.
+- `MAPTERM_SMOOTH=1`: two-finger up/down pans the map smoothly instead of
+  zooming.
+
+With either set, `s` toggles it while mapterm runs. Terminals without the
+protocol ignore it and behave as usual.
 
 ## License
 

@@ -28,24 +28,22 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--smooth | --smooth-shift] [--snapshot COLSxROWS]
+usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL
                 (default: OpenFreeMap planet)
   --at          start position (default: the source's center)
   -z            start zoom
   --light       light theme
-  --smooth      pixel smooth trackpad panning on terminals with the smooth-scroll region
-                protocol (tlpinney/ghostty); also MAPTERM_SMOOTH=1. The trackpad then pans
-                up/down instead of zooming; zoom with +/-, double-click, right-click
-  --smooth-shift  pixel-exact dragging instead: the terminal shifts the map by the sub-cell
-                remainder, and the wheel keeps zooming (needs smooth protocol v3, the
-                tlpinney/ghostty smooth branch); also MAPTERM_SMOOTH=shift
   --snapshot    render one frame to stdout as text and exit
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · s smooth on/off · n labels · t theme · q quit";
+      +/- zoom · sideways swipe pans · n labels · t theme · q quit
+
+experimental: MAPTERM_SMOOTH=shift (pixel-smooth dragging) or MAPTERM_SMOOTH=1 (smooth
+      up/down panning) on the Ghostty Smooth terminal fork; `s` then toggles it.
+      See https://github.com/tlpinney/ghostty (branch smooth).";
 
 struct Args {
     source: String,
@@ -53,14 +51,20 @@ struct Args {
     zoom: Option<f64>,
     light: bool,
     snapshot: Option<(u16, u16)>,
+    /// Experimental smooth scrolling, from MAPTERM_SMOOTH only (no flag): `1` pans the wheel
+    /// smoothly, `shift` makes dragging pixel-exact (smooth protocol v3).
     smooth: bool,
-    /// Also send the sub-cell remainder for the terminal to shift by (protocol v3).
     shift: bool,
 }
 
 fn args() -> Result<Args> {
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, smooth: smooth::env_enabled("MAPTERM_SMOOTH"), shift: std::env::var("MAPTERM_SMOOTH").is_ok_and(|v| v == "shift") };
-    a.smooth |= a.shift;
+    let (smooth, shift) = match std::env::var("MAPTERM_SMOOTH").unwrap_or_default().to_ascii_lowercase().as_str() {
+        "" | "0" => (false, false),
+        "1" => (true, false),
+        "shift" => (true, true),
+        other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
+    };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -71,11 +75,6 @@ fn args() -> Result<Args> {
             }
             "-z" | "--zoom" => a.zoom = Some(it.next().context("-z ZOOM")?.parse()?),
             "--light" => a.light = true,
-            "--smooth" => a.smooth = true,
-            "--smooth-shift" => {
-                a.smooth = true;
-                a.shift = true;
-            }
             "--snapshot" => {
                 let v = it.next().context("--snapshot COLSxROWS")?;
                 let (c, r) = v.split_once('x').context("--snapshot COLSxROWS")?;
@@ -176,6 +175,8 @@ async fn main() -> Result<()> {
     let mut errors = 0usize;
     let mut labels = true;
     let mut smooth_on = a.smooth;
+    // `s` only toggles smooth scrolling when MAPTERM_SMOOTH opted in to the experiment.
+    let smooth_available = a.smooth;
     let shift_mode = a.shift;
     let mut ctl = Controller::new(cam, src.min_zoom as f64, src.max_zoom as f64 + 3.0);
     // Smooth mode: pixel mouse when the terminal reports its pixel size; in shift mode drags
@@ -297,7 +298,7 @@ async fn main() -> Result<()> {
                                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
                                     KeyCode::Char('n') => labels = !labels,
-                                    KeyCode::Char('s') => {
+                                    KeyCode::Char('s') if smooth_available => {
                                         smooth_on = !smooth_on;
                                         apply_smooth(&mut ctl, smooth_on)?;
                                         if !smooth_on {
