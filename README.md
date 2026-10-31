@@ -16,8 +16,10 @@ mapterm --snapshot 120x40 --at 38.8895,-77.0353           # print one frame and 
 - **Rendering:** braille lines (2x4 dots per cell), area fills as cell backgrounds, labels with
   collision avoidance, ancestor tiles as stand-ins while loading, host overlays (markers, lines).
 
-Keys: arrows/hjkl pan · `+`/`-` zoom · wheel zooms toward the cursor · swipe sideways, drag or
-shift+wheel to pan · double-click zooms in · right-click zooms out · `n` labels · `t` theme · `q` quit.
+Keys follow MapLibre GL conventions: wheel zooms toward the cursor · drag pans with inertia ·
+double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan · `+`/`-` zoom
+to the next level · sideways swipe pans · `n` labels · `t` theme · `q` quit. Clicks are reported via
+`Controller::take_click` for feature inspection.
 
 **Smooth panning (opt-in):** `--smooth`, `MAPTERM_SMOOTH=1`, or `s` at runtime (it deliberately ignores
 a terminal-wide `SMOOTH_SCROLL`, since smooth mode changes what the wheel does). On terminals with the
