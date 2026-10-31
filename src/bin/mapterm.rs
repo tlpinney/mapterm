@@ -17,25 +17,30 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
+use std::io::Write;
+
 use termtiles::{
-    Camera, MapWidget, Source, Style, Theme, TileId, TileStore, Viewport, prepare, source::OPENFREEMAP,
+    Camera, MapWidget, Source, Style, Theme, TileId, TileStore, Viewport, prepare, smooth, source::OPENFREEMAP,
     store::Prepared,
 };
 use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS]
+usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--smooth] [--snapshot COLSxROWS]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL
                 (default: OpenFreeMap planet)
   --at          start position (default: the source's center)
   -z            start zoom
   --light       light theme
+  --smooth      pixel smooth trackpad panning on terminals with the smooth-scroll region
+                protocol (tlpinney/ghostty); also SMOOTH_SCROLL=1. The trackpad then pans
+                up/down instead of zooming; zoom with +/-, double-click, right-click
   --snapshot    render one frame to stdout as text and exit
 
 keys: arrows/hjkl pan · +/- zoom · wheel zooms at cursor · swipe sideways/drag/shift+wheel pan ·
-      double-click zoom in · right-click zoom out · n labels · t theme · q quit";
+      double-click zoom in · right-click zoom out · s smooth on/off · n labels · t theme · q quit";
 
 struct Args {
     source: String,
@@ -43,10 +48,11 @@ struct Args {
     zoom: Option<f64>,
     light: bool,
     snapshot: Option<(u16, u16)>,
+    smooth: bool,
 }
 
 fn args() -> Result<Args> {
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, smooth: smooth::env_enabled() };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -57,6 +63,7 @@ fn args() -> Result<Args> {
             }
             "-z" | "--zoom" => a.zoom = Some(it.next().context("-z ZOOM")?.parse()?),
             "--light" => a.light = true,
+            "--smooth" => a.smooth = true,
             "--snapshot" => {
                 let v = it.next().context("--snapshot COLSxROWS")?;
                 let (c, r) = v.split_once('x').context("--snapshot COLSxROWS")?;
@@ -141,11 +148,17 @@ async fn main() -> Result<()> {
     let mut pending: HashSet<TileId> = HashSet::new();
     let mut errors = 0usize;
     let mut labels = true;
+    let mut smooth_on = a.smooth;
     let mut drag: Option<(u16, u16)> = None;
     let mut last_click: Option<(Instant, u16, u16)> = None;
     let mut map_area = Rect::default();
     let result: Result<()> = async {
         loop {
+            if smooth_on {
+                // Stay on the row grid so each wheel event moves the content exactly one row.
+                cam.snap_rows();
+                crossterm::execute!(std::io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
+            }
             term.draw(|f| {
                 let [m, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
                 map_area = m;
@@ -169,9 +182,18 @@ async fn main() -> Result<()> {
                 if errors > 0 {
                     spans.push(Span::styled(format!("{errors} failed "), TStyle::new().fg(Color::Red)));
                 }
+                if smooth_on {
+                    spans.push(Span::styled("smooth ", TStyle::new().fg(Color::Cyan)));
+                }
                 spans.push(Span::styled(format!("· {} · © OpenStreetMap · ? keys in --help · q quit", src.name), dim));
                 f.render_widget(Paragraph::new(Line::from(spans)), s);
             })?;
+            if smooth_on {
+                // Declare after drawing, in the same synchronized update as the cells.
+                let mut out = std::io::stdout();
+                out.write_all(smooth::declare(0, map_area, &cam).as_bytes())?;
+                crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;
+            }
 
             // Fetch what the view needs that we don't have yet.
             let vp = Viewport::new(&cam, map_area);
@@ -203,6 +225,14 @@ async fn main() -> Result<()> {
                             KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('a') => cam.zoom_by(0.5, max),
                             KeyCode::Char('-') | KeyCode::Char('_') | KeyCode::Char('z') => cam.zoom_by(-0.5, max),
                             KeyCode::Char('n') => labels = !labels,
+                            KeyCode::Char('s') => {
+                                smooth_on = !smooth_on;
+                                if !smooth_on {
+                                    let mut out = std::io::stdout();
+                                    out.write_all(smooth::SMOOTH_OFF.as_bytes())?;
+                                    out.flush()?;
+                                }
+                            }
                             KeyCode::Char('t') => {
                                 style.theme = if style.theme == Theme::Dark { Theme::Light } else { Theme::Dark };
                                 store.clear();
@@ -214,6 +244,10 @@ async fn main() -> Result<()> {
                             let inside = map_area.contains(ratatui::layout::Position::new(m.column, m.row));
                             let shift = m.modifiers.contains(KeyModifiers::SHIFT);
                             match m.kind {
+                                // Smooth mode: the terminal sends one wheel event per row of trackpad
+                                // travel and shifts the map by the remainder, so pan exactly one row.
+                                MouseEventKind::ScrollUp if smooth_on && inside => cam.pan_rows(-1),
+                                MouseEventKind::ScrollDown if smooth_on && inside => cam.pan_rows(1),
                                 // Web-map style: the wheel zooms toward the cursor, shift+wheel pans.
                                 MouseEventKind::ScrollUp if shift => cam.pan_cells(0.0, -2.0),
                                 MouseEventKind::ScrollDown if shift => cam.pan_cells(0.0, 2.0),
@@ -258,6 +292,9 @@ async fn main() -> Result<()> {
         }
     }
     .await;
+    if smooth_on {
+        let _ = std::io::stdout().write_all(smooth::SMOOTH_OFF.as_bytes());
+    }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
