@@ -1,4 +1,4 @@
-//! mapterm: a terminal map viewer on top of termtiles.
+//! mapterm: the terminal map viewer built on the mapterm library.
 
 use std::{
     collections::HashSet,
@@ -19,7 +19,7 @@ use ratatui::{
 };
 use std::io::Write;
 
-use termtiles::{
+use mapterm::{
     Controller,
     Camera, MapWidget, Source, Style, Theme, TileId, TileStore, Viewport, prepare, smooth, source::OPENFREEMAP,
     store::Prepared,
@@ -190,7 +190,7 @@ async fn main() -> Result<()> {
     if smooth_on {
         apply_smooth(&mut ctl, true)?;
     }
-    let mut clicked: Option<termtiles::Click> = None;
+    let mut clicked: Option<mapterm::Click> = None;
     let mut map_area = Rect::default();
     let mut frame_ms = 0.0f64;
     let result: Result<()> = async {

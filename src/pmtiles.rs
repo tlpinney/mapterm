@@ -1,5 +1,5 @@
 //! PMTiles v3: header, Hilbert tile ids and directory lookup.
-//! Spec: https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md
+//! Spec: <https://github.com/protomaps/PMTiles/blob/main/spec/v3/spec.md>
 
 use anyhow::{Result, bail};
 

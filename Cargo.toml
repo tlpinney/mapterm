@@ -1,8 +1,8 @@
 [package]
-name = "termtiles"
+name = "mapterm"
 version = "0.1.0"
 edition = "2024"
-description = "Vector map tiles (PMTiles or XYZ MVT) rendered in the terminal as a ratatui widget"
+description = "A map in your terminal: vector tiles (PMTiles, OpenFreeMap) as a ratatui widget, plus the mapterm viewer"
 license = "MIT"
 
 [dependencies]

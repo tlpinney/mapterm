@@ -1,30 +1,74 @@
-# termtiles
+# mapterm
 
-Vector map tiles in the terminal: a ratatui map widget plus the `mapterm` viewer.
+A map in your terminal. `mapterm` draws OpenStreetMap vector tiles with braille
+characters, pans and zooms like a web map, and works over SSH. The same code is a
+library: a [ratatui](https://ratatui.rs) map widget you can drop into your own
+terminal apps.
 
+```sh
+cargo install --path .         # installs the `mapterm` command
+
+mapterm                                                # OpenFreeMap planet, no key needed
+mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lon) at zoom 13
+mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over HTTP range requests
+mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, offline
+mapterm --snapshot 120x40 --at 38.8895,-77.0353         # print one frame as text and exit
 ```
-mapterm                                              # OpenFreeMap planet (OpenMapTiles schema)
-mapterm https://build.protomaps.com/20261031.pmtiles  # Protomaps planet over HTTP range requests
-mapterm dmv.pmtiles --at 38.8899,-77.0091 -z 13          # local extract, offline
-mapterm --snapshot 120x40 --at 38.8895,-77.0353           # print one frame and exit
-```
 
-- **Sources:** PMTiles v3 (local file or HTTP ranges; own reader), XYZ `{z}/{x}/{y}` templates,
-  TileJSON. 30 s timeouts, 8 MB fetch cap, 32 MB inflate cap, 30-day disk cache for HTTP.
-- **Decoding:** own bounds-checked MVT/protobuf decoder (no codegen).
-- **Styles:** Protomaps basemap and OpenMapTiles schemas, dark and light themes.
-- **Rendering:** braille lines (2x4 dots per cell), area fills as cell backgrounds, labels with
-  collision avoidance, ancestor tiles as stand-ins while loading, host overlays (markers, lines).
+## Controls
 
-Keys follow MapLibre GL conventions: wheel zooms toward the cursor · drag pans with inertia ·
-double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan · `+`/`-` zoom
-to the next level · sideways swipe pans · `n` labels · `t` theme · `q` quit. Clicks are reported via
-`Controller::take_click` for feature inspection.
+They follow the MapLibre GL / Mapbox GL defaults:
 
-**Smooth panning (opt-in):** `--smooth`, `MAPTERM_SMOOTH=1`, or `s` at runtime (it deliberately ignores
-a terminal-wide `SMOOTH_SCROLL`, since smooth mode changes what the wheel does). On terminals with the
-experimental smooth-scroll region protocol ([tlpinney/ghostty](https://github.com/tlpinney/ghostty),
-relayed by tlpinney/herdr), two-finger up/down pans the map pixel-smoothly; zoom then uses `+`/`-`,
-double-click and right-click. Other terminals ignore the declaration and pan by rows.
+- **Scroll / two-finger swipe up and down:** zoom toward the cursor
+- **Drag:** pan, and a fling keeps gliding (inertia)
+- **Double-click:** zoom in; **shift+double-click:** zoom out
+- **Shift+drag:** box zoom
+- **Arrows** (or `hjkl`) pan, **`+`/`-`** zoom to the next level, both eased
+- Terminal extras: sideways swipes pan; `n` labels, `t` light/dark theme, `q` quit
 
-Map data © OpenStreetMap contributors.
+## What it reads
+
+- **PMTiles v3**, from a local file or over HTTP range requests (own reader)
+- **XYZ** URL templates (`…/{z}/{x}/{y}.pbf`) and **TileJSON** endpoints
+- Vector tiles in the **OpenMapTiles** schema (OpenFreeMap, MapTiler) or the
+  **Protomaps** basemap schema, in dark and light styles
+
+Every download has a 30 s timeout and an 8 MB cap, decompression is capped at
+32 MB, and HTTP tiles are cached on disk for 30 days (`~/.cache/mapterm`).
+
+## Rendering
+
+Roads, rivers and boundaries are braille lines (2x4 dots per character); water,
+parks and buildings fill the cell background; labels avoid each other. While
+sharper tiles load, lower-zoom tiles stand in for them.
+
+## Smooth scrolling (experimental, opt-in)
+
+Terminals move content a whole character at a time. With the experimental
+smooth-scroll protocol of [Ghostty Smooth](https://github.com/tlpinney/ghostty)
+(relayed through the [herdr](https://github.com/tlpinney/herdr) multiplexer),
+mapterm can move by single pixels:
+
+- `--smooth-shift` (or `MAPTERM_SMOOTH=shift`): dragging follows the pointer
+  pixel by pixel; scrolling still zooms.
+- `--smooth` (or `MAPTERM_SMOOTH=1`): two-finger up/down pans smoothly instead
+  of zooming.
+- `s` toggles it at runtime. Other terminals ignore the protocol and behave as
+  usual.
+
+## Use it in your own app
+
+The crate's library has the pieces mapterm is built from:
+
+- `Source` opens a PMTiles file or URL, an XYZ template, or a TileJSON URL
+- `prepare` decodes and styles one tile; `TileStore` keeps the prepared tiles
+- `MapWidget` is the ratatui widget, with `Overlay` markers and lines on top
+- `Controller` turns crossterm mouse and key events into camera moves, and
+  reports single clicks (`take_click`) so you can act on the spot under them
+
+`src/bin/mapterm.rs` is a complete example: about 300 lines that fetch the
+tiles the view needs, feed input to the controller, and draw the widget.
+
+## License
+
+MIT. Map data © OpenStreetMap contributors.

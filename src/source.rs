@@ -24,7 +24,7 @@ const DISK_TTL: Duration = Duration::from_secs(30 * 86400);
 
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
-        .user_agent(concat!("termtiles/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("mapterm/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .build()
@@ -257,7 +257,7 @@ impl Source {
 
 fn cache_root() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".cache").join("termtiles")
+    home.join(".cache").join("mapterm")
 }
 
 fn hash(s: &str) -> String {

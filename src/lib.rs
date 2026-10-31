@@ -1,4 +1,4 @@
-//! termtiles: vector map tiles in the terminal.
+//! mapterm: a map in your terminal. This is the library behind the `mapterm` viewer.
 //!
 //! - [`source::Source`] reads tiles from PMTiles (file or HTTP range requests), XYZ URLs or
 //!   TileJSON, with timeouts, size caps and a disk cache.
