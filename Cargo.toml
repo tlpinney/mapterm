@@ -16,8 +16,8 @@ tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "
 unicode-width = "0.2.2"
 
 [[bin]]
-name = "tmap"
-path = "src/bin/tmap.rs"
+name = "mapterm"
+path = "src/bin/mapterm.rs"
 
 [profile.dev.package."*"]
 opt-level = 3

@@ -1,4 +1,4 @@
-//! tmap: a terminal map viewer on top of termtiles.
+//! mapterm: a terminal map viewer on top of termtiles.
 
 use std::{
     collections::HashSet,
@@ -23,9 +23,9 @@ use termtiles::{
 };
 use tokio::sync::{Semaphore, mpsc};
 
-const USAGE: &str = "tmap -- vector map tiles in the terminal
+const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: tmap [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS]
+usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL
                 (default: OpenFreeMap planet)

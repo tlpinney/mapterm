@@ -1,12 +1,12 @@
 # termtiles
 
-Vector map tiles in the terminal: a ratatui map widget plus the `tmap` viewer.
+Vector map tiles in the terminal: a ratatui map widget plus the `mapterm` viewer.
 
 ```
-tmap                                              # OpenFreeMap planet (OpenMapTiles schema)
-tmap https://build.protomaps.com/20261031.pmtiles  # Protomaps planet over HTTP range requests
-tmap dmv.pmtiles --at 38.8899,-77.0091 -z 13          # local extract, offline
-tmap --snapshot 120x40 --at 38.8895,-77.0353           # print one frame and exit
+mapterm                                              # OpenFreeMap planet (OpenMapTiles schema)
+mapterm https://build.protomaps.com/20261031.pmtiles  # Protomaps planet over HTTP range requests
+mapterm dmv.pmtiles --at 38.8899,-77.0091 -z 13          # local extract, offline
+mapterm --snapshot 120x40 --at 38.8895,-77.0353           # print one frame and exit
 ```
 
 - **Sources:** PMTiles v3 (local file or HTTP ranges; own reader), XYZ `{z}/{x}/{y}` templates,
