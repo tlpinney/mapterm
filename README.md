@@ -16,7 +16,7 @@ tmap --snapshot 120x40 --at 38.8895,-77.0353           # print one frame and exi
 - **Rendering:** braille lines (2x4 dots per cell), area fills as cell backgrounds, labels with
   collision avoidance, ancestor tiles as stand-ins while loading, host overlays (markers, lines).
 
-Keys: arrows/hjkl pan · `+`/`-` zoom · scroll/swipe pan · ctrl+scroll zoom · drag · `n` labels ·
-`t` theme · `q` quit.
+Keys: arrows/hjkl pan · `+`/`-` zoom · wheel zooms toward the cursor · swipe sideways, drag or
+shift+wheel to pan · double-click zooms in · right-click zooms out · `n` labels · `t` theme · `q` quit.
 
 Map data © OpenStreetMap contributors.

@@ -1,6 +1,10 @@
 //! tmap: a terminal map viewer on top of termtiles.
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use crossterm::event::{
@@ -30,7 +34,8 @@ usage: tmap [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS]
   --light       light theme
   --snapshot    render one frame to stdout as text and exit
 
-keys: arrows/hjkl pan · +/- zoom · scroll/swipe pan · ctrl+scroll zoom · drag · n labels · t theme · q quit";
+keys: arrows/hjkl pan · +/- zoom · wheel zooms at cursor · swipe sideways/drag/shift+wheel pan ·
+      double-click zoom in · right-click zoom out · n labels · t theme · q quit";
 
 struct Args {
     source: String,
@@ -137,6 +142,7 @@ async fn main() -> Result<()> {
     let mut errors = 0usize;
     let mut labels = true;
     let mut drag: Option<(u16, u16)> = None;
+    let mut last_click: Option<(Instant, u16, u16)> = None;
     let mut map_area = Rect::default();
     let result: Result<()> = async {
         loop {
@@ -205,19 +211,39 @@ async fn main() -> Result<()> {
                             _ => {}
                         },
                         Event::Mouse(m) => {
-                            let zoom = m.modifiers.contains(KeyModifiers::CONTROL);
+                            let inside = map_area.contains(ratatui::layout::Position::new(m.column, m.row));
+                            let shift = m.modifiers.contains(KeyModifiers::SHIFT);
                             match m.kind {
-                                MouseEventKind::ScrollUp if zoom => cam.zoom_by(0.25, max),
-                                MouseEventKind::ScrollDown if zoom => cam.zoom_by(-0.25, max),
-                                MouseEventKind::ScrollUp => cam.pan_cells(0.0, -2.0),
-                                MouseEventKind::ScrollDown => cam.pan_cells(0.0, 2.0),
+                                // Web-map style: the wheel zooms toward the cursor, shift+wheel pans.
+                                MouseEventKind::ScrollUp if shift => cam.pan_cells(0.0, -2.0),
+                                MouseEventKind::ScrollDown if shift => cam.pan_cells(0.0, 2.0),
+                                MouseEventKind::ScrollUp if inside => cam.zoom_at(0.25, max, map_area, m.column, m.row),
+                                MouseEventKind::ScrollDown if inside => cam.zoom_at(-0.25, max, map_area, m.column, m.row),
                                 MouseEventKind::ScrollLeft => cam.pan_cells(-4.0, 0.0),
                                 MouseEventKind::ScrollRight => cam.pan_cells(4.0, 0.0),
-                                MouseEventKind::Down(MouseButton::Left) => drag = Some((m.column, m.row)),
+                                MouseEventKind::Down(MouseButton::Left) if inside => {
+                                    let now = Instant::now();
+                                    let double = last_click.is_some_and(|(t, c, r)| {
+                                        now.duration_since(t) < Duration::from_millis(400)
+                                            && c.abs_diff(m.column) <= 1
+                                            && r.abs_diff(m.row) <= 1
+                                    });
+                                    if double {
+                                        cam.zoom_at(1.0, max, map_area, m.column, m.row);
+                                        last_click = None;
+                                    } else {
+                                        last_click = Some((now, m.column, m.row));
+                                    }
+                                    drag = Some((m.column, m.row));
+                                }
+                                MouseEventKind::Down(MouseButton::Right) if inside => {
+                                    cam.zoom_at(-1.0, max, map_area, m.column, m.row)
+                                }
                                 MouseEventKind::Drag(MouseButton::Left) => {
                                     if let Some((c, r)) = drag {
                                         cam.pan_cells(c as f64 - m.column as f64, r as f64 - m.row as f64);
                                         drag = Some((m.column, m.row));
+                                        last_click = None;
                                     }
                                 }
                                 MouseEventKind::Up(_) => drag = None,

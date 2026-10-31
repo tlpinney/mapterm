@@ -55,6 +55,26 @@ impl Camera {
         self.zoom = (self.zoom + dz).clamp(0.0, max);
     }
 
+    /// Zoom by `dz` keeping the point under cell (col, row) of `area` fixed on screen, the way
+    /// web maps zoom toward the cursor.
+    pub fn zoom_at(&mut self, dz: f64, max: f64, area: Rect, col: u16, row: u16) {
+        let new_zoom = (self.zoom + dz).clamp(0.0, max);
+        if new_zoom == self.zoom {
+            return;
+        }
+        // Dot offset of the cursor from the view center, which stays constant across the zoom.
+        let ox = (col.saturating_sub(area.x) as f64 * 2.0 + 1.0) - area.width as f64;
+        let oy = (row.saturating_sub(area.y) as f64 * 4.0 + 2.0) - area.height as f64 * 2.0;
+        let (cx, cy) = to_world(self.lon, self.lat);
+        let old = TILE_DOTS * 2f64.powf(self.zoom);
+        let new = TILE_DOTS * 2f64.powf(new_zoom);
+        let (px, py) = (cx + ox / old, cy + oy / old);
+        let (lon, lat) = to_lonlat(px - ox / new, (py - oy / new).clamp(0.0, 1.0));
+        self.lon = ((lon + 540.0) % 360.0) - 180.0;
+        self.lat = lat;
+        self.zoom = new_zoom;
+    }
+
     /// Integer tile zoom to fetch for this camera.
     pub fn tile_zoom(&self, min: u8, max: u8) -> u8 {
         ((self.zoom + 0.2).floor() as i64).clamp(min as i64, max as i64) as u8
@@ -466,6 +486,17 @@ mod tests {
         let t = vp.tiles(12);
         let (x, y) = to_world(-77.0353, 38.8895);
         assert_eq!(t[0], (12, (x * 4096.0) as u32, (y * 4096.0) as u32));
+    }
+
+    #[test]
+    fn zoom_at_keeps_cursor_point() {
+        let area = Rect::new(0, 0, 100, 40);
+        let mut cam = Camera::new(-77.0353, 38.8895, 12.0);
+        let before = Viewport::new(&cam, area).cell_to_lonlat(80, 10);
+        cam.zoom_at(1.0, 18.0, area, 80, 10);
+        let after = Viewport::new(&cam, area).cell_to_lonlat(80, 10);
+        assert!((before.0 - after.0).abs() < 1e-6 && (before.1 - after.1).abs() < 1e-6, "{before:?} {after:?}");
+        assert_eq!(cam.zoom, 13.0);
     }
 
     #[test]
