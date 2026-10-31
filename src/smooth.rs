@@ -62,21 +62,21 @@ pub fn declare(id: u32, area: Rect, cam: &Camera) -> String {
     )
 }
 
-/// Like [`declare`], with an app-set shift (protocol v3): the region's last row and last
-/// column are overscan, and the terminal draws the region `ox`/`oy` thousandths of a cell
-/// left/up. Pass the camera from [`snap`].
-pub fn declare_shift(id: u32, area: Rect, cell_cam: &Camera, ox: u16, oy: u16) -> String {
+/// A shift-only region (protocol v3): the region's last row and last column are overscan,
+/// and the terminal draws the region `ox`/`oy` thousandths of a cell left/up. It declares
+/// `pos` 0 and `max` 0, nothing to scroll, so the terminal leaves the wheel to the app (the
+/// map keeps zooming on scroll) and the shift only carries what the app moves itself, like a
+/// drag. Render with the camera from [`snap`].
+pub fn declare_shift(id: u32, area: Rect, ox: u16, oy: u16) -> String {
     if area.width < 2 || area.height < 2 {
         return format!("\x1b_smooth;off;{id}\x1b\\");
     }
     format!(
-        "\x1b_smooth;{id};{};{};{};{};{};{};{ox};{oy}\x1b\\",
+        "\x1b_smooth;{id};{};{};{};{};0;0;{ox};{oy}\x1b\\",
         area.y,
         area.bottom() - 1,
         area.x,
         area.right() - 1,
-        pos(cell_cam),
-        world_rows(cell_cam.zoom) as u64,
     )
 }
 
@@ -124,9 +124,8 @@ mod tests {
 
     #[test]
     fn shift_declaration_format() {
-        let cam = Camera::new(0.0, 0.0, 0.0);
-        let s = declare_shift(3, Rect::new(0, 1, 80, 20), &cam, 250, 750);
-        assert_eq!(s, "\x1b_smooth;3;1;20;0;79;32;64;250;750\x1b\\");
+        let s = declare_shift(3, Rect::new(0, 1, 80, 20), 250, 750);
+        assert_eq!(s, "\x1b_smooth;3;1;20;0;79;0;0;250;750\x1b\\");
     }
 
     #[test]

@@ -37,8 +37,9 @@ usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--smooth | --smooth-
   --smooth      pixel smooth trackpad panning on terminals with the smooth-scroll region
                 protocol (tlpinney/ghostty); also MAPTERM_SMOOTH=1. The trackpad then pans
                 up/down instead of zooming; zoom with +/-, double-click, right-click
-  --smooth-shift  --smooth plus pixel-exact dragging: the terminal shifts the map by the
-                sub-cell remainder (needs smooth protocol v3); also MAPTERM_SMOOTH=shift
+  --smooth-shift  pixel-exact dragging instead: the terminal shifts the map by the sub-cell
+                remainder, and the wheel keeps zooming (needs smooth protocol v3, the
+                tlpinney/ghostty smooth branch); also MAPTERM_SMOOTH=shift
   --snapshot    render one frame to stdout as text and exit
 
 keys: arrows/hjkl pan · +/- zoom · wheel zooms at cursor · swipe sideways/drag/shift+wheel pan ·
@@ -173,7 +174,7 @@ async fn main() -> Result<()> {
     let mut errors = 0usize;
     let mut labels = true;
     let mut smooth_on = a.smooth;
-    let shift = a.shift;
+    let shift_mode = a.shift;
     // Last drag position (cells, or pixels in pixel-mouse mode) and the sub-dot remainder.
     let mut drag: Option<(u16, u16)> = None;
     let mut drag_rem = (0.0f64, 0.0f64);
@@ -195,7 +196,7 @@ async fn main() -> Result<()> {
             }
             let t0 = Instant::now();
             // With shift, render on the cell grid and let the terminal draw the sub-cell rest.
-            let (draw_cam, ox, oy) = if smooth_on && shift { smooth::snap(&cam) } else { (cam, 0, 0) };
+            let (draw_cam, ox, oy) = if smooth_on && shift_mode { smooth::snap(&cam) } else { (cam, 0, 0) };
             term.draw(|f| {
                 let [m, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
                 map_area = m;
@@ -220,7 +221,7 @@ async fn main() -> Result<()> {
                     spans.push(Span::styled(format!("{errors} failed "), TStyle::new().fg(Color::Red)));
                 }
                 if smooth_on {
-                    let tag = match (shift, px.is_some()) {
+                    let tag = match (shift_mode, px.is_some()) {
                         (true, true) => "smooth·shift·px ",
                         (true, false) => "smooth·shift ",
                         (false, true) => "smooth·px ",
@@ -236,8 +237,8 @@ async fn main() -> Result<()> {
             if smooth_on {
                 // Declare after drawing, in the same synchronized update as the cells.
                 let mut out = std::io::stdout();
-                let decl = if shift {
-                    smooth::declare_shift(0, map_area, &draw_cam, ox, oy)
+                let decl = if shift_mode {
+                    smooth::declare_shift(0, map_area, ox, oy)
                 } else {
                     smooth::declare(0, map_area, &cam)
                 };
@@ -316,15 +317,16 @@ async fn main() -> Result<()> {
                                 m.row = (raw.row as f64 / ch) as u16;
                             }
                             let inside = map_area.contains(ratatui::layout::Position::new(m.column, m.row));
-                            let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+                            let shift_key = m.modifiers.contains(KeyModifiers::SHIFT);
                             match m.kind {
                                 // Smooth mode: the terminal sends one wheel event per row of trackpad
                                 // travel and shifts the map by the remainder, so pan exactly one row.
-                                MouseEventKind::ScrollUp if smooth_on && inside => cam.pan_rows(-1),
-                                MouseEventKind::ScrollDown if smooth_on && inside => cam.pan_rows(1),
+                                // (With --smooth-shift the terminal leaves the wheel to us: it zooms.)
+                                MouseEventKind::ScrollUp if smooth_on && !shift_mode && inside => cam.pan_rows(-1),
+                                MouseEventKind::ScrollDown if smooth_on && !shift_mode && inside => cam.pan_rows(1),
                                 // Web-map style: the wheel zooms toward the cursor, shift+wheel pans.
-                                MouseEventKind::ScrollUp if shift => cam.pan_cells(0.0, -2.0),
-                                MouseEventKind::ScrollDown if shift => cam.pan_cells(0.0, 2.0),
+                                MouseEventKind::ScrollUp if shift_key => cam.pan_cells(0.0, -2.0),
+                                MouseEventKind::ScrollDown if shift_key => cam.pan_cells(0.0, 2.0),
                                 MouseEventKind::ScrollUp if inside => cam.zoom_at(0.25, max, map_area, m.column, m.row),
                                 MouseEventKind::ScrollDown if inside => cam.zoom_at(-0.25, max, map_area, m.column, m.row),
                                 MouseEventKind::ScrollLeft => cam.pan_cells(-4.0, 0.0),
@@ -362,7 +364,7 @@ async fn main() -> Result<()> {
                                         drag_rem = (drag_rem.0 + dx, drag_rem.1 + dy);
                                         let whole = (drag_rem.0.trunc(), drag_rem.1.trunc());
                                         drag_rem = (drag_rem.0 - whole.0, drag_rem.1 - whole.1);
-                                        if smooth_on && shift {
+                                        if smooth_on && shift_mode {
                                             // The terminal shifts by the sub-cell rest, so follow
                                             // the pointer exactly.
                                             cam.pan_dots(dx, dy);
