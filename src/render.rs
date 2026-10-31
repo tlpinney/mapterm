@@ -426,8 +426,13 @@ impl Widget for MapWidget<'_> {
                     }
                 }
                 Paint::Label { text, color, priority, bold } if self.labels => {
-                    let pts: Vec<(f64, f64)> = it.parts.iter().flatten().map(to_dot).filter(|p| inside(*p)).collect();
-                    if let Some(p) = pts.get(pts.len() / 2) {
+                    // Anchor at fixed vertices along the feature (not the middle of whatever is on
+                    // screen), so labels stay put while the map pans.
+                    let anchor = it.parts.iter().find_map(|part| {
+                        let step = (part.len() / 3).max(1);
+                        (step / 2..part.len()).step_by(step).map(|i| to_dot(&part[i])).find(|p| inside(*p))
+                    });
+                    if let Some(p) = anchor.as_ref() {
                         let mut st = TStyle::new().fg(*color);
                         if *bold {
                             st = st.add_modifier(Modifier::BOLD);

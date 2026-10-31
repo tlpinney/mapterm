@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
     let mut drag: Option<(u16, u16)> = None;
     let mut last_click: Option<(Instant, u16, u16)> = None;
     let mut map_area = Rect::default();
+    let mut frame_ms = 0.0f64;
     let result: Result<()> = async {
         loop {
             if smooth_on {
@@ -159,6 +160,7 @@ async fn main() -> Result<()> {
                 cam.snap_rows();
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
+            let t0 = Instant::now();
             term.draw(|f| {
                 let [m, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
                 map_area = m;
@@ -185,9 +187,11 @@ async fn main() -> Result<()> {
                 if smooth_on {
                     spans.push(Span::styled("smooth ", TStyle::new().fg(Color::Cyan)));
                 }
+                spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
                 spans.push(Span::styled(format!("· {} · © OpenStreetMap · ? keys in --help · q quit", src.name), dim));
                 f.render_widget(Paragraph::new(Line::from(spans)), s);
             })?;
+            frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
             if smooth_on {
                 // Declare after drawing, in the same synchronized update as the cells.
                 let mut out = std::io::stdout();
@@ -204,16 +208,29 @@ async fn main() -> Result<()> {
             }
 
             tokio::select! {
-                Some((id, r)) = rx.recv() => {
-                    pending.remove(&id);
-                    match r {
-                        Ok(t) => store.insert(id, t),
-                        Err(_) => errors += 1,
+                Some(done) = rx.recv() => {
+                    let mut batch = vec![done];
+                    while let Ok(d) = rx.try_recv() {
+                        batch.push(d);
+                    }
+                    for (id, r) in batch {
+                        pending.remove(&id);
+                        match r {
+                            Ok(t) => store.insert(id, t),
+                            Err(_) => errors += 1,
+                        }
                     }
                 }
-                Some(ev) = krx.recv() => {
+                Some(first) = krx.recv() => {
                     let step = 6.0;
                     let max = src.max_zoom as f64 + 3.0;
+                    // Handle everything already queued before drawing again, so a fast drag or
+                    // flick catches up in one frame instead of trailing the pointer.
+                    let mut queued = vec![first];
+                    while let Ok(ev) = krx.try_recv() {
+                        queued.push(ev);
+                    }
+                    for ev in queued {
                     match ev {
                         Event::Key(k) if k.kind != KeyEventKind::Release => match k.code {
                             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
@@ -285,6 +302,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         _ => {}
+                    }
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {}
