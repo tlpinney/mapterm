@@ -51,6 +51,11 @@ impl Camera {
         self.lat = lat;
     }
 
+    /// Move by braille dots (2 per column, 4 per row), the map's finest drawing step.
+    pub fn pan_dots(&mut self, dx: f64, dy: f64) {
+        self.pan_cells(dx / 2.0, dy / 4.0);
+    }
+
     pub fn zoom_by(&mut self, dz: f64, max: f64) {
         self.zoom = (self.zoom + dz).clamp(0.0, max);
     }

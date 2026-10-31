@@ -82,6 +82,21 @@ fn args() -> Result<Args> {
 
 type Done = (TileId, Result<Prepared>);
 
+/// Cell size in pixels, when the terminal reports its pixel size (needed for SGR-pixels mouse).
+fn cell_px() -> Option<(f64, f64)> {
+    let ws = crossterm::terminal::window_size().ok()?;
+    (ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0)
+        .then(|| (ws.width as f64 / ws.columns as f64, ws.height as f64 / ws.rows as f64))
+}
+
+/// Turn SGR-pixels mouse reporting (DEC 1016) on or off. While on, mouse positions arrive in
+/// pixels in the column/row fields.
+fn set_pixel_mouse(on: bool) -> std::io::Result<()> {
+    let mut out = std::io::stdout();
+    out.write_all(if on { b"\x1b[?1016h" } else { b"\x1b[?1016l" })?;
+    out.flush()
+}
+
 fn fetch(src: &Arc<Source>, sem: &Arc<Semaphore>, style: Style, id: TileId, tx: mpsc::UnboundedSender<Done>) {
     let (src, sem) = (src.clone(), sem.clone());
     tokio::spawn(async move {
@@ -149,15 +164,23 @@ async fn main() -> Result<()> {
     let mut errors = 0usize;
     let mut labels = true;
     let mut smooth_on = a.smooth;
+    // Last drag position (cells, or pixels in pixel-mouse mode) and the sub-dot remainder.
     let mut drag: Option<(u16, u16)> = None;
+    let mut drag_rem = (0.0f64, 0.0f64);
+    // Pixel mouse is used in smooth mode when the terminal reports its pixel size.
+    let mut px: Option<(f64, f64)> = None;
+    if smooth_on {
+        px = cell_px();
+        if px.is_some() {
+            set_pixel_mouse(true)?;
+        }
+    }
     let mut last_click: Option<(Instant, u16, u16)> = None;
     let mut map_area = Rect::default();
     let mut frame_ms = 0.0f64;
     let result: Result<()> = async {
         loop {
             if smooth_on {
-                // Stay on the row grid so each wheel event moves the content exactly one row.
-                cam.snap_rows();
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
             let t0 = Instant::now();
@@ -185,7 +208,8 @@ async fn main() -> Result<()> {
                     spans.push(Span::styled(format!("{errors} failed "), TStyle::new().fg(Color::Red)));
                 }
                 if smooth_on {
-                    spans.push(Span::styled("smooth ", TStyle::new().fg(Color::Cyan)));
+                    let tag = if px.is_some() { "smooth·px " } else { "smooth " };
+                    spans.push(Span::styled(tag, TStyle::new().fg(Color::Cyan)));
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
                 spans.push(Span::styled(format!("· {} · © OpenStreetMap · ? keys in --help · q quit", src.name), dim));
@@ -244,6 +268,8 @@ async fn main() -> Result<()> {
                             KeyCode::Char('n') => labels = !labels,
                             KeyCode::Char('s') => {
                                 smooth_on = !smooth_on;
+                                px = if smooth_on { cell_px() } else { None };
+                                set_pixel_mouse(px.is_some())?;
                                 if !smooth_on {
                                     let mut out = std::io::stdout();
                                     out.write_all(smooth::SMOOTH_OFF.as_bytes())?;
@@ -257,7 +283,16 @@ async fn main() -> Result<()> {
                             }
                             _ => {}
                         },
-                        Event::Mouse(m) => {
+                        Event::Resize(..) if px.is_some() => px = cell_px(),
+                        Event::Mouse(raw) => {
+                            // In pixel-mouse mode positions are pixels; keep them for dragging and
+                            // use the cell for everything else.
+                            let pix = (raw.column, raw.row);
+                            let mut m = raw;
+                            if let Some((cw, ch)) = px {
+                                m.column = (raw.column as f64 / cw) as u16;
+                                m.row = (raw.row as f64 / ch) as u16;
+                            }
                             let inside = map_area.contains(ratatui::layout::Position::new(m.column, m.row));
                             let shift = m.modifiers.contains(KeyModifiers::SHIFT);
                             match m.kind {
@@ -285,15 +320,28 @@ async fn main() -> Result<()> {
                                     } else {
                                         last_click = Some((now, m.column, m.row));
                                     }
-                                    drag = Some((m.column, m.row));
+                                    drag = Some(if px.is_some() { pix } else { (m.column, m.row) });
+                                    drag_rem = (0.0, 0.0);
                                 }
                                 MouseEventKind::Down(MouseButton::Right) if inside => {
                                     cam.zoom_at(-1.0, max, map_area, m.column, m.row)
                                 }
                                 MouseEventKind::Drag(MouseButton::Left) => {
                                     if let Some((c, r)) = drag {
-                                        cam.pan_cells(c as f64 - m.column as f64, r as f64 - m.row as f64);
-                                        drag = Some((m.column, m.row));
+                                        let cur = if px.is_some() { pix } else { (m.column, m.row) };
+                                        // Pointer travel in braille dots (2 per column, 4 per row).
+                                        let (dpx, dpy) = (c as f64 - cur.0 as f64, r as f64 - cur.1 as f64);
+                                        let (dx, dy) = match px {
+                                            Some((cw, ch)) => (dpx * 2.0 / cw, dpy * 4.0 / ch),
+                                            None => (dpx * 2.0, dpy * 4.0),
+                                        };
+                                        // Move in whole dots so every feature shifts by the same
+                                        // amount; carry the remainder to the next event.
+                                        drag_rem = (drag_rem.0 + dx, drag_rem.1 + dy);
+                                        let whole = (drag_rem.0.trunc(), drag_rem.1.trunc());
+                                        drag_rem = (drag_rem.0 - whole.0, drag_rem.1 - whole.1);
+                                        cam.pan_dots(whole.0, whole.1);
+                                        drag = Some(cur);
                                         last_click = None;
                                     }
                                 }
@@ -313,6 +361,7 @@ async fn main() -> Result<()> {
     if smooth_on {
         let _ = std::io::stdout().write_all(smooth::SMOOTH_OFF.as_bytes());
     }
+    let _ = set_pixel_mouse(false);
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
