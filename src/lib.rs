@@ -5,11 +5,13 @@
 //! - [`store::prepare`] decodes MVT and styles features for the Protomaps or OpenMapTiles schema.
 //! - [`render::MapWidget`] draws them with ratatui: braille lines, filled areas, labels and
 //!   host overlays (markers, polylines).
+//! - [`smooth`] opt-in pixel smooth vertical panning for the Ghostty smooth-scroll fork.
 
 pub mod mvt;
 pub mod pbf;
 pub mod pmtiles;
 pub mod render;
+pub mod smooth;
 pub mod source;
 pub mod store;
 pub mod style;

@@ -55,6 +55,20 @@ impl Camera {
         self.zoom = (self.zoom + dz).clamp(0.0, max);
     }
 
+    /// Pan by whole rows, staying on the row grid (used for smooth scrolling, where the
+    /// terminal counts on each wheel event moving the content exactly one row).
+    pub fn pan_rows(&mut self, rows: i64) {
+        let world = TILE_DOTS * 2f64.powf(self.zoom) / 4.0;
+        let (_, y) = to_world(self.lon, self.lat);
+        let r = ((y * world).round() + rows as f64).clamp(0.0, world);
+        self.lat = to_lonlat(0.0, r / world).1;
+    }
+
+    /// Align the vertical position to the row grid.
+    pub fn snap_rows(&mut self) {
+        self.pan_rows(0);
+    }
+
     /// Zoom by `dz` keeping the point under cell (col, row) of `area` fixed on screen, the way
     /// web maps zoom toward the cursor.
     pub fn zoom_at(&mut self, dz: f64, max: f64, area: Rect, col: u16, row: u16) {
