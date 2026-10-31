@@ -1,6 +1,6 @@
 //! Opt-in pixel smooth vertical panning for terminals that implement the experimental
 //! `ESC _ smooth;...` region protocol (tlpinney/ghostty, relayed by tlpinney/herdr).
-//! See SMOOTH_SCROLL.md in that fork.
+//! See SMOOTH.md on that fork's `smooth` branch.
 //!
 //! The map area is declared as a region whose last row is the hidden overscan row. The
 //! terminal accumulates trackpad pixels, shifts the region by the sub-row remainder, and sends
