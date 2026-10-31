@@ -19,7 +19,8 @@ mapterm --snapshot 120x40 --at 38.8895,-77.0353           # print one frame and 
 Keys: arrows/hjkl pan · `+`/`-` zoom · wheel zooms toward the cursor · swipe sideways, drag or
 shift+wheel to pan · double-click zooms in · right-click zooms out · `n` labels · `t` theme · `q` quit.
 
-**Smooth panning (opt-in):** `--smooth`, `SMOOTH_SCROLL=1`, or `s` at runtime. On terminals with the
+**Smooth panning (opt-in):** `--smooth`, `MAPTERM_SMOOTH=1`, or `s` at runtime (it deliberately ignores
+a terminal-wide `SMOOTH_SCROLL`, since smooth mode changes what the wheel does). On terminals with the
 experimental smooth-scroll region protocol ([tlpinney/ghostty](https://github.com/tlpinney/ghostty),
 relayed by tlpinney/herdr), two-finger up/down pans the map pixel-smoothly; zoom then uses `+`/`-`,
 double-click and right-click. Other terminals ignore the declaration and pan by rows.

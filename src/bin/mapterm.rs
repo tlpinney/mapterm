@@ -35,7 +35,7 @@ usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--smooth] [--snapsho
   -z            start zoom
   --light       light theme
   --smooth      pixel smooth trackpad panning on terminals with the smooth-scroll region
-                protocol (tlpinney/ghostty); also SMOOTH_SCROLL=1. The trackpad then pans
+                protocol (tlpinney/ghostty); also MAPTERM_SMOOTH=1. The trackpad then pans
                 up/down instead of zooming; zoom with +/-, double-click, right-click
   --snapshot    render one frame to stdout as text and exit
 
@@ -52,7 +52,7 @@ struct Args {
 }
 
 fn args() -> Result<Args> {
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, smooth: smooth::env_enabled() };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, smooth: smooth::env_enabled("MAPTERM_SMOOTH") };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {

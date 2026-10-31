@@ -15,9 +15,10 @@ use crate::render::{Camera, to_world};
 /// Clears every region this app declared; send on exit or when turning smooth off.
 pub const SMOOTH_OFF: &str = "\x1b_smooth;off\x1b\\";
 
-/// Whether smooth scrolling was asked for (`SMOOTH_SCROLL=1`, the convention pixelscroll.nvim uses).
-pub fn env_enabled() -> bool {
-    std::env::var("SMOOTH_SCROLL").is_ok_and(|v| !v.is_empty() && v != "0")
+/// Whether the environment variable `var` turns smooth scrolling on. Apps pick their own
+/// variable: a terminal-wide `SMOOTH_SCROLL=1` would also flip apps whose wheel does something else.
+pub fn env_enabled(var: &str) -> bool {
+    std::env::var(var).is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
 /// Rows per world height at this zoom (4 braille dots per row).
