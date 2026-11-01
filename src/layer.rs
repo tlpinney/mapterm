@@ -61,6 +61,9 @@ pub struct DrawContext<'a> {
     canvas: &'a mut Canvas,
     /// Pixel mode: fills and lines go here instead of braille dots.
     pix: Option<&'a mut crate::pixels::Pix>,
+    /// Skip fills and lines (pixel mode draws style layers' geometry into tile images; this
+    /// pass only places their labels and markers).
+    pub(crate) geometry_off: bool,
     /// [min_x, min_y, max_x, max_y] of the view in world coordinates.
     view: [f64; 4],
     size: (f64, f64),
@@ -99,6 +102,9 @@ impl DrawContext<'_> {
     /// A polyline in dots, `width` CSS pixels wide, dashed by `dash` (on/off lengths in line
     /// widths). As pixels in pixel mode; otherwise braille, 1 to 3 dots wide.
     pub fn line_px(&mut self, pts: &[(f64, f64)], color: Color, width: f64, dash: Option<&[f64]>) {
+        if self.geometry_off {
+            return;
+        }
         if let Some(p) = self.pix.as_deref_mut() {
             p.stroke(pts, color, width, dash);
             return;
@@ -110,6 +116,9 @@ impl DrawContext<'_> {
 
     /// A polyline in dots.
     pub fn line_dots(&mut self, pts: &[(f64, f64)], color: Color) {
+        if self.geometry_off {
+            return;
+        }
         if let Some(p) = self.pix.as_deref_mut() {
             p.stroke(pts, color, 1.0, None);
             return;
@@ -158,6 +167,9 @@ impl DrawContext<'_> {
 
     /// Fill polygon rings (even-odd, holes allowed), in dots, into cell backgrounds.
     pub fn fill_dots(&mut self, rings: &[Vec<(f64, f64)>], color: Color) {
+        if self.geometry_off {
+            return;
+        }
         match self.pix.as_deref_mut() {
             Some(p) => p.fill(rings, color),
             None => self.canvas.fill(rings, color),
@@ -244,6 +256,7 @@ pub(crate) fn render_into(camera: &Camera, area: Rect, buf: &mut Buffer, pix: Op
         viewport: Viewport::new(camera, area),
         canvas: &mut canvas,
         pix,
+        geometry_off: false,
         view,
         size: (vw, vh),
         markers: Vec::new(),

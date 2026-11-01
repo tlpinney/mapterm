@@ -701,9 +701,43 @@ async fn main() -> Result<()> {
         let mut buf = Buffer::empty(area);
         let t = Instant::now();
         map.view(&cam).render(area, &mut buf);
-        if let (Some(path), Some(f)) = (png, map.take_pixels()) {
-            image::save_buffer(&path, &f.rgba, f.width, f.height, image::ExtendedColorType::Rgba8)?;
-            eprintln!("pixels: {}x{} in {:.1} ms -> {path}", f.width, f.height, t.elapsed().as_secs_f64() * 1000.0);
+        // Pixel mode leaves tiles blank past its per-frame drawing time: draw frames until
+        // all are in, keeping every image sent so far.
+        let mut sent: Vec<mapterm::pixels::PixImage> = Vec::new();
+        let mut last = map.take_pixels();
+        while let Some(f) = last.as_mut().filter(|f| f.pending > 0) {
+            sent.append(&mut f.new);
+            map.view(&cam).render(area, &mut Buffer::empty(area));
+            last = map.take_pixels();
+        }
+        if let Some(f) = last.as_mut() {
+            sent.append(&mut f.new);
+            f.new = std::mem::take(&mut sent);
+        }
+        if let (Some(path), Some(f)) = (png, last) {
+            // The frame put together from its tiles as the terminal would place them.
+            let (cw, ch) = (16u32, 34u32);
+            let (w, h) = (area.width as u32 * cw, area.height as u32 * ch);
+            let mut img = vec![0u8; (w * h * 4) as usize];
+            let images: std::collections::HashMap<u32, &mapterm::pixels::PixImage> = f.new.iter().map(|i| (i.id, i)).collect();
+            for p in &f.placed {
+                let Some(src) = images.get(&p.id) else { continue };
+                let (sx, sy, sw, sh) = p.src;
+                let (dx, dy) = ((p.col - area.x) as u32 * cw + p.x_off, (p.row - area.y) as u32 * ch + p.y_off);
+                for y in 0..sh {
+                    for x in 0..sw {
+                        let (tx, ty) = (dx + x, dy + y);
+                        if tx >= w || ty >= h || sx + x >= src.width || sy + y >= src.height {
+                            continue;
+                        }
+                        let s = ((sy + y) * src.width + sx + x) as usize * 4;
+                        let o = (ty * w + tx) as usize * 4;
+                        img[o..o + 4].copy_from_slice(&src.rgba[s..s + 4]);
+                    }
+                }
+            }
+            image::save_buffer(&path, &img, w, h, image::ExtendedColorType::Rgba8)?;
+            eprintln!("pixels: {} tiles drawn, {} placed, {:.1} ms -> {path}", f.new.len(), f.placed.len(), t.elapsed().as_secs_f64() * 1000.0);
         }
         let out = match a.format.as_str() {
             "ansi" => mapterm::export::to_ansi(&buf),
@@ -721,7 +755,10 @@ async fn main() -> Result<()> {
     let pixels_on = std::env::var("MAPTERM_PIXELS").is_ok_and(|v| !v.is_empty() && v != "0") && mapterm::kitty::supported();
     // Through shared memory when the terminal runs here; inline (compressed) over SSH.
     let pixels_shm = std::env::var_os("SSH_CONNECTION").is_none();
-    let mut pixels_shown: Option<u32> = None;
+    // Tile images placed last frame, to take down the ones that left the view.
+    let mut pixels_placed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // Tiles still blank (drawing or loading): keep drawing frames until they're in.
+    let mut pixels_pending = 0usize;
     let mut kstate = KittyState::default();
     // Terminal image memory to stay within (herdr keeps 64 MiB per pane).
     if let Some(mb) = std::env::var("MAPTERM_KITTY_BUDGET_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
@@ -968,16 +1005,27 @@ async fn main() -> Result<()> {
                     out.write_all(cmds.as_bytes())?;
                 }
                 if pixels_on && let Some(f) = map.take_pixels() {
-                    // Above the imagery (-1000 and up), under the text. Two ids in turn: the new
-                    // frame goes up before the old one is dropped, so nothing flickers.
-                    let id = if pixels_shown == Some(0x7f00_0001) { 0x7f00_0002 } else { 0x7f00_0001 };
+                    // New tile images once; then every tile is placed, above the imagery
+                    // (-1000 and up) and under the text, one image pixel per screen pixel.
                     let t = Instant::now();
-                    let cmds = mapterm::kitty::show_rgba(id, f.width, f.height, &f.rgba, map_area.x, map_area.y, map_area.width, map_area.height, -500, pixels_shm);
-                    out.write_all(cmds.as_bytes())?;
-                    if let Some(old) = pixels_shown.replace(id) {
-                        out.write_all(mapterm::kitty::free(old).as_bytes())?;
+                    let mut cmds = String::new();
+                    for img in &f.new {
+                        cmds.push_str(&mapterm::kitty::transmit_rgba(img.id, img.width, img.height, &img.rgba, pixels_shm));
                     }
-                    dlog(|| format!("pixels: {}x{} frame, {} bytes of commands, {:.1} ms to send, draw {frame_ms:.1} ms", f.width, f.height, cmds.len(), t.elapsed().as_secs_f64() * 1000.0));
+                    let now: std::collections::HashSet<u32> = f.placed.iter().map(|p| p.id).collect();
+                    for id in pixels_placed.difference(&now) {
+                        cmds.push_str(&mapterm::kitty::unplace(*id));
+                    }
+                    for p in &f.placed {
+                        cmds.push_str(&mapterm::kitty::place_px(p.id, p.col, p.row, p.x_off, p.y_off, p.src, -500));
+                    }
+                    for id in &f.freed {
+                        cmds.push_str(&mapterm::kitty::free(*id));
+                    }
+                    pixels_placed = now;
+                    pixels_pending = f.pending;
+                    out.write_all(cmds.as_bytes())?;
+                    dlog(|| format!("pixels: {} new tiles, {} placed, {} freed, {} bytes, send {:.1} ms, frame {frame_ms:.1} ms", f.new.len(), f.placed.len(), f.freed.len(), cmds.len(), t.elapsed().as_secs_f64() * 1000.0));
                 }
                 crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;
             }
@@ -1039,7 +1087,7 @@ async fn main() -> Result<()> {
             }
 
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
-            let idle = if ctl.animating() { Duration::from_millis(16) } else { Duration::from_millis(500) };
+            let idle = if ctl.animating() || pixels_pending > 0 { Duration::from_millis(16) } else { Duration::from_millis(500) };
             tokio::select! {
                 Some(first) = rx.recv() => {
                     let mut batch = vec![first];

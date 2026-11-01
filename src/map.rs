@@ -437,6 +437,11 @@ impl Tiles {
         })
     }
 
+    /// Whether every tile the view needs at `z` is loaded itself (no ancestor standing in).
+    fn complete(&self, vp: &Viewport, z: u8) -> bool {
+        vp.tiles(z).iter().all(|id| self.map.contains_key(id))
+    }
+
     /// Loaded tiles covering the view (ancestors standing in), lowest zoom first.
     fn visible(&self, vp: &Viewport, z: u8) -> Vec<(TileId, Arc<MapTile>)> {
         let mut seen = HashSet::new();
@@ -480,6 +485,8 @@ pub struct Map {
     pub pixel_mode: Option<(f64, f64)>,
     /// The last frame drawn in pixel mode, until taken.
     pixels: std::sync::Mutex<Option<crate::pixels::PixFrame>>,
+    /// Pixel mode's tile images.
+    pixcache: std::sync::Mutex<crate::pixels::PixCache>,
     /// The starting view (lon, lat, zoom) a style suggests.
     pub center: Option<(f64, f64, f64)>,
     /// When to ask again for tiles that failed to load.
@@ -547,11 +554,126 @@ impl Map {
         Self::default()
     }
 
-    /// The last frame drawn in [`Map::pixel_mode`]: fills and lines as an image the size of
-    /// the map's area, to show under the text with kitty graphics. None until a frame is
-    /// drawn in pixel mode, and after it was taken.
+    /// The last frame drawn in [`Map::pixel_mode`]: the style's fills and lines as tile
+    /// images (drawn once each, about 512 pixels across) and where they go, to show under the
+    /// text with kitty graphics. None until a frame is drawn in pixel mode, and after it was
+    /// taken.
     pub fn take_pixels(&self) -> Option<crate::pixels::PixFrame> {
         self.pixels.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Whether every vector tile a view needs is loaded (none standing in).
+    fn tiles_complete(&self, cam: &Camera, area: Rect) -> bool {
+        let vp = Viewport::new(cam, area);
+        self.sources.iter().all(|(_, s)| match s {
+            MapSource::Vector(v) => v.tiles.complete(&vp, cam.tile_zoom(v.min_zoom, v.max_zoom)),
+            _ => true,
+        })
+    }
+
+    /// What decides how tiles look besides their data: the layers and which are shown.
+    fn pixel_signature(&self, zoom: f64) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for e in &self.layers {
+            e.id().hash(&mut h);
+            if let Entry::Style(l) = e {
+                l.shown_at(zoom).hash(&mut h);
+            }
+        }
+        for (id, _) in &self.sources {
+            id.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Pixel mode: draw (or reuse) the grid tiles over the view and plan where each goes.
+    fn pixel_tiles(&self, cam: &Camera, area: Rect, cpx: (f64, f64)) -> crate::pixels::PixFrame {
+        use crate::pixels::{CachedTile, DRAW_BUDGET, PIX_BUDGET, Pix, PixFrame, PixPlacement, next_image_id};
+        let mut frame = PixFrame::default();
+        let (cw, ch) = (cpx.0.max(1.0), cpx.1.max(1.0));
+        let (sx, sy) = (cw / 2.0, ch / 4.0);
+        let mut cache = self.pixcache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.frame += 1;
+        let now = cache.frame;
+        let started = std::time::Instant::now();
+        // A grid fine enough that each tile is about 512 pixels across (braille's tiles would
+        // be thousands of pixels wide on a Retina screen).
+        let gz = (cam.zoom + (sx / 2.0).log2()).floor().clamp(0.0, 24.0) as u8;
+        let zkey = (cam.zoom * 64.0).round() as i64;
+        let sig = self.pixel_signature(cam.zoom);
+        let vp = Viewport::new(cam, area);
+        let s = crate::render::TILE_DOTS * 2f64.powf(cam.zoom);
+        let n = (1u64 << gz) as f64;
+        let d = s / n;
+        let (aw, ah) = (area.width as f64 * cw, area.height as f64 * ch);
+        for (z, tx, ty) in vp.tiles(gz) {
+            let key = ((z, tx, ty), zkey, sig);
+            let image = match cache.tiles.get_mut(&key) {
+                Some(t) => {
+                    t.used = now;
+                    t.image.clone()
+                }
+                None => {
+                    // Blank, like a web map's tile that hasn't arrived: out of drawing time
+                    // this frame (center tiles come first), or its data is still loading.
+                    if started.elapsed() >= DRAW_BUDGET {
+                        frame.pending += 1;
+                        continue;
+                    }
+                    // A camera that puts this tile's top-left corner at dot (0, 0).
+                    let (x0, y0) = (tx as f64 / n, ty as f64 / n);
+                    let (cols, rows) = ((d / 2.0).ceil() as u16 + 1, (d / 4.0).ceil() as u16 + 1);
+                    let (lon, lat) = crate::render::to_lonlat(x0 + cols as f64 / s, y0 + 2.0 * rows as f64 / s);
+                    let tcam = Camera::new(lon, lat, cam.zoom);
+                    let rect = Rect::new(0, 0, cols, rows);
+                    if !self.tiles_complete(&tcam, rect) {
+                        frame.pending += 1;
+                        continue;
+                    }
+                    let Some(mut pix) = Pix::sized((d * sx).ceil() as u32, (d * sy).ceil() as u32, cpx) else { continue };
+                    let mut scratch = Buffer::empty(rect);
+                    draw_layers(self, &tcam, rect, &mut scratch, Some(&mut pix), false);
+                    let img = pix.finish(next_image_id());
+                    frame.new.push(img.clone());
+                    cache.bytes += img.rgba.len();
+                    cache.tiles.insert(key, CachedTile { image: img.clone(), used: now });
+                    img
+                }
+            };
+            // Where it goes, in pixels from the map area's corner, cut to the area.
+            let (dx, dy) = vp.dot(tx as f64 / n, ty as f64 / n);
+            let (px, py) = (dx * sx, dy * sy);
+            let (ax0, ay0) = (px.max(0.0), py.max(0.0));
+            let (ax1, ay1) = ((px + image.width as f64).min(aw), (py + image.height as f64).min(ah));
+            if ax1 - ax0 < 1.0 || ay1 - ay0 < 1.0 {
+                continue;
+            }
+            let (col, row) = ((ax0 / cw).floor(), (ay0 / ch).floor());
+            frame.placed.push(PixPlacement {
+                id: image.id,
+                col: area.x + col as u16,
+                row: area.y + row as u16,
+                x_off: ((ax0 - col * cw).round() as u32).min(cw as u32 - 1),
+                y_off: ((ay0 - row * ch).round() as u32).min(ch as u32 - 1),
+                src: ((ax0 - px).round() as u32, (ay0 - py).round() as u32, (ax1 - ax0).round().max(1.0) as u32, (ay1 - ay0).round().max(1.0) as u32),
+            });
+        }
+        // Over budget: the least recently used tiles this frame didn't use go.
+        if cache.bytes > PIX_BUDGET {
+            let mut old: Vec<(u64, crate::pixels::PixKey)> = cache.tiles.iter().filter(|(_, t)| t.used < now).map(|(k, t)| (t.used, *k)).collect();
+            old.sort_by_key(|(u, _)| *u);
+            for (_, k) in old {
+                if cache.bytes <= PIX_BUDGET {
+                    break;
+                }
+                if let Some(t) = cache.tiles.remove(&k) {
+                    cache.bytes -= t.image.rgba.len();
+                    frame.freed.push(t.image.id);
+                }
+            }
+        }
+        frame
     }
 
     // ---- sources ----
@@ -1643,6 +1765,25 @@ pub struct MapView<'a> {
 impl Widget for MapView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let (map, cam) = (self.map, self.camera);
+        match map.pixel_mode {
+            Some(cpx) => {
+                let frame = map.pixel_tiles(cam, area, cpx);
+                *map.pixels.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+                // Labels, markers and custom layers; the tiles hold the style's geometry.
+                draw_layers(map, cam, area, buf, None, true);
+            }
+            None => {
+                draw_layers(map, cam, area, buf, None, false);
+            }
+        }
+    }
+}
+
+/// Draw the map's layers for `cam` into `area`: fills and lines into `pix` when given, else
+/// braille (none of them for style layers with `geometry_off`); labels and markers into
+/// `buf`.
+fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pix: Option<&mut crate::pixels::Pix>, geometry_off: bool) {
+    {
         let vp = Viewport::new(cam, area);
         let bg = map.background(cam.zoom);
         // Loaded tiles per vector source, looked up once per frame.
@@ -1654,20 +1795,21 @@ impl Widget for MapView<'_> {
                 _ => None,
             })
             .collect();
-        let mut pix = map.pixel_mode.and_then(|cpx| crate::pixels::Pix::new(area.width, area.height, cpx));
         // Imagery under the map shows through the image, so the background isn't painted.
         let imagery = map.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(cam.zoom)));
         let skip_bg = pix.is_some() && imagery;
-        crate::layer::render_into(cam, area, buf, pix.as_mut(), |ctx| {
+        crate::layer::render_into(cam, area, buf, pix, |ctx| {
             for (i, entry) in map.layers.iter().enumerate() {
                 ctx.base = i as i32 * LAYER_PRIORITY;
                 let l = match entry {
                     Entry::Style(l) => l,
                     Entry::Custom { layer, .. } => {
+                        ctx.geometry_off = false;
                         layer.draw(ctx);
                         continue;
                     }
                 };
+                ctx.geometry_off = geometry_off;
                 if !l.shown_at(cam.zoom) {
                     continue;
                 }
@@ -1746,11 +1888,9 @@ impl Widget for MapView<'_> {
                 }
             }
         });
-        if let Some(p) = pix {
-            *map.pixels.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.finish());
-        }
     }
 }
+
 
 #[cfg(test)]
 mod tests {

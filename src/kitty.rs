@@ -75,30 +75,6 @@ pub fn free(id: u32) -> String {
 /// Free every image this program sent.
 pub const FREE_ALL: &str = "\x1b_Ga=d,d=A,q=2\x1b\\";
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn base64_matches_rfc4648() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-    }
-
-    #[test]
-    fn transmit_chunks_and_place() {
-        let t = transmit(7, &vec![0u8; 6000]);
-        assert!(t.starts_with("\x1b_Ga=t,f=100,t=d,i=7,q=2,m=1;"));
-        assert!(t.ends_with("\x1b\\") && t.contains("\x1b_Gm=0;"));
-        assert_eq!(t.matches("\x1b_G").count(), 2, "8000 base64 chars -> two chunks");
-        let p = place(7, 3, 4, 2, (10, 20, 30, 40), 5, 6, -1);
-        assert_eq!(p, "\x1b[3;5H\x1b_Ga=p,i=7,p=3,x=10,y=20,w=30,h=40,c=5,r=6,z=-1,C=1,q=2\x1b\\");
-    }
-}
-
 /// Show RGBA pixels (`w` x `h`, 4 bytes each) as image `id`, placed at cell (`col`, `row`)
 /// and stretched over `cols` x `rows` cells at layer `z` (negative: under the text). With
 /// `shm` (the terminal is on this machine) the pixels go through POSIX shared memory, which
@@ -161,4 +137,68 @@ fn shm_write(data: &[u8]) -> Option<String> {
         }
     }
     Some(name)
+}
+
+/// Send RGBA pixels as image `id` without showing it (see [`show_rgba`] for `shm`).
+pub fn transmit_rgba(id: u32, w: u32, h: u32, rgba: &[u8], shm: bool) -> String {
+    let mut out = String::new();
+    let keys = format!("a=t,f=32,s={w},v={h},i={id},q=2");
+    #[cfg(unix)]
+    if shm && let Some(name) = shm_write(rgba) {
+        let _ = write!(out, "\x1b_G{keys},t=s,S={};{}\x1b\\", rgba.len(), base64(name.as_bytes()));
+        return out;
+    }
+    let _ = shm;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    let _ = std::io::Write::write_all(&mut z, rgba);
+    let data = base64(&z.finish().unwrap_or_default());
+    let chunks: Vec<&[u8]> = data.as_bytes().chunks(4096).collect();
+    for (i, c) in chunks.iter().enumerate() {
+        let more = u8::from(i + 1 < chunks.len());
+        let c = std::str::from_utf8(c).unwrap_or("");
+        if i == 0 {
+            let _ = write!(out, "\x1b_G{keys},o=z,m={more};{c}\x1b\\");
+        } else {
+            let _ = write!(out, "\x1b_Gm={more};{c}\x1b\\");
+        }
+    }
+    out
+}
+
+/// Place image `id` (its placement 1, replacing an earlier one) at cell (`col`, `row`)
+/// plus a pixel offset inside it, showing `src` (x, y, w, h) one image pixel per screen
+/// pixel, at layer `z`.
+#[allow(clippy::too_many_arguments)]
+pub fn place_px(id: u32, col: u16, row: u16, x_off: u32, y_off: u32, src: (u32, u32, u32, u32), z: i32) -> String {
+    let (x, y, w, h) = src;
+    format!("\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x={x},y={y},w={w},h={h},X={x_off},Y={y_off},C=1,z={z},q=2\x1b\\", row + 1, col + 1)
+}
+
+/// Remove image `id`'s placements, keeping its data for later.
+pub fn unplace(id: u32) -> String {
+    format!("\x1b_Ga=d,d=i,i={id},q=2\x1b\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_matches_rfc4648() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foo"), "Zm9v");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn transmit_chunks_and_place() {
+        let t = transmit(7, &vec![0u8; 6000]);
+        assert!(t.starts_with("\x1b_Ga=t,f=100,t=d,i=7,q=2,m=1;"));
+        assert!(t.ends_with("\x1b\\") && t.contains("\x1b_Gm=0;"));
+        assert_eq!(t.matches("\x1b_G").count(), 2, "8000 base64 chars -> two chunks");
+        let p = place(7, 3, 4, 2, (10, 20, 30, 40), 5, 6, -1);
+        assert_eq!(p, "\x1b[3;5H\x1b_Ga=p,i=7,p=3,x=10,y=20,w=30,h=40,c=5,r=6,z=-1,C=1,q=2\x1b\\");
+    }
 }

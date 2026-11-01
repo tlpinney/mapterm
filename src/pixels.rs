@@ -5,15 +5,80 @@
 use ratatui::style::Color;
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform};
 
-/// A finished frame: straight (not premultiplied) RGBA rows.
+/// A tile image to send to the terminal once: straight (not premultiplied) RGBA rows.
 #[derive(Clone, Debug)]
-pub struct PixFrame {
+pub struct PixImage {
+    /// The kitty graphics image id.
+    pub id: u32,
     /// Width in pixels.
     pub width: u32,
     /// Height in pixels.
     pub height: u32,
     /// Pixels, 4 bytes each (red, green, blue, alpha), row by row from the top.
-    pub rgba: Vec<u8>,
+    pub rgba: std::sync::Arc<Vec<u8>>,
+}
+
+/// Where a tile image goes this frame: at cell (`col`, `row`) plus a pixel offset inside that
+/// cell, showing the `src` rectangle (x, y, width, height in the image's pixels) at its own
+/// size (one image pixel per screen pixel).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PixPlacement {
+    /// The image.
+    pub id: u32,
+    /// Top-left cell, in the terminal.
+    pub col: u16,
+    /// Top-left cell, in the terminal.
+    pub row: u16,
+    /// Pixels right of the cell's left edge (less than a cell).
+    pub x_off: u32,
+    /// Pixels below the cell's top edge (less than a cell).
+    pub y_off: u32,
+    /// The part of the image shown: x, y, width, height.
+    pub src: (u32, u32, u32, u32),
+}
+
+/// A frame in pixel mode: images new to the terminal, every tile's placement, and images it
+/// can forget. See [`crate::Map::take_pixels`].
+#[derive(Clone, Debug, Default)]
+pub struct PixFrame {
+    /// Send these first (each once; later frames only place them).
+    pub new: Vec<PixImage>,
+    /// Place these, bottom to top.
+    pub placed: Vec<PixPlacement>,
+    /// Images to delete from the terminal (evicted from the cache).
+    pub freed: Vec<u32>,
+    /// Tiles left blank this frame: their data is still loading, or there wasn't time to
+    /// draw them. Draw again soon while this is above zero.
+    pub pending: usize,
+}
+
+/// Tile images drawn so far, by (grid tile, zoom, style signature), least recently used out
+/// first past a byte budget.
+#[derive(Default)]
+pub(crate) struct PixCache {
+    pub(crate) tiles: std::collections::HashMap<PixKey, CachedTile>,
+    pub(crate) bytes: usize,
+    pub(crate) frame: u64,
+}
+
+/// A grid tile (z, x, y), the zoom in 1/64ths, and a signature of the style and visibility.
+pub(crate) type PixKey = ((u8, u32, u32), i64, u64);
+
+pub(crate) struct CachedTile {
+    pub(crate) image: PixImage,
+    pub(crate) used: u64,
+}
+
+/// Time to spend drawing new tiles per frame; the rest stay blank until later frames.
+pub(crate) const DRAW_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Bytes of tile images to keep (the terminal holds them too).
+pub(crate) const PIX_BUDGET: usize = 192 << 20;
+
+pub(crate) fn next_image_id() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0x7e00_0000);
+    N.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The image a frame's fills and lines go into. Coordinates arrive in braille dots (2 per
@@ -28,12 +93,11 @@ pub(crate) struct Pix {
 }
 
 impl Pix {
-    /// A transparent image for `cols` x `rows` cells of `cell_px` pixels each.
-    pub(crate) fn new(cols: u16, rows: u16, cell_px: (f64, f64)) -> Option<Pix> {
+    /// A transparent image of `w` x `h` pixels, for cells of `cell_px` pixels.
+    pub(crate) fn sized(w: u32, h: u32, cell_px: (f64, f64)) -> Option<Pix> {
         let (cw, ch) = (cell_px.0.max(1.0) as f32, cell_px.1.max(1.0) as f32);
-        let map = Pixmap::new((cols as f32 * cw).round() as u32, (rows as f32 * ch).round() as u32)?;
         // A terminal cell is about 8 CSS pixels wide.
-        Some(Pix { map, sx: cw / 2.0, sy: ch / 4.0, dpr: (cw / 8.0).clamp(1.0, 4.0) })
+        Some(Pix { map: Pixmap::new(w.max(1), h.max(1))?, sx: cw / 2.0, sy: ch / 4.0, dpr: (cw / 8.0).clamp(1.0, 4.0) })
     }
 
     fn paint(c: Color) -> Paint<'static> {
@@ -78,21 +142,21 @@ impl Pix {
         let width = (width_css as f32 * self.dpr).max(0.75);
         let dash = dash.and_then(|d| {
             let v: Vec<f32> = d.iter().map(|&x| (x as f32 * width).max(0.5)).collect();
-            StrokeDash::new(if v.len() % 2 == 0 { v } else { [v.clone(), v].concat() }, 0.0)
+            StrokeDash::new(if v.len().is_multiple_of(2) { v } else { [v.clone(), v].concat() }, 0.0)
         });
         let stroke = Stroke { width, line_cap: LineCap::Round, line_join: LineJoin::Round, dash, ..Stroke::default() };
         self.map.stroke_path(&p, &Self::paint(c), &stroke, Transform::identity(), None);
     }
 
     /// The finished image, un-premultiplied for the terminal.
-    pub(crate) fn finish(self) -> PixFrame {
+    pub(crate) fn finish(self, id: u32) -> PixImage {
         let (width, height) = (self.map.width(), self.map.height());
         let mut rgba = Vec::with_capacity(self.map.data().len());
         for px in self.map.pixels() {
             let c = px.demultiply();
             rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
         }
-        PixFrame { width, height, rgba }
+        PixImage { id, width, height, rgba: std::sync::Arc::new(rgba) }
     }
 }
 
@@ -103,10 +167,10 @@ mod tests {
     #[test]
     fn fills_and_strokes_land_in_pixels() {
         // 10x5 cells of 10x20 px: 100x100 pixels, 5 px per dot.
-        let mut p = Pix::new(10, 5, (10.0, 20.0)).unwrap();
+        let mut p = Pix::sized(100, 100, (10.0, 20.0)).unwrap();
         p.fill(&[vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]], Color::Rgb(0, 0, 255));
         p.stroke(&[(0.0, 15.0), (20.0, 15.0)], Color::Rgb(255, 0, 0), 4.0, None);
-        let f = p.finish();
+        let f = p.finish(1);
         assert_eq!((f.width, f.height), (100, 100));
         let at = |x: usize, y: usize| &f.rgba[(y * 100 + x) * 4..(y * 100 + x) * 4 + 4];
         assert_eq!(at(25, 25), &[0, 0, 255, 255], "inside the fill");
