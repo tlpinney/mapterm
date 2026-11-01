@@ -159,17 +159,13 @@ pub(crate) fn stats(geom: GeomType, parts: &[Vec<(f64, f64)>]) -> Stats {
         vertices += 1;
     }
     let center = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-    let length_km = (geom == GeomType::Line)
-        .then(|| parts.iter().map(|p| p.windows(2).map(|w| haversine_km(w[0], w[1])).sum::<f64>()).sum());
+    let length_km = (geom == GeomType::Line).then(|| parts.iter().map(|p| p.windows(2).map(|w| haversine_km(w[0], w[1])).sum::<f64>()).sum());
     let area_km2 = (geom == GeomType::Polygon).then(|| {
         // Shoelace on a local equirectangular projection around the center. MVT winds outer
         // rings and holes in opposite directions, so the signed sum subtracts the holes.
         let kx = 111.32 * center.1.to_radians().cos();
         let ky = 110.57;
-        let signed: f64 = parts
-            .iter()
-            .map(|r| r.windows(2).map(|w| (w[0].0 * kx) * (w[1].1 * ky) - (w[1].0 * kx) * (w[0].1 * ky)).sum::<f64>() / 2.0)
-            .sum();
+        let signed: f64 = parts.iter().map(|r| r.windows(2).map(|w| (w[0].0 * kx) * (w[1].1 * ky) - (w[1].0 * kx) * (w[0].1 * ky)).sum::<f64>() / 2.0).sum();
         signed.abs()
     });
     Stats { center, length_km, area_km2, vertices }

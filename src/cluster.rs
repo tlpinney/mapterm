@@ -190,7 +190,14 @@ mod tests {
 
     fn point(lon: f64, lat: f64, name: &str) -> Feature {
         let p = to_world(lon, lat);
-        Feature { id: None, geom: GeomType::Point, parts: vec![vec![p]], bbox: [p.0, p.1, p.0, p.1], props: vec![("name".into(), Value::Str(name.into()))], label: Some(name.into()) }
+        Feature {
+            id: None,
+            geom: GeomType::Point,
+            parts: vec![vec![p]],
+            bbox: [p.0, p.1, p.0, p.1],
+            props: vec![("name".into(), Value::Str(name.into()))],
+            label: Some(name.into()),
+        }
     }
 
     #[test]
@@ -203,10 +210,17 @@ mod tests {
         }
         fs.push(point(-76.61, 39.29, "baltimore"));
         let c = Clusters::build(&fs, ClusterOptions::default());
-        let count = |z: f64| c.at(z).map(|l| l.features.iter().map(|f| match f.props.iter().find(|(k, _)| k == "point_count") {
-            Some((_, Value::Num(n))) => *n as u64,
-            _ => 1,
-        }).collect::<Vec<_>>());
+        let count = |z: f64| {
+            c.at(z).map(|l| {
+                l.features
+                    .iter()
+                    .map(|f| match f.props.iter().find(|(k, _)| k == "point_count") {
+                        Some((_, Value::Num(n))) => *n as u64,
+                        _ => 1,
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
         let total = |z: f64| count(z).unwrap().iter().sum::<u64>();
         for z in [2.0, 8.0, 12.0, 14.0] {
             assert_eq!(total(z), 61, "every point counted once at z{z}");

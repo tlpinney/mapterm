@@ -85,7 +85,10 @@ mod tests {
         // The token is passed in: the global one stays untouched while tests run in parallel.
         let t = Some("pk.TESTTOKEN123");
         assert!(resolve_with("mapbox://styles/mapbox/streets-v12", None).unwrap_err().to_string().contains("access token"));
-        assert_eq!(resolve_with("mapbox://styles/mapbox/streets-v12", t).unwrap(), "https://api.mapbox.com/styles/v1/mapbox/streets-v12?access_token=pk.TESTTOKEN123");
+        assert_eq!(
+            resolve_with("mapbox://styles/mapbox/streets-v12", t).unwrap(),
+            "https://api.mapbox.com/styles/v1/mapbox/streets-v12?access_token=pk.TESTTOKEN123"
+        );
         assert_eq!(
             resolve_with("mapbox://mapbox.mapbox-streets-v8,mapbox.mapbox-terrain-v2", t).unwrap(),
             "https://api.mapbox.com/v4/mapbox.mapbox-streets-v8,mapbox.mapbox-terrain-v2.json?secure&access_token=pk.TESTTOKEN123"
@@ -93,7 +96,10 @@ mod tests {
         assert!(resolve_with("mapbox://sprites/mapbox/streets-v12", t).is_err());
         assert!(resolve_with("mapbox://styles/../x", t).is_err() && resolve_with("mapbox://a?b", t).is_err());
         assert!(!redact_with("GET https://x/?access_token=pk.TESTTOKEN123: HTTP 401", t).contains("TESTTOKEN"));
-        assert!(is_mapbox_host("https://a.tiles.mapbox.com/v4/x/{z}/{x}/{y}.vector.pbf") && is_mapbox_host("https://api.mapbox.com/v4/mapbox.satellite/1/0/0@2x.jpg90"));
+        assert!(
+            is_mapbox_host("https://a.tiles.mapbox.com/v4/x/{z}/{x}/{y}.vector.pbf")
+                && is_mapbox_host("https://api.mapbox.com/v4/mapbox.satellite/1/0/0@2x.jpg90")
+        );
         assert!(!is_mapbox_host("https://tiles.openfreemap.org/planet") && !is_mapbox_host("https://evil.example/api.mapbox.com/"));
     }
 }

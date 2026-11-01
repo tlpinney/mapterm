@@ -12,12 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Color,
-    widgets::Widget,
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::Widget};
 
 use crate::{
     render::{Camera, to_world},
@@ -346,11 +341,7 @@ impl RasterSource {
     /// A source for a named provider. Fails with a hint if it needs a key and none was given.
     pub fn from_preset(p: &Preset, key: Option<String>) -> Result<Self> {
         if !p.key_env.is_empty() && key.is_none() {
-            bail!(
-                "{} needs a key: set {} or pass --raster-key-cmd with a command that prints it",
-                p.name,
-                p.key_env.join(" or ")
-            );
+            bail!("{} needs a key: set {} or pass --raster-key-cmd with a command that prints it", p.name, p.key_env.join(" or "));
         }
         let mut s = Self::new(p.template, false, p.max_zoom)?;
         for (name, env, default) in p.params {
@@ -531,11 +522,7 @@ impl RasterSource {
         for (name, value) in &self.params {
             t = t.replace(&format!("{{{name}}}"), value);
         }
-        t
-            .replace("{z}", &z.to_string())
-            .replace("{x}", &x.to_string())
-            .replace("{-y}", &flipped.to_string())
-            .replace("{y}", &y_val.to_string())
+        t.replace("{z}", &z.to_string()).replace("{x}", &x.to_string()).replace("{-y}", &flipped.to_string()).replace("{y}", &y_val.to_string())
     }
 
     /// The tile's image bytes (PNG or JPEG), from the 30-day disk cache or the network.
@@ -688,11 +675,7 @@ impl RasterStore {
     /// Store a tile (`None`: none there, stored so it isn't fetched again).
     pub fn insert(&mut self, id: TileId, t: Option<RasterTile>) {
         // A missing tile is remembered as a 1x1 transparent image so it isn't fetched again.
-        let t = t.unwrap_or_else(|| RasterTile {
-            id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed),
-            png: Vec::new(),
-            rgba: image::RgbaImage::new(1, 1),
-        });
+        let t = t.unwrap_or_else(|| RasterTile { id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png: Vec::new(), rgba: image::RgbaImage::new(1, 1) });
         self.bytes += tile_bytes(&t);
         if let Some(old) = self.tiles.insert(id, Arc::new(t)) {
             self.bytes -= tile_bytes(&old);
@@ -824,11 +807,7 @@ pub fn layout_max(store: &RasterStore, cam: &Camera, area: Rect, rz: u8, max: (u
             let y = (sy0.round().max(0.0) as u32).min(ih - 1);
             let x_end = (sx1.round().max(0.0) as u32).clamp(x + 1, iw);
             let y_end = (sy1.round().max(0.0) as u32).clamp(y + 1, ih);
-            blocks.push(Block {
-                tile,
-                cells: Rect::new(area.x + c0, area.y + r0, c1 - c0, r1 - r0),
-                src: (x, y, x_end - x, y_end - y),
-            });
+            blocks.push(Block { tile, cells: Rect::new(area.x + c0, area.y + r0, c1 - c0, r1 - r0), src: (x, y, x_end - x, y_end - y) });
         }
     }
     blocks

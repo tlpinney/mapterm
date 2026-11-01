@@ -29,7 +29,13 @@
 
 use ratatui::layout::Rect;
 
-use crate::{interact::Click, map::Map, mvt::Value, pick::Pick, render::{Camera, Viewport}};
+use crate::{
+    interact::Click,
+    map::Map,
+    mvt::Value,
+    pick::Pick,
+    render::{Camera, Viewport},
+};
 
 /// Something that happened on a layer.
 #[derive(Clone, Debug)]
@@ -178,10 +184,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        map.add_layer(
-            StyleLayer::fill("sites", "sites").color(json!(["case", ["boolean", ["feature-state", "hover"], false], "#ffcc00", "#204060"])),
-        )
-        .unwrap();
+        map.add_layer(StyleLayer::fill("sites", "sites").color(json!(["case", ["boolean", ["feature-state", "hover"], false], "#ffcc00", "#204060"]))).unwrap();
         map
     }
 
@@ -204,7 +207,10 @@ mod tests {
         assert_eq!(bg_at(&map, &cam, area, 60), Color::Rgb(0x20, 0x40, 0x60));
         assert!(ev.pointer(&mut map, &cam, area, Some(west)).is_empty(), "nothing new");
         let e = ev.pointer(&mut map, &cam, area, Some(east));
-        assert!(matches!(&e[..], [MapEvent::Leave { feature: a, .. }, MapEvent::Enter { feature: b, .. }] if a.title() == "West" && b.title() == "East"), "{e:?}");
+        assert!(
+            matches!(&e[..], [MapEvent::Leave { feature: a, .. }, MapEvent::Enter { feature: b, .. }] if a.title() == "West" && b.title() == "East"),
+            "{e:?}"
+        );
         assert_eq!(bg_at(&map, &cam, area, 20), Color::Rgb(0x20, 0x40, 0x60), "back to normal");
         assert_eq!(bg_at(&map, &cam, area, 60), Color::Rgb(0xff, 0xcc, 0x00));
         let e = ev.pointer(&mut map, &cam, area, None);

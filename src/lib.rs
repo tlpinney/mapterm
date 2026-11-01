@@ -68,9 +68,9 @@
 
 #![warn(missing_docs)]
 
-pub mod export;
 pub mod cluster;
 pub mod events;
+pub mod export;
 pub mod expr;
 pub mod fgb;
 pub mod formats;
@@ -97,10 +97,10 @@ pub mod store;
 pub mod stylejson;
 
 pub use interact::{Click, Controller};
-pub use pick::Pick;
 pub use layer::{CustomLayer, DrawContext, Markers, PickContext};
 pub use map::{KittyState, LabelPlacement, Map, MapSource, MapView, RasterMode, TileRequest};
-pub use spec::StyleLayer;
+pub use pick::Pick;
 pub use render::{Camera, Overlay, Viewport};
 pub use source::Source;
+pub use spec::StyleLayer;
 pub use store::TileId;

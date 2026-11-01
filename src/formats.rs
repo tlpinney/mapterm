@@ -160,7 +160,9 @@ pub fn csv(text: &str) -> Result<Json> {
         };
         let mut props = Map::new();
         for (i, h) in header.iter().enumerate() {
-            if Some(i) != lat && Some(i) != lon && Some(i) != wkt
+            if Some(i) != lat
+                && Some(i) != lon
+                && Some(i) != wkt
                 && let Some(v) = row.get(i)
                 && !v.trim().is_empty()
             {
@@ -402,7 +404,8 @@ pub fn gpx(text: &str) -> Result<Json> {
         }
     }
     for t in gpx.all("trk") {
-        let lines: Vec<Json> = t.all("trkseg").map(|s| Json::Array(s.all("trkpt").filter_map(pt).collect())).filter(|l| l.as_array().is_some_and(|a| a.len() >= 2)).collect();
+        let lines: Vec<Json> =
+            t.all("trkseg").map(|s| Json::Array(s.all("trkpt").filter_map(pt).collect())).filter(|l| l.as_array().is_some_and(|a| a.len() >= 2)).collect();
         if !lines.is_empty() {
             features.push(json!({"type": "Feature", "properties": props(t, &["trkseg"]), "geometry": {"type": "MultiLineString", "coordinates": lines}}));
         }
@@ -521,7 +524,8 @@ mod tests {
 
     #[test]
     fn csv_points_and_wkt() {
-        let doc = csv("Name,Latitude,Longitude,visits,open\nMonument,38.8895,-77.0353,12,true\n\"Lincoln, Memorial\",38.8893,-77.0502,\"3\",false\nbad,,\n").unwrap();
+        let doc =
+            csv("Name,Latitude,Longitude,visits,open\nMonument,38.8895,-77.0353,12,true\n\"Lincoln, Memorial\",38.8893,-77.0502,\"3\",false\nbad,,\n").unwrap();
         let f = doc["features"].as_array().unwrap();
         assert_eq!(f.len(), 2, "rows without coordinates are skipped");
         assert_eq!(f[0]["geometry"]["coordinates"], json!([-77.0353, 38.8895]));
@@ -543,7 +547,8 @@ mod tests {
           <wpt lat="38.8895" lon="-77.0353"><name>Monument &amp; Mall</name><ele>12.5</ele></wpt>
           <trk><name>Morning run</name><trkseg><trkpt lat="38.88" lon="-77.05"/><trkpt lat="38.89" lon="-77.04"><ele>3</ele></trkpt></trkseg></trk>
           <rte><name>Plan</name><rtept lat="38.9" lon="-77.0"/><rtept lat="38.91" lon="-77.01"/></rte>
-        </gpx>"#).unwrap();
+        </gpx>"#)
+        .unwrap();
         let f = doc["features"].as_array().unwrap();
         assert_eq!(f.len(), 3);
         assert_eq!(f[0]["properties"]["name"], json!("Monument & Mall"));
@@ -567,7 +572,8 @@ mod tests {
           <Placemark><name>Both</name><MultiGeometry><Point><coordinates>1,2</coordinates></Point>
             <LineString><coordinates>1,2 3,4</coordinates></LineString></MultiGeometry></Placemark>
           <!-- a comment --><Placemark><name>No geometry</name></Placemark>
-        </Folder></Document></kml>"#).unwrap();
+        </Folder></Document></kml>"#)
+        .unwrap();
         let f = doc["features"].as_array().unwrap();
         assert_eq!(f.len(), 3, "placemarks without geometry are skipped");
         assert_eq!(f[0]["properties"]["description"], json!("<b>bold</b> note"));

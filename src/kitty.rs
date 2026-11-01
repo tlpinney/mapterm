@@ -57,11 +57,7 @@ pub fn transmit(id: u32, png: &[u8]) -> String {
 #[allow(clippy::too_many_arguments)]
 pub fn place(id: u32, placement: u32, col: u16, row: u16, src: (u32, u32, u32, u32), cols: u16, rows: u16, z: i32) -> String {
     let (x, y, w, h) = src;
-    format!(
-        "\x1b[{};{}H\x1b_Ga=p,i={id},p={placement},x={x},y={y},w={w},h={h},c={cols},r={rows},z={z},C=1,q=2\x1b\\",
-        row as u32 + 1,
-        col as u32 + 1
-    )
+    format!("\x1b[{};{}H\x1b_Ga=p,i={id},p={placement},x={x},y={y},w={w},h={h},c={cols},r={rows},z={z},C=1,q=2\x1b\\", row as u32 + 1, col as u32 + 1)
 }
 
 /// Remove every placement on the screen (the images stay loaded).

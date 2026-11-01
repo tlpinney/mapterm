@@ -7,9 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -129,7 +127,30 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, no_labels: false, snapshot: None, format: "text".into(), pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, mapbox_token_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_limit: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
+    let mut a = Args {
+        source: None,
+        style: None,
+        at: None,
+        zoom: None,
+        light: false,
+        no_labels: false,
+        snapshot: None,
+        format: "text".into(),
+        pick: None,
+        raster: None,
+        tms: false,
+        geojson: Vec::new(),
+        raster_attribution: None,
+        raster_key_cmd: None,
+        mapbox_token_cmd: None,
+        raster_headers: Vec::new(),
+        raster_cache: None,
+        raster_limit: None,
+        raster_params: Vec::new(),
+        list_mosaics: false,
+        smooth,
+        shift,
+    };
     let parse_limit = |v: &str| -> Result<Option<u32>> {
         match v.trim() {
             "off" | "none" | "0" => Ok(None),
@@ -248,8 +269,7 @@ fn dlog(msg: impl FnOnce() -> String) {
 /// Print the Planet basemap mosaics the key can use (name, dates), following pagination.
 /// The key goes in a Basic auth header (Planet's API accepts the key as the user name).
 async fn list_planet_mosaics(key_cmd: Option<&str>) -> Result<()> {
-    let key = mapterm::raster::find_key(key_cmd, &["PL_API_KEY", "PLANET_API_KEY"])?
-        .context("Planet needs a key: set PL_API_KEY or pass --raster-key-cmd")?;
+    let key = mapterm::raster::find_key(key_cmd, &["PL_API_KEY", "PLANET_API_KEY"])?.context("Planet needs a key: set PL_API_KEY or pass --raster-key-cmd")?;
     let auth = vec![("Authorization".to_string(), format!("Basic {}", mapterm::kitty::base64(format!("{key}:").as_bytes())))];
     let http = mapterm::source::keyed_client();
     const API: &str = "https://api.planet.com/";
@@ -397,8 +417,7 @@ fn draw_inspector(f: &mut ratatui::Frame, area: Rect, picks: &[mapterm::Pick], s
 /// Cell size in pixels, when the terminal reports its pixel size (needed for SGR-pixels mouse).
 fn cell_px() -> Option<(f64, f64)> {
     let ws = crossterm::terminal::window_size().ok()?;
-    (ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0)
-        .then(|| (ws.width as f64 / ws.columns as f64, ws.height as f64 / ws.rows as f64))
+    (ws.width > 0 && ws.height > 0 && ws.columns > 0 && ws.rows > 0).then(|| (ws.width as f64 / ws.columns as f64, ws.height as f64 / ws.rows as f64))
 }
 
 /// Turn SGR-pixels mouse reporting (DEC 1016) on or off. While on, mouse positions arrive in
@@ -581,9 +600,8 @@ async fn main() -> Result<()> {
                     mapterm::raster::RasterSource::from_preset(p, key)?
                 }
                 None => {
-                    let mut r = mapterm::raster::RasterSource::new(spec, a.tms, 19).with_context(|| {
-                        format!("--raster {spec}: not a provider name (see --raster-list) or a tile URL")
-                    })?;
+                    let mut r = mapterm::raster::RasterSource::new(spec, a.tms, 19)
+                        .with_context(|| format!("--raster {spec}: not a provider name (see --raster-list) or a tile URL"))?;
                     for h in &a.raster_headers {
                         r.add_header(h)?;
                     }
@@ -613,7 +631,10 @@ async fn main() -> Result<()> {
                 } else {
                     ""
                 };
-                bail!("the raster URL needs {}: use --raster-param NAME=VALUE{hint}", missing.iter().map(|m| format!("{{{m}}}")).collect::<Vec<_>>().join(", "));
+                bail!(
+                    "the raster URL needs {}: use --raster-param NAME=VALUE{hint}",
+                    missing.iter().map(|m| format!("{{{m}}}")).collect::<Vec<_>>().join(", ")
+                );
             }
             if let Some(c) = a.raster_cache {
                 r.cache = c;
@@ -832,10 +853,24 @@ async fn main() -> Result<()> {
             if let Search::Results { places, sel } = &search {
                 for (i, p) in places.iter().enumerate() {
                     let label = (i == *sel).then(|| (p.name.clone(), mark.add_modifier(ratatui::style::Modifier::BOLD)));
-                    overlays.push(Overlay::Marker { lon: p.lon, lat: p.lat, glyph: if i == *sel { "◆" } else { "◇" }.into(), style: mark, label, priority: 97 - i as i32 });
+                    overlays.push(Overlay::Marker {
+                        lon: p.lon,
+                        lat: p.lat,
+                        glyph: if i == *sel { "◆" } else { "◇" }.into(),
+                        style: mark,
+                        label,
+                        priority: 97 - i as i32,
+                    });
                 }
             } else if let Some(p) = &found {
-                overlays.push(Overlay::Marker { lon: p.lon, lat: p.lat, glyph: "◆".into(), style: mark, label: Some((p.name.clone(), mark.add_modifier(ratatui::style::Modifier::BOLD))), priority: 98 });
+                overlays.push(Overlay::Marker {
+                    lon: p.lon,
+                    lat: p.lat,
+                    glyph: "◆".into(),
+                    style: mark,
+                    label: Some((p.name.clone(), mark.add_modifier(ratatui::style::Modifier::BOLD))),
+                    priority: 98,
+                });
             }
             if let (true, Some((lon, lat))) = (inspect && !picks.is_empty(), click_at) {
                 overlays.push(Overlay::Marker { lon, lat, glyph: "+".into(), style: TStyle::new().fg(Color::Rgb(255, 215, 0)), label: None, priority: 99 });
@@ -890,7 +925,10 @@ async fn main() -> Result<()> {
                 }
                 if let Some(t) = throttled_at.filter(|t| t.elapsed() < Duration::from_secs(60)) {
                     let wait = 60 - t.elapsed().as_secs();
-                    spans.push(Span::styled(format!("imagery: provider says too many requests (or daily quota used up), trying again in {wait} s "), TStyle::new().fg(Color::Yellow)));
+                    spans.push(Span::styled(
+                        format!("imagery: provider says too many requests (or daily quota used up), trying again in {wait} s "),
+                        TStyle::new().fg(Color::Yellow),
+                    ));
                 } else if held_back {
                     let n = limiter.as_ref().map_or(0, |b| b.per_min);
                     spans.push(Span::styled(format!("imagery limit {n}/min (--raster-limit) "), TStyle::new().fg(Color::Yellow)));

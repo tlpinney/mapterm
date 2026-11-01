@@ -90,12 +90,7 @@ pub(crate) async fn get(http: &reqwest::Client, url: &str, range: Option<(u64, u
 }
 
 /// [`get`] with extra request headers (e.g. an API key).
-pub(crate) async fn get_with(
-    http: &reqwest::Client,
-    url: &str,
-    range: Option<(u64, u64)>,
-    headers: &[(String, String)],
-) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn get_with(http: &reqwest::Client, url: &str, range: Option<(u64, u64)>, headers: &[(String, String)]) -> Result<Option<Vec<u8>>> {
     get_capped(http, url, range, headers, MAX_FETCH).await
 }
 
@@ -112,13 +107,7 @@ pub async fn get_limited(http: &reqwest::Client, url: &str, headers: &[(String, 
     get_capped(http, url, None, headers, max).await
 }
 
-async fn get_capped(
-    http: &reqwest::Client,
-    url: &str,
-    range: Option<(u64, u64)>,
-    headers: &[(String, String)],
-    max: usize,
-) -> Result<Option<Vec<u8>>> {
+async fn get_capped(http: &reqwest::Client, url: &str, range: Option<(u64, u64)>, headers: &[(String, String)], max: usize) -> Result<Option<Vec<u8>>> {
     let mut req = http.get(url);
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
@@ -218,11 +207,8 @@ impl PmArchive {
     }
 
     async fn open_kind(spec: &str, http: &reqwest::Client, raster: bool) -> Result<Self> {
-        let backend = if spec.starts_with("http://") || spec.starts_with("https://") {
-            Backend::Http(spec.to_string())
-        } else {
-            Backend::File(PathBuf::from(spec))
-        };
+        let backend =
+            if spec.starts_with("http://") || spec.starts_with("https://") { Backend::Http(spec.to_string()) } else { Backend::File(PathBuf::from(spec)) };
         // The spec guarantees the header and root directory fit in the first 16 KiB.
         let first = Self::read(&backend, http, 0, 16384).await.with_context(|| format!("opening {spec}"))?;
         let header = pmtiles::parse_header(&first)?;
@@ -369,7 +355,16 @@ impl Source {
             });
         }
         if spec.contains("{z}") {
-            return Ok(Self { name: spec.to_string(), kind: Kind::Xyz(spec.into()), http, cache_dir, min_zoom: 0, max_zoom: 14, center: None, attribution: None });
+            return Ok(Self {
+                name: spec.to_string(),
+                kind: Kind::Xyz(spec.into()),
+                http,
+                cache_dir,
+                min_zoom: 0,
+                max_zoom: 14,
+                center: None,
+                attribution: None,
+            });
         }
         if !is_http {
             bail!("{spec}: expected a .pmtiles file, an XYZ URL with {{z}}/{{x}}/{{y}}, or a TileJSON URL");
@@ -625,7 +620,16 @@ mod pm_file_tests {
         let Ok(path) = std::env::var("MAPTERM_TEST_PMTILES") else { return };
         let http = super::http_client();
         let pm = super::PmArchive::open_raster(&path, &http).await.expect("open");
-        eprintln!("header: type {} comp {} internal {} zoom {}..{} root {}+{}", pm.header.tile_type, pm.header.tile_compression, pm.header.internal_compression, pm.header.min_zoom, pm.header.max_zoom, pm.header.root_off, pm.header.root_len);
+        eprintln!(
+            "header: type {} comp {} internal {} zoom {}..{} root {}+{}",
+            pm.header.tile_type,
+            pm.header.tile_compression,
+            pm.header.internal_compression,
+            pm.header.min_zoom,
+            pm.header.max_zoom,
+            pm.header.root_off,
+            pm.header.root_len
+        );
         let t = pm.tile(&http, 15, 9372, 12536).await.expect("read");
         eprintln!("tile 15/9372/12536 -> {:?} bytes", t.as_ref().map(|b| b.len()));
         assert!(t.is_some());
