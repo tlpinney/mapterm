@@ -576,6 +576,14 @@ pub struct Block {
 /// Give every cell of `area` to the raster tile under its center and group the cells into
 /// rectangles, one per tile, with the matching source rectangle in that tile.
 pub fn layout(store: &RasterStore, cam: &Camera, area: Rect, rz: u8) -> Vec<Block> {
+    layout_max(store, cam, area, rz, (u16::MAX, u16::MAX))
+}
+
+/// Like [`layout`], but no block is larger than `max` (columns, rows): bigger ones are split
+/// into pieces of the same tile. herdr drops kitty placements that cover a very large area
+/// (a tile stretched far past its source zoom), while the same image in smaller pieces shows.
+/// Each piece's edges come from the same world coordinates, so neighbors meet without gaps.
+pub fn layout_max(store: &RasterStore, cam: &Camera, area: Rect, rz: u8, max: (u16, u16)) -> Vec<Block> {
     if area.width == 0 || area.height == 0 {
         return Vec::new();
     }
@@ -587,19 +595,19 @@ pub fn layout(store: &RasterStore, cam: &Camera, area: Rect, rz: u8) -> Vec<Bloc
     let wy = |dot: f64| cy + (dot - h / 2.0) / scale;
     let n = (1u64 << rz) as f64;
     // Runs of columns (and rows) whose centers fall in the same tile column (row).
-    let runs = |count: u16, per_cell: f64, world: &dyn Fn(f64) -> f64| {
+    let runs = |count: u16, per_cell: f64, world: &dyn Fn(f64) -> f64, limit: u16| {
         let mut out: Vec<(u16, u16, i64)> = Vec::new();
         for c in 0..count {
             let t = (world((c as f64 + 0.5) * per_cell) * n).floor() as i64;
             match out.last_mut() {
-                Some((_, end, last)) if *last == t => *end = c + 1,
+                Some((start, end, last)) if *last == t && *end - *start < limit => *end = c + 1,
                 _ => out.push((c, c + 1, t)),
             }
         }
         out
     };
-    let cols = runs(area.width, 2.0, &wx);
-    let rows = runs(area.height, 4.0, &wy);
+    let cols = runs(area.width, 2.0, &wx, max.0.max(1));
+    let rows = runs(area.height, 4.0, &wy, max.1.max(1));
     let mut blocks = Vec::new();
     for &(c0, c1, tx) in &cols {
         for &(r0, r1, ty) in &rows {
@@ -709,6 +717,35 @@ mod tests {
         let osm = RasterSource::from_preset(preset("osm").unwrap(), None).unwrap();
         assert!(osm.cache && !osm.wants_key());
         assert_eq!(RasterSource::from_preset(preset("mapbox").unwrap(), Some("t".into())).unwrap().tile_px, 512);
+    }
+
+    #[test]
+    fn capped_layout_still_covers_every_cell_once() {
+        let mut store = RasterStore::default();
+        // Zoomed far past the tiles' zoom: each tile spans many cells and must be split.
+        let cam = Camera::new(-77.0353, 38.8895, 17.5);
+        let area = Rect::new(0, 1, 150, 45);
+        let rz = 14;
+        for id in tiles_for(&cam, area, rz) {
+            store.insert(id, Some(RasterTile { id: 0, png: vec![1], rgba: image::RgbaImage::new(256, 256) }));
+        }
+        let blocks = layout_max(&store, &cam, area, rz, (32, 16));
+        let mut covered = vec![0u8; area.width as usize * area.height as usize];
+        for b in &blocks {
+            assert!(b.cells.width <= 32 && b.cells.height <= 16);
+            for r in b.cells.y..b.cells.bottom() {
+                for c in b.cells.x..b.cells.right() {
+                    covered[(r - area.y) as usize * area.width as usize + (c - area.x) as usize] += 1;
+                }
+            }
+        }
+        assert!(covered.iter().all(|&n| n == 1));
+        // Neighboring pieces of one tile share their source edge exactly.
+        for a in &blocks {
+            if let Some(b) = blocks.iter().find(|b| b.cells.x == a.cells.right() && b.cells.y == a.cells.y && Arc::ptr_eq(&a.tile, &b.tile)) {
+                assert_eq!(a.src.0 + a.src.2, b.src.0, "no gap or overlap between pieces");
+            }
+        }
     }
 
     #[test]

@@ -652,7 +652,9 @@ async fn main() -> Result<()> {
                             cmds.push_str(&mapterm::kitty::free(id));
                         }
                     }
-                    let blocks = mapterm::raster::layout(&rstore, &draw_cam, map_area, rz);
+                    // Pieces no bigger than 32x16 cells, which herdr relays (it drops
+                    // placements stretched over very large areas).
+                    let blocks = mapterm::raster::layout_max(&rstore, &draw_cam, map_area, rz, (32, 16));
                     dlog(|| format!("  placing {} blocks", blocks.len()));
                     for (i, b) in blocks.iter().enumerate() {
                         if sent.insert(b.tile.id) {
