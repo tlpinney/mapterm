@@ -447,7 +447,7 @@ impl RasterTile {
     }
 
     /// Average color of a source rectangle (for drawing into cell backgrounds).
-    fn average(&self, x: u32, y: u32, w: u32, h: u32) -> Color {
+    pub(crate) fn average(&self, x: u32, y: u32, w: u32, h: u32) -> Color {
         let (iw, ih) = self.size();
         let (x1, y1) = ((x + w).min(iw), (y + h).min(ih));
         let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);

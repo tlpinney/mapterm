@@ -20,18 +20,23 @@ use ratatui::{
 use std::io::Write;
 
 use mapterm::{
-    Controller,
-    Camera, CustomLayer, LayerStack, Markers, Overlay, Source, VectorTiles, pick_all, Style, Theme, TileId, TileStore, Viewport, prepare, smooth, source::OPENFREEMAP,
-    store::Prepared,
+    Camera, Controller, KittyState, Map, MapSource, Markers, Overlay, RasterMode, Source, StyleLayer, TileId, Viewport,
+    map::Loaded,
+    smooth,
+    source::OPENFREEMAP,
+    spec::Kind,
+    stylejson::{self, Schema},
 };
 use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: mapterm [SOURCE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
 
-  SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL
-                (default: OpenFreeMap planet)
+  SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL, drawn
+                with mapterm's terminal style (default: OpenFreeMap planet)
+  --style       a MapLibre style instead: liberty, positron, bright, dark or fiord
+                (OpenFreeMap), a style URL, or a style.json file
   --geojson     a GeoJSON file or URL drawn as a layer over the map (repeatable; each gets
                 its own color; names from a `name` property; inspect shows properties)
   --at          start position (default: fit the GeoJSON layers, else the source's center)
@@ -52,7 +57,7 @@ usage: mapterm [SOURCE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LO
                           keep tiles on disk or not (default: on, off for keyed providers)
   --raster-attribution T  credit for the layer (known providers are filled in)
   --tms                   count raster rows from the bottom (TMS) even with a plain {y}
-  --light       light theme
+  --light       light theme (the built-in style; t switches)
   --snapshot    render one frame to stdout as text and exit
   --pick        with --snapshot: print the features under that cell as JSON lines instead
 
@@ -69,7 +74,8 @@ experimental: MAPTERM_SMOOTH=shift (pixel-smooth dragging) or MAPTERM_SMOOTH=1 (
       See https://github.com/tlpinney/ghostty (branch smooth).";
 
 struct Args {
-    source: String,
+    source: Option<String>,
+    style: Option<String>,
     at: Option<(f64, f64)>,
     zoom: Option<f64>,
     light: bool,
@@ -97,7 +103,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
+    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -106,6 +112,7 @@ fn args() -> Result<Args> {
                 let (la, lo) = v.split_once(',').context("--at LAT,LON")?;
                 a.at = Some((lo.trim().parse()?, la.trim().parse()?));
             }
+            "--style" => a.style = Some(it.next().context("--style NAME|URL|FILE")?),
             "-z" | "--zoom" => a.zoom = Some(it.next().context("-z ZOOM")?.parse()?),
             "--light" => a.light = true,
             "--raster" => a.raster = Some(it.next().context("--raster URL")?),
@@ -147,13 +154,17 @@ fn args() -> Result<Args> {
                 std::process::exit(0);
             }
             s if s.starts_with('-') => bail!("unknown option {s}\n\n{USAGE}"),
-            s => a.source = s.into(),
+            s => a.source = Some(s.into()),
         }
     }
     Ok(a)
 }
 
-type Done = (TileId, Result<Prepared>);
+type Done = (String, TileId, Result<Loaded>);
+
+/// Ids of the layers the viewer adds.
+const RASTER: &str = "mapterm-raster";
+const OVERLAYS: &str = "mapterm-overlays";
 
 /// Debug log for troubleshooting (MAPTERM_LOG=path); a no-op unless set.
 fn dlog(msg: impl FnOnce() -> String) {
@@ -194,24 +205,6 @@ async fn list_planet_mosaics(key_cmd: Option<&str>) -> Result<()> {
     eprintln!("{count} mosaics; use one with --raster planet --raster-param mosaic=NAME");
     Ok(())
 }
-type RasterDone = (TileId, Result<Option<mapterm::raster::RasterTile>>);
-
-fn fetch_raster(src: &Arc<mapterm::raster::RasterSource>, sem: &Arc<Semaphore>, id: TileId, tx: mpsc::UnboundedSender<RasterDone>) {
-    let (src, sem) = (src.clone(), sem.clone());
-    tokio::spawn(async move {
-        let _permit = sem.acquire_owned().await;
-        let res = match src.tile(id.0, id.1, id.2).await {
-            Ok(Some(bytes)) => tokio::task::spawn_blocking(move || mapterm::raster::decode(&bytes).map(Some))
-                .await
-                .map_err(Into::into)
-                .and_then(|r| r),
-            Ok(None) => Ok(None),
-            Err(e) => Err(e),
-        };
-        let _ = tx.send((id, res));
-    });
-}
-
 /// Copy text to the system clipboard with OSC 52 (Ghostty and most modern terminals; herdr
 /// relays it).
 fn osc52_copy(text: &str) -> std::io::Result<()> {
@@ -294,7 +287,8 @@ fn draw_inspector(f: &mut ratatui::Frame, area: Rect, picks: &[mapterm::Pick], s
     let Some(p) = picks.get(sel) else { return rows };
     let key = |k: &str| Span::styled(format!(" {k:<17}"), dim);
     let mut d: Vec<Line> = vec![Line::default(), Line::from(Span::styled(format!(" {}", p.title()), TStyle::new().add_modifier(Modifier::BOLD)))];
-    d.push(Line::from(vec![key("layer"), Span::raw(p.layer.to_string())]));
+    d.push(Line::from(vec![key("drawn by"), Span::raw(p.style_layer.as_deref().unwrap_or("(not drawn)").to_string())]));
+    d.push(Line::from(vec![key("source layer"), Span::raw(p.layer.to_string())]));
     let geom = mapterm::pick::geom_name(p.geom);
     d.push(Line::from(vec![key("geometry"), Span::raw(if p.drawn { geom.to_string() } else { format!("{geom} (not drawn)") })]));
     d.push(Line::from(vec![key("center"), Span::raw(format!("{:.5}, {:.5}", p.stats.center.1, p.stats.center.0))]));
@@ -307,7 +301,7 @@ fn draw_inspector(f: &mut ratatui::Frame, area: Rect, picks: &[mapterm::Pick], s
     d.push(Line::from(vec![key("vertices"), Span::raw(p.stats.vertices.to_string())]));
     match p.tile {
         Some(t) => d.push(Line::from(vec![key("tile"), Span::raw(format!("{}/{}/{}", t.0, t.1, t.2))])),
-        None => d.push(Line::from(vec![key("source"), Span::raw("GeoJSON layer")])),
+        None => d.push(Line::from(vec![key("source"), Span::raw(format!("{} (GeoJSON)", p.source.as_deref().unwrap_or("?")))])),
     }
     d.push(Line::default());
     d.push(Line::from(Span::styled(" properties", TStyle::new().add_modifier(Modifier::BOLD))));
@@ -347,17 +341,48 @@ fn set_pixel_mouse(on: bool) -> std::io::Result<()> {
     out.flush()
 }
 
-fn fetch(src: &Arc<Source>, sem: &Arc<Semaphore>, style: Style, id: TileId, tx: mpsc::UnboundedSender<Done>) {
-    let (src, sem) = (src.clone(), sem.clone());
-    tokio::spawn(async move {
-        let _permit = sem.acquire_owned().await;
-        let res = match src.tile(id.0, id.1, id.2).await {
-            Ok(Some(bytes)) => tokio::task::spawn_blocking(move || prepare(&bytes, &style, id.0)).await.map_err(Into::into).and_then(|r| r),
-            Ok(None) => Ok(Prepared::default()),
-            Err(e) => Err(e),
-        };
-        let _ = tx.send((id, res));
-    });
+/// Guess the vector tile schema from the tile under the camera (OpenMapTiles if unsure).
+async fn detect_schema(src: &Source, cam: &Camera) -> Schema {
+    let z = cam.tile_zoom(src.min_zoom, src.max_zoom);
+    let n = (1u64 << z) as f64;
+    let (wx, wy) = mapterm::render::to_world(cam.lon, cam.lat);
+    let (x, y) = ((wx * n).floor().clamp(0.0, n - 1.0) as u32, (wy * n).floor().clamp(0.0, n - 1.0) as u32);
+    match src.tile(z, x, y).await {
+        Ok(Some(b)) => match mapterm::store::decode_features(&b) {
+            Ok(f) if !f.is_empty() => Schema::detect(f.iter().map(|f| &*f.layer)),
+            _ => Schema::OpenMapTiles,
+        },
+        _ => Schema::OpenMapTiles,
+    }
+}
+
+/// What the viewer shows, from its toggles: `labels` (n), `vector` (v: 0 everything, 1
+/// labels only, 2 no vector map) and whether a --raster layer is under the map (basemap and
+/// GeoJSON fills are hidden over it so the imagery shows). A layer the style hides stays hidden.
+fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, labels: bool, vector: u8, raster: bool) {
+    let ids: Vec<String> = map.layer_ids().into_iter().map(str::to_string).collect();
+    for id in ids {
+        let Some(l) = map.layer(&id) else { continue };
+        let src = l.source.as_deref().and_then(|s| map.source(s));
+        let basemap = matches!(src, Some(MapSource::Vector(_)));
+        let geojson = matches!(src, Some(MapSource::GeoJson(_)));
+        let mut on = base.get(&id).copied().unwrap_or(true);
+        if l.kind == Kind::Symbol && !(labels && vector < 2) {
+            on = false;
+        }
+        if basemap && l.kind != Kind::Symbol && vector >= 1 {
+            on = false;
+        }
+        if raster && l.kind == Kind::Fill && (basemap || geojson) {
+            on = false;
+        }
+        let _ = map.set_visibility(&id, on);
+    }
+}
+
+/// Visibility the style itself gives each layer, before the viewer's toggles.
+fn base_visibility(map: &Map) -> std::collections::HashMap<String, bool> {
+    map.layer_ids().into_iter().filter_map(|id| map.layer(id).map(|l| (id.to_string(), l.visible))).collect()
 }
 
 #[tokio::main]
@@ -366,22 +391,39 @@ async fn main() -> Result<()> {
     if a.list_mosaics {
         return list_planet_mosaics(a.raster_key_cmd.as_deref()).await;
     }
-    let src = Arc::new(Source::open(&a.source).await?);
-    let mut layers = Vec::new();
+    if a.style.is_some() && a.source.is_some() {
+        bail!("give either a SOURCE (drawn with the built-in style) or --style, not both");
+    }
+    let mut geo = Vec::new();
     for (i, g) in a.geojson.iter().enumerate() {
         let color = mapterm::geojson::PALETTE[i % mapterm::geojson::PALETTE.len()];
-        layers.push(mapterm::geojson::load(g, color).await.with_context(|| format!("--geojson {g}"))?);
+        geo.push(mapterm::geojson::load(g, color).await.with_context(|| format!("--geojson {g}"))?);
     }
+    // The basemap: a MapLibre style, or SOURCE with the built-in terminal style.
+    let src = match &a.style {
+        Some(_) => None,
+        None => Some(Source::open(a.source.as_deref().unwrap_or(OPENFREEMAP)).await?),
+    };
+    let mut map = match &a.style {
+        Some(st) => Map::from_style(st).await.with_context(|| format!("--style {st}"))?,
+        None => Map::new(),
+    };
+    let basemap_name = match (&a.style, &src) {
+        (Some(st), _) => st.clone(),
+        (None, Some(s)) => s.name.clone(),
+        _ => String::new(),
+    };
     // With GeoJSON and no --at, start with every layer in view.
-    let fit = (a.at.is_none() && !layers.is_empty())
+    let fit = (a.at.is_none() && !geo.is_empty())
         .then(|| {
-            let b = layers.iter().filter_map(|l| l.bounds_lonlat()).reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))?;
+            let b = geo.iter().filter_map(|l| l.bounds_lonlat()).reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))?;
             let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
             let (snap_cols, snap_rows) = a.snapshot.unwrap_or((cols, rows.saturating_sub(1)));
             Some(mapterm::geojson::fit(b, snap_cols, snap_rows, 18.0))
         })
         .flatten();
-    let (lon, lat, z) = match (a.at, src.center) {
+    let center = src.as_ref().and_then(|s| s.center).or(map.center);
+    let (lon, lat, z) = match (a.at, center) {
         _ if fit.is_some() => {
             let (lo, la, z) = fit.unwrap();
             (lo, la, a.zoom.unwrap_or(z))
@@ -391,10 +433,19 @@ async fn main() -> Result<()> {
         (None, None) => (0.0, 20.0, a.zoom.unwrap_or(2.0)),
     };
     let cam = Camera::new(lon, lat, z);
-    let mut style = Style { theme: if a.light { Theme::Light } else { Theme::Dark } };
-    let sem = Arc::new(Semaphore::new(6));
-    let (tx, mut rx) = mpsc::unbounded_channel::<Done>();
-    let mut store = TileStore::default();
+    // The built-in style's schema and theme, for `t`.
+    let mut theme: Option<(Schema, bool)> = None;
+    if let Some(src) = src {
+        let schema = detect_schema(&src, &cam).await;
+        map = Map::terminal(src, schema, !a.light)?;
+        theme = Some((schema, !a.light));
+    }
+    for w in map.warnings() {
+        dlog(|| format!("style: {w}"));
+    }
+    let style_warnings = map.warnings().len();
+    let mut basemap_ids: Vec<String> = map.layer_ids().into_iter().map(str::to_string).collect();
+
     // Optional raster layer under the vector map.
     let raster = match &a.raster {
         Some(spec) => {
@@ -444,50 +495,78 @@ async fn main() -> Result<()> {
             if let Some(t) = &a.raster_attribution {
                 r.attribution = t.clone();
             }
-            Some(Arc::new(r))
+            let r = Arc::new(r);
+            map.add_source(RASTER, MapSource::raster(r.clone()))?;
+            let bottom = map.layer_ids().first().map(|s| s.to_string());
+            map.add_layers(vec![StyleLayer::raster(RASTER, RASTER)], bottom.as_deref())?;
+            Some(r)
         }
         None => None,
     };
-    let mut rstore = mapterm::raster::RasterStore::default();
-    let mut rpending: HashSet<TileId> = HashSet::new();
-    let (rtx, mut rrx) = mpsc::unbounded_channel::<RasterDone>();
+    // GeoJSON layers over the basemap, each in its own color.
+    let mut legend: Vec<(String, Color)> = Vec::new();
+    for (i, g) in geo.into_iter().enumerate() {
+        let color = g.color;
+        let mut id = g.name.clone();
+        if map.source(&id).is_some() {
+            id = format!("{id}-{}", i + 1);
+        }
+        map.add_source(&id, MapSource::from(g))?;
+        map.add_layers(mapterm::geojson::overlay_layers(&id, color, true), None)?;
+        legend.push((id, color));
+    }
+    // Highlights, the crosshair and the clicked spot, on top of everything.
+    map.add_custom_layer(OVERLAYS, Markers::default(), None)?;
+    let mut base = base_visibility(&map);
+    let mut labels = true;
+    // Vector overlay: 0 = everything (no fills over a raster), 1 = labels only, 2 = off.
+    let mut vector: u8 = 0;
+    apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+
+    let sem = Arc::new(Semaphore::new(6));
     // Tile servers like OSM's ask for at most two connections.
     let rsem = Arc::new(Semaphore::new(2));
+    let (tx, mut rx) = mpsc::unbounded_channel::<Done>();
+    let spawn_load = |req: mapterm::TileRequest, tx: mpsc::UnboundedSender<Done>| {
+        let sem = if req.is_raster() { rsem.clone() } else { sem.clone() };
+        tokio::spawn(async move {
+            let _permit = sem.acquire_owned().await;
+            let r = req.load().await;
+            let _ = tx.send((req.source, req.id, r));
+        });
+    };
 
     if let Some((w, h)) = a.snapshot {
         let area = Rect::new(0, 0, w, h);
-        let vp = Viewport::new(&cam, area);
-        let ids = vp.tiles(cam.tile_zoom(src.min_zoom, src.max_zoom));
-        for id in &ids {
-            fetch(&src, &sem, style, *id, tx.clone());
-        }
-        for _ in 0..ids.len() {
-            let (id, r) = rx.recv().await.context("fetch channel closed")?;
-            match r {
-                Ok(t) => store.insert(id, t),
-                Err(e) => eprintln!("tile {id:?}: {e:#}"),
+        for req in map.tile_requests(&cam, area) {
+            let r = req.load().await;
+            if let Err(e) = map.insert_loaded(&req.source, req.id, r) {
+                eprintln!("{e:#}");
             }
         }
         if let Some((c, r)) = a.pick {
             let dot = ((c as f64 - area.x as f64) * 2.0 + 1.0, (r as f64 - area.y as f64) * 4.0 + 2.0);
-            let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
-            let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
-            stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
-            for p in pick_all(&stack, &cam, area, dot) {
+            for p in map.query_features(&cam, area, dot) {
                 println!("{}", p.to_json());
             }
             return Ok(());
         }
         let mut buf = Buffer::empty(area);
-        let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
-        let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
-        stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
-        LayerStack { camera: &cam, layers: &stack }.render(area, &mut buf);
+        map.view(&cam).render(area, &mut buf);
         for y in 0..h {
             let line: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
             println!("{}", line.trim_end());
         }
         return Ok(());
+    }
+
+    // Raster drawing: real images with kitty graphics, else cell background colors.
+    let has_raster = map.sources().any(|(_, s)| matches!(s, MapSource::Raster(_)));
+    let kitty = has_raster && mapterm::kitty::supported();
+    let mut kstate = KittyState::default();
+    let mut cpx = cell_px().unwrap_or((9.0, 20.0));
+    if kitty {
+        map.raster_mode = RasterMode::Kitty { cell_px: cpx };
     }
 
     let mut term = ratatui::init();
@@ -501,20 +580,14 @@ async fn main() -> Result<()> {
         }
     });
 
-    let mut pending: HashSet<TileId> = HashSet::new();
+    let mut pending: HashSet<(String, TileId)> = HashSet::new();
     let mut errors = 0usize;
-    let mut labels = true;
-    // Vector overlay: 0 = everything (no fills over a raster), 1 = labels only, 2 = off.
-    let mut vector: u8 = 0;
-    // Raster drawing: real images with kitty graphics, else cell background colors.
-    let kitty = raster.is_some() && mapterm::kitty::supported();
-    let mut sent: HashSet<u32> = HashSet::new();
-    let mut cpx = cell_px().unwrap_or((9.0, 20.0));
     let mut smooth_on = a.smooth;
     // `s` only toggles smooth scrolling when MAPTERM_SMOOTH opted in to the experiment.
     let smooth_available = a.smooth;
     let shift_mode = a.shift;
-    let mut ctl = Controller::new(cam, src.min_zoom as f64, src.max_zoom as f64 + 3.0);
+    let (zmin, zmax) = map.zoom_range();
+    let mut ctl = Controller::new(cam, zmin as f64, zmax as f64 + 3.0);
     // Smooth mode: pixel mouse when the terminal reports its pixel size; in shift mode drags
     // move by exact fractions (the terminal draws the sub-cell rest), otherwise the wheel
     // pans rows for the v2 region.
@@ -538,7 +611,8 @@ async fn main() -> Result<()> {
     let mut hover_dot: Option<(f64, f64)> = None;
     let mut list_rows: Vec<(u16, usize)> = Vec::new();
     let mut panel_area = Rect::default();
-    let mut note: Option<(Instant, String)> = None;
+    let mut note: Option<(Instant, String)> =
+        (style_warnings > 0).then(|| (Instant::now(), format!("{style_warnings} style properties not drawn (MAPTERM_LOG lists them)")));
     let mut last_cam = cam;
     let mut map_area = Rect::default();
     let mut frame_ms = 0.0f64;
@@ -546,7 +620,7 @@ async fn main() -> Result<()> {
         loop {
             ctl.tick(Instant::now());
             // One synchronized update per frame when escape sequences follow the cells.
-            let sync = smooth_on || raster.is_some();
+            let sync = smooth_on || kitty;
             if sync {
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
@@ -582,16 +656,8 @@ async fn main() -> Result<()> {
             if let (true, Some((lon, lat))) = (inspect && !picks.is_empty(), click_at) {
                 overlays.push(Overlay::Marker { lon, lat, glyph: "+".into(), style: TStyle::new().fg(Color::Rgb(255, 215, 0)), label: None, priority: 99 });
             }
-            // Raster zoom: about 2 screen pixels per source pixel as images (how browsers show
-            // 256 px tiles on Retina screens, and half the tiles of 1:1), one cell per
-            // source pixel as cell colors.
-            let rz = raster.as_ref().map(|r| {
-                let dots_per_px = if kitty { 2.0 / (cpx.0 / 2.0) } else { 2.0 };
-                mapterm::raster::raster_zoom(&draw_cam, r.tile_px, dots_per_px, r.max_zoom)
-            });
-            for l in &mut layers {
-                l.fill = raster.is_none();
-                l.labels = labels && vector < 2;
+            if let Some(m) = map.custom_layer_mut::<Markers>(OVERLAYS) {
+                m.0 = overlays;
             }
             term.draw(|f| {
                 let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
@@ -599,24 +665,7 @@ async fn main() -> Result<()> {
                 let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
                 map_area = m;
                 panel_area = panel;
-                if let (false, Some(rz)) = (kitty, rz) {
-                    let blocks = mapterm::raster::layout(&rstore, &draw_cam, m, rz);
-                    f.render_widget(mapterm::raster::RasterCells { blocks: &blocks }, m);
-                }
-                // The layer stack, bottom to top: basemap, GeoJSON layers, highlights and markers.
-                let tiles = VectorTiles {
-                    store: &store,
-                    min_zoom: src.min_zoom,
-                    max_zoom: src.max_zoom,
-                    fills: raster.is_none() && vector == 0,
-                    lines: vector == 0,
-                    labels: labels && vector < 2,
-                };
-                let marks = Markers(&overlays);
-                let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
-                stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
-                stack.push(&marks);
-                f.render_widget(LayerStack { camera: &draw_cam, layers: &stack }, m);
+                f.render_widget(map.view(&draw_cam), m);
                 list_rows = if panel_w > 0 { draw_inspector(f, panel, &picks, sel) } else { Vec::new() };
                 if let Some(r) = box_rect {
                     f.render_widget(Block::bordered().border_style(TStyle::new().fg(Color::Yellow)), r);
@@ -644,8 +693,8 @@ async fn main() -> Result<()> {
                 {
                     spans.push(Span::styled(format!("{n} "), TStyle::new().fg(Color::Green)));
                 }
-                if !pending.is_empty() || !rpending.is_empty() {
-                    spans.push(Span::styled(format!("loading {} ", pending.len() + rpending.len()), TStyle::new().fg(Color::Yellow)));
+                if !pending.is_empty() {
+                    spans.push(Span::styled(format!("loading {} ", pending.len()), TStyle::new().fg(Color::Yellow)));
                 }
                 if errors > 0 {
                     spans.push(Span::styled(format!("{errors} failed "), TStyle::new().fg(Color::Red)));
@@ -665,12 +714,12 @@ async fn main() -> Result<()> {
                     let credit = if r.attribution.is_empty() { r.name.clone() } else { format!("imagery {}", r.attribution) };
                     spans.push(Span::styled(format!("{credit} {how}{mode}"), TStyle::new().fg(Color::LightBlue)));
                 }
-                for l in &layers {
-                    spans.push(Span::styled("● ", TStyle::new().fg(l.color)));
-                    spans.push(Span::styled(format!("{} ", l.name), dim));
+                for (name, color) in &legend {
+                    spans.push(Span::styled("● ", TStyle::new().fg(*color)));
+                    spans.push(Span::styled(format!("{name} "), dim));
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
-                spans.push(Span::styled(format!("· {} · © OpenStreetMap · q quit", src.name), dim));
+                spans.push(Span::styled(format!("· {basemap_name} · © OpenStreetMap · q quit"), dim));
                 f.render_widget(Paragraph::new(Line::from(spans)), s);
             })?;
             ctl.set_area(map_area);
@@ -682,78 +731,37 @@ async fn main() -> Result<()> {
                     let decl = if shift_mode { smooth::declare_shift(0, map_area, ox, oy) } else { smooth::declare(0, map_area, &cam) };
                     out.write_all(decl.as_bytes())?;
                 }
-                dlog(|| format!("frame: kitty={kitty} rz={rz:?} cell_px={cpx:?} map={map_area:?} stored_pending={}", rpending.len()));
-                if let (true, Some(rz)) = (kitty, rz) {
-                    // Re-place the raster blocks under the text: images are sent once, then
+                if kitty {
+                    // Re-place the raster images under the text: images are sent once, then
                     // each frame only moves placements.
-                    let mut cmds = String::from(mapterm::kitty::CLEAR_PLACEMENTS);
-                    for id in rstore.take_evicted() {
-                        if sent.remove(&id) {
-                            cmds.push_str(&mapterm::kitty::free(id));
-                        }
-                    }
-                    // Pieces no bigger than 32x16 cells, which herdr relays (it drops
-                    // placements stretched over very large areas).
-                    let blocks = mapterm::raster::layout_max(&rstore, &draw_cam, map_area, rz, (32, 16));
-                    dlog(|| format!("  placing {} blocks", blocks.len()));
-                    for (i, b) in blocks.iter().enumerate() {
-                        if sent.insert(b.tile.id) {
-                            cmds.push_str(&mapterm::kitty::transmit(b.tile.id, &b.tile.png));
-                        }
-                        cmds.push_str(&mapterm::kitty::place(b.tile.id, i as u32 + 1, b.cells.x, b.cells.y, b.src, b.cells.width, b.cells.height));
-                    }
+                    let cmds = map.kitty_commands(&draw_cam, map_area, &mut kstate);
+                    dlog(|| format!("frame: kitty cmds {} bytes, cell_px={cpx:?} map={map_area:?}", cmds.len()));
                     out.write_all(cmds.as_bytes())?;
                 }
                 crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;
             }
 
             // Fetch what the view needs that we don't have yet.
-            let vp = Viewport::new(&cam, map_area);
-            for id in vp.tiles(cam.tile_zoom(src.min_zoom, src.max_zoom)) {
-                if !store.contains(&id) && pending.insert(id) {
-                    fetch(&src, &sem, style, id, tx.clone());
-                }
-            }
-
-            if let (Some(r), Some(rz)) = (&raster, rz) {
-                for id in mapterm::raster::tiles_for(&draw_cam, map_area, rz) {
-                    if !rstore.contains(&id) && rpending.insert(id) {
-                        fetch_raster(r, &rsem, id, rtx.clone());
-                    }
+            for req in map.tile_requests(&draw_cam, map_area) {
+                if pending.insert((req.source.clone(), req.id)) {
+                    spawn_load(req, tx.clone());
                 }
             }
 
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
             let idle = if ctl.animating() { Duration::from_millis(16) } else { Duration::from_millis(500) };
             tokio::select! {
-                Some(first) = rrx.recv() => {
+                Some(first) = rx.recv() => {
                     let mut batch = vec![first];
-                    while let Ok(d) = rrx.try_recv() {
-                        batch.push(d);
-                    }
-                    for (id, r) in batch {
-                        rpending.remove(&id);
-                        dlog(|| format!("raster tile {id:?}: {}", match &r { Ok(Some(t)) => format!("{}x{} image", t.size().0, t.size().1), Ok(None) => "none".into(), Err(e) => format!("error {e:#}") }));
-                        match r {
-                            Ok(t) => rstore.insert(id, t),
-                            Err(_) => {
-                                // Remember the failure so the tile isn't fetched again and again.
-                                errors += 1;
-                                rstore.insert(id, None);
-                            }
-                        }
-                    }
-                }
-                Some(done) = rx.recv() => {
-                    let mut batch = vec![done];
                     while let Ok(d) = rx.try_recv() {
                         batch.push(d);
                     }
-                    for (id, r) in batch {
-                        pending.remove(&id);
-                        match r {
-                            Ok(t) => store.insert(id, t),
-                            Err(_) => errors += 1,
+                    for (source, id, r) in batch {
+                        pending.remove(&(source.clone(), id));
+                        if let Err(e) = map.insert_loaded(&source, id, r) {
+                            // Stored empty, so the tile isn't fetched again and again.
+                            dlog(|| format!("{e:#}"));
+                            errors += 1;
                         }
                     }
                 }
@@ -810,8 +818,14 @@ async fn main() -> Result<()> {
                                     }
                                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
-                                    KeyCode::Char('n') => labels = !labels,
-                                    KeyCode::Char('v') => vector = (vector + 1) % 3,
+                                    KeyCode::Char('n') => {
+                                        labels = !labels;
+                                        apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                                    }
+                                    KeyCode::Char('v') => {
+                                        vector = (vector + 1) % 3;
+                                        apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                                    }
                                     KeyCode::Char('s') if smooth_available => {
                                         smooth_on = !smooth_on;
                                         apply_smooth(&mut ctl, smooth_on)?;
@@ -825,16 +839,29 @@ async fn main() -> Result<()> {
                                             out.flush()?;
                                         }
                                     }
-                                    KeyCode::Char('t') => {
-                                        style.theme = if style.theme == Theme::Dark { Theme::Light } else { Theme::Dark };
-                                        store.clear();
-                                        pending.clear();
-                                    }
+                                    KeyCode::Char('t') => match theme {
+                                        Some((schema, dark)) => {
+                                            // Swap the basemap layers for the other theme's, in place.
+                                            let (layers, _) = stylejson::style_layers(&stylejson::terminal_style(schema, !dark))?;
+                                            let ids: Vec<&str> = basemap_ids.iter().map(String::as_str).collect();
+                                            map.remove_layers(&ids);
+                                            let before = map.layer_ids().into_iter().find(|id| *id != RASTER).map(str::to_string);
+                                            basemap_ids = layers.iter().map(|l| l.id.clone()).collect();
+                                            map.add_layers(layers, before.as_deref())?;
+                                            base = base_visibility(&map);
+                                            apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                                            theme = Some((schema, !dark));
+                                        }
+                                        None => note = Some((Instant::now(), "t switches the built-in style's theme; this is --style".into())),
+                                    },
                                     _ => {}
                                 }
                             }
                             Event::Resize(..) => {
                                 cpx = cell_px().unwrap_or(cpx);
+                                if kitty {
+                                    map.raster_mode = RasterMode::Kitty { cell_px: cpx };
+                                }
                                 if ctl.pixel_mouse.is_some() {
                                     ctl.pixel_mouse = cell_px();
                                 }
@@ -869,10 +896,7 @@ async fn main() -> Result<()> {
                                     hover_dot = Some(dot);
                                     let key = (dot.0.floor() as i32, dot.1.floor() as i32);
                                     if hover.as_ref().is_none_or(|(k, _)| *k != key) {
-                                        let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
-                                        let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
-                                        stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
-                                        let under = pick_all(&stack, &last_cam, map_area, dot);
+                                        let under = map.query_features(&last_cam, map_area, dot);
                                         hover = Some((key, match under.first() {
                                             Some(p) => {
                                                 let more = if under.len() > 1 { format!(" +{} more", under.len() - 1) } else { String::new() };
@@ -888,10 +912,7 @@ async fn main() -> Result<()> {
                                     && inspect
                                 {
                                     let dot = Viewport::new(&last_cam, map_area).dot_ll(k.lon, k.lat);
-                                    let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
-                                    let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
-                                    stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
-                                    picks = pick_all(&stack, &last_cam, map_area, dot);
+                                    picks = map.query_features(&last_cam, map_area, dot);
                                     sel = 0;
                                     click_at = Some((k.lon, k.lat));
                                     if picks.is_empty() {

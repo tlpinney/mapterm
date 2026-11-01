@@ -51,11 +51,13 @@ pub fn transmit(id: u32, png: &[u8]) -> String {
 }
 
 /// Show source rectangle `src` (x, y, w, h pixels) of image `id`, scaled to `cols` x `rows`
-/// cells with its top-left at absolute cell (`col`, `row`), underneath the text.
-pub fn place(id: u32, placement: u32, col: u16, row: u16, src: (u32, u32, u32, u32), cols: u16, rows: u16) -> String {
+/// cells with its top-left at absolute cell (`col`, `row`), underneath the text. `z` is the
+/// stacking order among images (negative: under the text).
+#[allow(clippy::too_many_arguments)]
+pub fn place(id: u32, placement: u32, col: u16, row: u16, src: (u32, u32, u32, u32), cols: u16, rows: u16, z: i32) -> String {
     let (x, y, w, h) = src;
     format!(
-        "\x1b[{};{}H\x1b_Ga=p,i={id},p={placement},x={x},y={y},w={w},h={h},c={cols},r={rows},z=-1,C=1,q=2\x1b\\",
+        "\x1b[{};{}H\x1b_Ga=p,i={id},p={placement},x={x},y={y},w={w},h={h},c={cols},r={rows},z={z},C=1,q=2\x1b\\",
         row as u32 + 1,
         col as u32 + 1
     )
@@ -91,7 +93,7 @@ mod tests {
         assert!(t.starts_with("\x1b_Ga=t,f=100,t=d,i=7,q=2,m=1;"));
         assert!(t.ends_with("\x1b\\") && t.contains("\x1b_Gm=0;"));
         assert_eq!(t.matches("\x1b_G").count(), 2, "8000 base64 chars -> two chunks");
-        let p = place(7, 3, 4, 2, (10, 20, 30, 40), 5, 6);
+        let p = place(7, 3, 4, 2, (10, 20, 30, 40), 5, 6, -1);
         assert_eq!(p, "\x1b[3;5H\x1b_Ga=p,i=7,p=3,x=10,y=20,w=30,h=40,c=5,r=6,z=-1,C=1,q=2\x1b\\");
     }
 }

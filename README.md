@@ -12,8 +12,15 @@ mapterm                                                # OpenFreeMap planet, no 
 mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lon) at zoom 13
 mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over HTTP range requests
 mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, offline
+mapterm --style liberty                                # any MapLibre style: liberty, positron,
+mapterm --style ./my-style.json                        #   bright, dark, fiord, a URL or a file
 mapterm --snapshot 120x40 --at 38.8895,-77.0353         # print one frame as text and exit
 ```
+
+Without `--style`, mapterm draws the source with its own terminal style (OpenMapTiles
+or Protomaps schema, detected from the tiles; `--light` or `t` for the light theme).
+MapLibre styles draw what a terminal can show: colors, fills, lines, labels (bold and
+italic fonts), filters and zoom ranges; line widths, icons and 3D are skipped.
 
 ## Controls
 
@@ -24,7 +31,7 @@ They follow the MapLibre GL / Mapbox GL defaults:
 - **Double-click:** zoom in; **shift+double-click:** zoom out
 - **Shift+drag:** box zoom
 - **Arrows** (or `hjkl`) pan, **`+`/`-`** zoom to the next level, both eased
-- Terminal extras: sideways swipes pan; `i` inspect, `v` vector overlay, `n` labels, `t` light/dark theme, `q` quit
+- Terminal extras: sideways swipes pan; `i` inspect, `v` vector overlay, `n` labels, `t` light/dark theme (built-in style), `q` quit
 
 ## GeoJSON layers
 
@@ -112,8 +119,9 @@ Press **`i`** to switch to inspect mode, and `i` (or `Esc`) again to leave it.
 - **Click** lists every feature at that spot, drawn or not (roads, street names,
   buildings, parks, landcover, points of interest...), most specific first,
   and highlights the selected one on the map.
-- The panel shows the feature's layer, geometry type, center, length or area,
-  vertex count, source tile, and all its properties.
+- The panel shows the style layer that draws the feature (or that none does),
+  its source layer, geometry type, center, length or area, vertex count, source
+  tile, and all its properties.
 - **Click an entry** or press **Tab / Shift+Tab** to switch between them;
   **`y`** copies the selected feature as JSON to the clipboard (OSC 52).
 
@@ -179,7 +187,9 @@ let under = map.query_rendered_features(&ctl.cam, area, dot, Some(&["pins"]));
 style layers and adds a pin in about 50 lines, and
 [`examples/style.rs`](examples/style.rs) shows any style
 (`cargo run --release --example style -- dark`). `src/bin/mapterm.rs` is the
-full viewer; it still uses the older `LayerStack` API and moves onto `Map` next.
+full viewer built on the same `Map` (background tile loading with
+`tile_requests` / `insert_loaded`, kitty images with `kitty_commands`, and
+`query_features` for inspect).
 
 ## Experimental: smooth scrolling
 

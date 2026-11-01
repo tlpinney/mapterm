@@ -105,8 +105,15 @@ impl Map {
                     };
                     map.add_source(id, MapSource::geojson(&data).with_context(|| format!("source \"{id}\""))?)?;
                 }
-                t => map.warn(format!("source \"{id}\": type {} is not drawn yet", t.unwrap_or("?"))),
+                Some("raster") => match open_raster(s).await {
+                    Ok(r) => map.add_source(id, MapSource::raster(std::sync::Arc::new(r)))?,
+                    Err(e) => map.warn(format!("source \"{id}\": {e:#}")),
+                },
+                t => map.warn(format!("source \"{id}\": type {} is not drawn", t.unwrap_or("?"))),
             }
+        }
+        if let (Some(lon), Some(lat)) = (doc["center"][0].as_f64(), doc["center"][1].as_f64()) {
+            map.center = Some((lon, lat, doc["zoom"].as_f64().unwrap_or(2.0)));
         }
         map.add_style_layers(doc)?;
         Ok(map)
@@ -123,6 +130,34 @@ impl Map {
         }
         Ok(())
     }
+}
+
+/// Open a style's raster source: `tiles` templates, a TileJSON `url`, or `pmtiles://`.
+async fn open_raster(s: &Json) -> Result<crate::raster::RasterSource> {
+    use crate::raster::RasterSource;
+    let max_zoom = s["maxzoom"].as_u64().unwrap_or(22).min(30) as u8;
+    let tms = s["scheme"].as_str() == Some("tms");
+    let mut src = match (s["url"].as_str(), s["tiles"].get(0).and_then(Json::as_str)) {
+        (_, Some(t)) => RasterSource::new(t, tms, max_zoom)?,
+        (Some(url), None) if url.starts_with("pmtiles://") || url.ends_with(".pmtiles") => {
+            RasterSource::from_pmtiles(url.strip_prefix("pmtiles://").unwrap_or(url)).await?
+        }
+        (Some(url), None) => {
+            let http = crate::source::http_client();
+            let bytes = crate::source::get_with(&http, url, None, &[]).await?.with_context(|| format!("{url}: not found"))?;
+            let tj: Json = serde_json::from_slice(&bytes).with_context(|| format!("{url}: not TileJSON"))?;
+            let t = tj["tiles"].get(0).and_then(Json::as_str).with_context(|| format!("{url}: no tiles"))?;
+            let tms = tms || tj["scheme"].as_str() == Some("tms");
+            RasterSource::new(t, tms, tj["maxzoom"].as_u64().map_or(max_zoom, |z| z.min(30) as u8))?
+        }
+        _ => bail!("raster source without \"url\" or \"tiles\""),
+    };
+    // The style spec's default raster tile size is 512.
+    src.tile_px = s["tileSize"].as_u64().unwrap_or(512).clamp(64, 4096) as u32;
+    if let Some(a) = s["attribution"].as_str() {
+        src.attribution = a.to_string();
+    }
+    Ok(src)
 }
 
 /// Open a style's vector source: TileJSON `url`, `tiles` templates, or `pmtiles://` URLs.
@@ -144,7 +179,7 @@ async fn open_vector(s: &Json) -> Result<crate::map::VectorSource> {
     }
     match MapSource::vector(src) {
         MapSource::Vector(v) => Ok(v),
-        MapSource::GeoJson(_) => unreachable!(),
+        _ => unreachable!("MapSource::vector makes a vector source"),
     }
 }
 

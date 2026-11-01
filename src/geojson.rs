@@ -6,13 +6,9 @@ use anyhow::{Context, Result, bail};
 use ratatui::style::Color;
 use serde_json::Value as Json;
 
-use ratatui::style::{Modifier, Style as TStyle};
-use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    layer::{CustomLayer, DrawContext, PickContext},
     mvt::{GeomType, Value},
-    pick::Pick,
     render::to_world,
 };
 
@@ -68,68 +64,42 @@ impl GeoJson {
     }
 }
 
-impl CustomLayer for GeoJson {
-    fn name(&self) -> &str {
-        &self.name
+/// Style layers that draw a GeoJSON source in one color, the way `--geojson` does: tinted
+/// polygon fills (when `fill`), outlines and lines, `●` points with their names, and names
+/// at the middle of lines and polygons. Ids are `{source}-fill`, `-line`, `-point`, `-label`.
+pub fn overlay_layers(source: &str, color: Color, fill: bool) -> Vec<crate::spec::StyleLayer> {
+    use crate::spec::StyleLayer;
+    use serde_json::json;
+    let (r, g, b) = match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (255, 255, 255),
+    };
+    let hex = format!("#{r:02x}{g:02x}{b:02x}");
+    let t = |v: u8| (v as f32 * 0.32) as u8;
+    let tint = format!("#{:02x}{:02x}{:02x}", t(r), t(g), t(b));
+    let name = json!(["coalesce", ["get", "name"], ["get", "title"], ["get", "label"], ["get", "NAME"], ["get", "Name"]]);
+    let bold = json!(["Bold"]);
+    let mut out = Vec::new();
+    if fill {
+        out.push(StyleLayer::fill(format!("{source}-fill"), source).color(tint.as_str()));
     }
-
-    /// Polygon interiors tinted, outlines and lines in braille, points as `●`, names as
-    /// labels; only features overlapping the view are projected.
-    fn draw(&self, ctx: &mut DrawContext) {
-        let color = self.color;
-        let tint = match color {
-            Color::Rgb(r, g, b) => Color::Rgb((r as f32 * 0.32) as u8, (g as f32 * 0.32) as u8, (b as f32 * 0.32) as u8),
-            c => c,
-        };
-        for f in &self.features {
-            if !ctx.visible(f.bbox) {
-                continue;
-            }
-            let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| ctx.dot(x, y)).collect()).collect();
-            match f.geom {
-                GeomType::Polygon => {
-                    if self.fill {
-                        ctx.fill_dots(&dots, tint);
-                    }
-                    for ring in &dots {
-                        ctx.line_dots(ring, color);
-                    }
-                }
-                GeomType::Line => {
-                    for part in &dots {
-                        ctx.line_dots(part, color);
-                    }
-                }
-                _ => {
-                    for &p in dots.iter().flatten() {
-                        ctx.marker_dot(p, "●", TStyle::new().fg(color), 50, None);
-                    }
-                }
-            }
-            if self.labels
-                && let Some(text) = &f.label
-            {
-                // Points label beside the marker; lines and polygons at their middle.
-                let anchor = if f.geom == GeomType::Point {
-                    dots.first().and_then(|p| p.first()).map(|p| (p.0 + 4.0 + text.width() as f64, p.1))
-                } else {
-                    let a = ctx.dot((f.bbox[0] + f.bbox[2]) / 2.0, (f.bbox[1] + f.bbox[3]) / 2.0);
-                    Some(a)
-                };
-                if let Some(p) = anchor {
-                    ctx.label_dot(p, text, TStyle::new().fg(color).add_modifier(Modifier::BOLD), 60);
-                }
-            }
-        }
-    }
-
-    fn pick(&self, ctx: &PickContext) -> Vec<Pick> {
-        crate::pick::pick_layers(std::slice::from_ref(self), ctx.camera, ctx.area, ctx.target)
-    }
-
-    fn bounds(&self) -> Option<(f64, f64, f64, f64)> {
-        self.bounds_lonlat()
-    }
+    out.push(StyleLayer::line(format!("{source}-line"), source).color(hex.as_str()));
+    out.push(
+        StyleLayer::symbol(format!("{source}-point"), source)
+            .filter(json!(["==", ["geometry-type"], "Point"]))
+            .glyph("●")
+            .text(name.clone())
+            .layout("text-font", bold.clone())
+            .color(hex.as_str()),
+    );
+    out.push(
+        StyleLayer::symbol(format!("{source}-label"), source)
+            .filter(json!(["!=", ["geometry-type"], "Point"]))
+            .text(name)
+            .layout("text-font", bold)
+            .color(hex.as_str()),
+    );
+    out
 }
 
 /// Load a layer from a path or http(s) URL.

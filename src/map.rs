@@ -34,6 +34,7 @@ use serde_json::Value as Json;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
+    raster::{RasterSource, RasterStore, RasterTile},
     expr::{Ctx, Rgba},
     geojson,
     layer::{CustomLayer, DrawContext, PickContext, render_with},
@@ -55,6 +56,7 @@ const LAYER_PRIORITY: i32 = 10_000;
 pub enum MapSource {
     Vector(VectorSource),
     GeoJson(GeoJsonSource),
+    Raster(RasterTiles),
 }
 
 impl MapSource {
@@ -72,6 +74,77 @@ impl MapSource {
     pub fn geojson(doc: &Json) -> Result<Self> {
         Ok(MapSource::GeoJson(GeoJsonSource::parse(doc)?))
     }
+
+    /// Image tiles (PNG, JPEG, WebP) for raster layers.
+    pub fn raster(src: Arc<RasterSource>) -> Self {
+        MapSource::Raster(RasterTiles { src, tiles: RasterStore::default() })
+    }
+}
+
+/// A raster source and its decoded tiles.
+pub struct RasterTiles {
+    pub src: Arc<RasterSource>,
+    tiles: RasterStore,
+}
+
+/// How raster layers are drawn.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum RasterMode {
+    /// One averaged color per cell background; works in any terminal.
+    #[default]
+    Cells,
+    /// Real images with the kitty graphics protocol, placed under the text by
+    /// [`Map::kitty_commands`]. `cell_px` is the cell size in pixels.
+    Kitty { cell_px: (f64, f64) },
+}
+
+/// A tile a view needs, to load in the background with [`TileRequest::load`] and hand back
+/// with [`Map::insert_loaded`].
+pub struct TileRequest {
+    pub source: String,
+    pub id: TileId,
+    fetch: Fetch,
+}
+
+enum Fetch {
+    Vector(Arc<Source>),
+    Raster(Arc<RasterSource>),
+}
+
+/// A fetched and decoded tile.
+pub struct Loaded(LoadedTile);
+
+enum LoadedTile {
+    Vector(Vec<store::Feature>),
+    Raster(Option<RasterTile>),
+}
+
+impl TileRequest {
+    /// Whether it is an image tile (image servers often ask for fewer connections).
+    pub fn is_raster(&self) -> bool {
+        matches!(self.fetch, Fetch::Raster(_))
+    }
+
+    /// Fetch and decode the tile (decoding runs on a blocking thread).
+    pub async fn load(&self) -> Result<Loaded> {
+        let (z, x, y) = self.id;
+        Ok(Loaded(match &self.fetch {
+            Fetch::Vector(src) => match src.tile(z, x, y).await? {
+                Some(b) => LoadedTile::Vector(tokio::task::spawn_blocking(move || store::decode_features(&b)).await??),
+                None => LoadedTile::Vector(Vec::new()),
+            },
+            Fetch::Raster(src) => match src.tile(z, x, y).await? {
+                Some(b) => LoadedTile::Raster(Some(tokio::task::spawn_blocking(move || crate::raster::decode(&b)).await??)),
+                None => LoadedTile::Raster(None),
+            },
+        }))
+    }
+}
+
+/// Image ids already sent to the terminal, for [`Map::kitty_commands`].
+#[derive(Default)]
+pub struct KittyState {
+    sent: HashSet<u32>,
 }
 
 impl From<geojson::GeoJson> for MapSource {
@@ -191,6 +264,10 @@ pub struct Map {
     sources: Vec<(String, MapSource)>,
     layers: Vec<Entry>,
     warnings: Vec<String>,
+    /// How raster layers draw (cell colors unless set to kitty images).
+    pub raster_mode: RasterMode,
+    /// The starting view (lon, lat, zoom) a style suggests.
+    pub center: Option<(f64, f64, f64)>,
 }
 
 impl Map {
@@ -215,6 +292,11 @@ impl Map {
         let n = self.sources.len();
         self.sources.retain(|(s, _)| s != id);
         n != self.sources.len()
+    }
+
+    /// Every source with its id, in the order added.
+    pub fn sources(&self) -> impl Iterator<Item = (&str, &MapSource)> {
+        self.sources.iter().map(|(id, s)| (id.as_str(), s))
     }
 
     pub fn source(&self, id: &str) -> Option<&MapSource> {
@@ -244,8 +326,9 @@ impl Map {
         }
     }
 
-    /// Vector tiles the view needs that aren't loaded yet, for sources that shown layers use.
-    pub fn missing_tiles(&self, cam: &Camera, area: Rect) -> Vec<(String, TileId)> {
+    /// Tiles the view needs that aren't loaded yet, for sources that shown layers use and the
+    /// map can fetch itself (vector sources from [`MapSource::vector`], raster sources).
+    pub fn tile_requests(&self, cam: &Camera, area: Rect) -> Vec<TileRequest> {
         let vp = Viewport::new(cam, area);
         let used: HashSet<&str> = self
             .layers
@@ -257,36 +340,126 @@ impl Map {
             .collect();
         let mut out = Vec::new();
         for (id, src) in &self.sources {
-            if let MapSource::Vector(v) = src
-                && used.contains(id.as_str())
-            {
-                let z = cam.tile_zoom(v.min_zoom, v.max_zoom);
-                out.extend(vp.tiles(z).into_iter().filter(|t| !v.tiles.map.contains_key(t)).map(|t| (id.clone(), t)));
+            if !used.contains(id.as_str()) {
+                continue;
+            }
+            match src {
+                MapSource::Vector(v) => {
+                    let Some(f) = &v.fetch else { continue };
+                    let z = cam.tile_zoom(v.min_zoom, v.max_zoom);
+                    out.extend(vp.tiles(z).into_iter().filter(|t| !v.tiles.map.contains_key(t)).map(|t| TileRequest {
+                        source: id.clone(),
+                        id: t,
+                        fetch: Fetch::Vector(f.clone()),
+                    }));
+                }
+                MapSource::Raster(r) => {
+                    let rz = self.raster_zoom(&r.src, cam);
+                    out.extend(crate::raster::tiles_for(cam, area, rz).into_iter().filter(|t| !r.tiles.contains(t)).map(|t| TileRequest {
+                        source: id.clone(),
+                        id: t,
+                        fetch: Fetch::Raster(r.src.clone()),
+                    }));
+                }
+                MapSource::GeoJson(_) => {}
             }
         }
         out
     }
 
-    /// Fetch the missing tiles of sources made with [`MapSource::vector`], one at a time.
-    /// A tile that fails to load is stored empty (so it isn't retried every frame) and the
-    /// first error is returned after the rest have loaded.
+    /// The zoom to fetch a raster source at: about 2 screen pixels per image pixel as kitty
+    /// images (like a browser on a Retina screen), one cell per image pixel as cell colors.
+    fn raster_zoom(&self, src: &RasterSource, cam: &Camera) -> u8 {
+        let dots_per_px = match self.raster_mode {
+            RasterMode::Kitty { cell_px } => 2.0 / (cell_px.0 / 2.0).max(0.5),
+            RasterMode::Cells => 2.0,
+        };
+        crate::raster::raster_zoom(cam, src.tile_px, dots_per_px, src.max_zoom)
+    }
+
+    /// Store a tile loaded with [`TileRequest::load`]. A failed load is stored empty, so the
+    /// tile isn't requested again, and its error is returned.
+    pub fn insert_loaded(&mut self, source: &str, id: TileId, loaded: Result<Loaded>) -> Result<()> {
+        let is_raster = matches!(self.source(source), Some(MapSource::Raster(_)));
+        let (tile, err) = match loaded {
+            Ok(Loaded(t)) => (t, None),
+            Err(e) if is_raster => (LoadedTile::Raster(None), Some(e)),
+            Err(e) => (LoadedTile::Vector(Vec::new()), Some(e)),
+        };
+        match tile {
+            LoadedTile::Vector(features) => self.insert_features(source, id, features)?,
+            LoadedTile::Raster(t) => match self.sources.iter_mut().find(|(s, _)| s == source) {
+                Some((_, MapSource::Raster(r))) => r.tiles.insert(id, t),
+                _ => bail!("no raster source \"{source}\""),
+            },
+        }
+        err.map_or(Ok(()), |e| Err(e.context(format!("{source} tile {}/{}/{}", id.0, id.1, id.2))))
+    }
+
+    /// Fetch the missing tiles one at a time (simple apps; see [`Map::tile_requests`] to load
+    /// in the background). Failed tiles are stored empty and the first error is returned.
     pub async fn load_tiles(&mut self, cam: &Camera, area: Rect) -> Result<()> {
         let mut first_err = None;
-        for (sid, id) in self.missing_tiles(cam, area) {
-            let Some(MapSource::Vector(VectorSource { fetch: Some(src), .. })) = self.source(&sid) else { continue };
-            let src = src.clone();
-            let bytes = match src.tile(id.0, id.1, id.2).await {
-                Ok(b) => b,
-                Err(e) => {
-                    first_err.get_or_insert(e);
-                    None
-                }
-            };
-            if let Err(e) = self.insert_tile(&sid, id, bytes.as_deref()) {
+        for req in self.tile_requests(cam, area) {
+            let loaded = req.load().await;
+            if let Err(e) = self.insert_loaded(&req.source, req.id, loaded) {
                 first_err.get_or_insert(e);
             }
         }
         first_err.map_or(Ok(()), Err)
+    }
+
+    /// The zoom range of the vector sources (min of minimums, max of maximums).
+    pub fn zoom_range(&self) -> (u8, u8) {
+        self.sources
+            .iter()
+            .filter_map(|(_, s)| match s {
+                MapSource::Vector(v) => Some((v.min_zoom, v.max_zoom)),
+                _ => None,
+            })
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)))
+            .unwrap_or((0, 14))
+    }
+
+    /// Kitty graphics commands that place the shown raster layers under the text for this
+    /// frame (images are sent once, then only moved). Write them after the frame's cells, in
+    /// the same synchronized update. Empty unless [`Map::raster_mode`] is kitty.
+    pub fn kitty_commands(&mut self, cam: &Camera, area: Rect, state: &mut KittyState) -> String {
+        use crate::kitty;
+        let RasterMode::Kitty { .. } = self.raster_mode else { return String::new() };
+        let mut cmds = String::new();
+        if !state.sent.is_empty() || self.sources.iter().any(|(_, s)| matches!(s, MapSource::Raster(_))) {
+            cmds.push_str(kitty::CLEAR_PLACEMENTS);
+        }
+        for (_, s) in &mut self.sources {
+            if let MapSource::Raster(r) = s {
+                for id in r.tiles.take_evicted() {
+                    if state.sent.remove(&id) {
+                        cmds.push_str(&kitty::free(id));
+                    }
+                }
+            }
+        }
+        let mut placement = 1u32;
+        for (i, e) in self.layers.iter().enumerate() {
+            let Entry::Style(l) = e else { continue };
+            if l.kind != Kind::Raster || !l.shown_at(cam.zoom) {
+                continue;
+            }
+            let Some(MapSource::Raster(r)) = l.source.as_deref().and_then(|s| self.source(s)) else { continue };
+            let rz = self.raster_zoom(&r.src, cam);
+            // Pieces no bigger than 32x16 cells, which herdr relays (it drops placements
+            // stretched over very large areas). Higher layers stack above lower ones, all
+            // under the text.
+            for b in crate::raster::layout_max(&r.tiles, cam, area, rz, (32, 16)) {
+                if state.sent.insert(b.tile.id) {
+                    cmds.push_str(&kitty::transmit(b.tile.id, &b.tile.png));
+                }
+                cmds.push_str(&kitty::place(b.tile.id, placement, b.cells.x, b.cells.y, b.src, b.cells.width, b.cells.height, -1000 + i as i32));
+                placement += 1;
+            }
+        }
+        cmds
     }
 
     /// Add a vector tile (MVT bytes, or `None` for an empty tile) to a vector source.
@@ -299,13 +472,18 @@ impl Map {
             Ok(f) => (f, None),
             Err(e) => (Vec::new(), Some(e)),
         };
+        self.insert_features(source, id, features)?;
+        err.map_or(Ok(()), |e| Err(e.context(format!("tile {}/{}/{}", id.0, id.1, id.2))))
+    }
+
+    fn insert_features(&mut self, source: &str, id: TileId, features: Vec<store::Feature>) -> Result<()> {
         let features = Arc::new(features);
         let items = style_tile(&self.layers, source, &features, id.0 as f64);
         match self.sources.iter_mut().find(|(s, _)| s == source) {
             Some((_, MapSource::Vector(v))) => v.tiles.insert(id, MapTile { features, items }),
             _ => bail!("no vector source \"{source}\""),
         }
-        err.map_or(Ok(()), |e| Err(e.context(format!("tile {}/{}/{}", id.0, id.1, id.2))))
+        Ok(())
     }
 
     // ---- layers ----
@@ -323,6 +501,38 @@ impl Map {
     /// Add a custom layer (see [`CustomLayer`]) on top, or below `before`.
     pub fn add_custom_layer<T: CustomLayer + Any>(&mut self, id: impl Into<String>, layer: T, before: Option<&str>) -> Result<()> {
         self.insert_entry(Entry::Custom { id: id.into(), layer: Box::new(layer) }, before)
+    }
+
+    /// Add several style layers at once (on top, or below `before`), restyling loaded tiles
+    /// only once. Nothing is added if any id is taken.
+    pub fn add_layers(&mut self, layers: Vec<StyleLayer>, before: Option<&str>) -> Result<()> {
+        let mut ids = HashSet::new();
+        for l in &layers {
+            if self.index(&l.id).is_some() || !ids.insert(l.id.as_str()) {
+                bail!("layer \"{}\" already exists", l.id);
+            }
+        }
+        if self.layers.len() + layers.len() >= u16::MAX as usize {
+            bail!("too many layers");
+        }
+        let at = match before {
+            Some(b) => self.index(b).ok_or_else(|| anyhow!("no layer \"{b}\" to add before"))?,
+            None => self.layers.len(),
+        };
+        self.layers.splice(at..at, layers.into_iter().map(Entry::Style));
+        self.restyle();
+        Ok(())
+    }
+
+    /// Remove several layers at once, restyling only once. Returns how many were removed.
+    pub fn remove_layers(&mut self, ids: &[&str]) -> usize {
+        let n = self.layers.len();
+        self.layers.retain(|e| !ids.contains(&e.id()));
+        let removed = n - self.layers.len();
+        if removed > 0 {
+            self.restyle();
+        }
+        removed
     }
 
     fn insert_entry(&mut self, e: Entry, before: Option<&str>) -> Result<()> {
@@ -548,7 +758,87 @@ impl Map {
                         push(f.geom, &dots, lonlat, source.clone(), &f.props, None);
                     }
                 }
-                None => {}
+                _ => {}
+            }
+            hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            out.extend(hits.into_iter().map(|(_, _, p)| p));
+        }
+        out
+    }
+
+    /// Every feature of every source under `target` (dots relative to `area`), drawn or not,
+    /// for inspecting data. Sources come in the order of their topmost layer, top first;
+    /// within a source, points, then lines, then polygons from smallest to largest. Each pick's
+    /// `style_layer` is the top shown layer that draws it, and `drawn` says whether one does.
+    pub fn query_features(&self, cam: &Camera, area: Rect, target: (f64, f64)) -> Vec<Pick> {
+        let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
+        if target.0 < 0.0 || target.1 < 0.0 || target.0 >= w || target.1 >= h {
+            return Vec::new();
+        }
+        let vp = Viewport::new(cam, area);
+        let bg = self.background(cam.zoom);
+        let top_layer = |sid: &str| {
+            self.layers.iter().rposition(|e| matches!(e, Entry::Style(l) if l.source.as_deref() == Some(sid)))
+        };
+        let mut order: Vec<&(String, MapSource)> = self.sources.iter().collect();
+        order.sort_by_key(|(id, _)| std::cmp::Reverse(top_layer(id).map_or(-1, |i| i as i64)));
+        let mut out = Vec::new();
+        for (sid, src) in order {
+            let source: Arc<str> = Arc::from(sid.as_str());
+            let mut hits: Vec<(u8, f64, Pick)> = Vec::new();
+            let mut push = |geom: GeomType, rank: u8, score: f64, lonlat: Vec<Vec<(f64, f64)>>, layer: Arc<str>, props: &[(String, crate::mvt::Value)], tile: Option<TileId>, by: Option<usize>| {
+                let st = stats(geom, &lonlat);
+                let score = if geom == GeomType::Polygon { st.area_km2.unwrap_or(0.0) } else { score };
+                let style_layer = by.map(|i| Arc::from(self.layers[i].id()));
+                let pick = Pick { tile, layer, geom, props: props.to_vec(), lonlat, drawn: by.is_some(), stats: st, source: Some(source.clone()), style_layer };
+                hits.push((rank, score, pick));
+            };
+            match src {
+                MapSource::Vector(v) => {
+                    let z = cam.tile_zoom(v.min_zoom, v.max_zoom);
+                    let n = (1u64 << z) as f64;
+                    let (wx, wy) = {
+                        let (lon, lat) = vp.dot_to_lonlat(target.0, target.1);
+                        to_world(lon, lat)
+                    };
+                    let id: TileId = (z, (wx * n).floor().clamp(0.0, n - 1.0) as u32, (wy * n).floor().clamp(0.0, n - 1.0) as u32);
+                    let Some((tid, tile)) = v.tiles.get_or_ancestor(id) else { continue };
+                    // The top shown layer drawing each feature.
+                    let mut drawn_by: HashMap<u32, usize> = HashMap::new();
+                    for it in &tile.items {
+                        if let Entry::Style(l) = &self.layers[it.layer as usize]
+                            && l.shown_at(cam.zoom)
+                        {
+                            drawn_by.insert(it.feature, it.layer as usize);
+                        }
+                    }
+                    let tn = (1u64 << tid.0) as f64;
+                    let world = |p: &[f32; 2]| ((tid.1 as f64 + p[0] as f64) / tn, (tid.2 as f64 + p[1] as f64) / tn);
+                    let mut seen = HashSet::new();
+                    for (fi, f) in tile.features.iter().enumerate() {
+                        let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); vp.dot(x, y) }).collect()).collect();
+                        let Some((rank, score)) = hit(f.geom, &dots, target, false) else { continue };
+                        // A feature cut by tile edges can appear more than once; keep one.
+                        if !seen.insert(format!("{}|{:?}|{:?}", f.layer, f.geom, f.props)) {
+                            continue;
+                        }
+                        let lonlat = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); to_lonlat(x, y) }).collect()).collect();
+                        push(f.geom, rank, score, lonlat, f.layer.clone(), &f.props, Some(tid), drawn_by.get(&(fi as u32)).copied());
+                    }
+                }
+                MapSource::GeoJson(g) => {
+                    for f in &g.features {
+                        let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
+                        let Some((rank, score)) = hit(f.geom, &dots, target, true) else { continue };
+                        let c = Ctx { zoom: cam.zoom, geom: f.geom, props: &f.props };
+                        let by = self.layers.iter().rposition(|e| {
+                            matches!(e, Entry::Style(l) if l.source.as_deref() == Some(sid.as_str()) && l.shown_at(cam.zoom) && resolve(l, &c, bg).is_some())
+                        });
+                        let lonlat = f.parts.iter().map(|p| p.iter().map(|&(x, y)| to_lonlat(x, y)).collect()).collect();
+                        push(f.geom, rank, score, lonlat, source.clone(), &f.props, None, by);
+                    }
+                }
+                MapSource::Raster(_) => {}
             }
             hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
             out.extend(hits.into_iter().map(|(_, _, p)| p));
@@ -763,7 +1053,7 @@ impl Widget for MapView<'_> {
             .iter()
             .filter_map(|(id, s)| match s {
                 MapSource::Vector(v) => Some((id.as_str(), v.tiles.visible(&vp, cam.tile_zoom(v.min_zoom, v.max_zoom)))),
-                MapSource::GeoJson(_) => None,
+                _ => None,
             })
             .collect();
         render_with(cam, area, buf, |ctx| {
@@ -814,7 +1104,21 @@ impl Widget for MapView<'_> {
                             draw_resolved(ctx, &r, f.geom, &dots);
                         }
                     }
-                    None => {}
+                    Some(MapSource::Raster(r)) if map.raster_mode == RasterMode::Cells => {
+                        let rz = map.raster_zoom(&r.src, cam);
+                        for b in crate::raster::layout(&r.tiles, cam, area, rz) {
+                            let (sx, sy, sw, sh) = b.src;
+                            let (cw, ch) = (sw as f64 / b.cells.width as f64, sh as f64 / b.cells.height as f64);
+                            for row in 0..b.cells.height {
+                                for col in 0..b.cells.width {
+                                    let (x, y) = (sx + (col as f64 * cw) as u32, sy + (row as f64 * ch) as u32);
+                                    let c = b.tile.average(x, y, cw.ceil() as u32, ch.ceil() as u32);
+                                    ctx.cell_bg(b.cells.x - area.x + col, b.cells.y - area.y + row, c);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         });
@@ -941,6 +1245,94 @@ mod tests {
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(255, 0, 0));
         map.set_filter("water", Some(&json!(["==", "class", "lake"]))).unwrap();
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset);
-        assert!(map.missing_tiles(&cam, area).is_empty());
+        assert!(map.tile_requests(&cam, area).is_empty(), "app-supplied tiles are never requested");
+    }
+
+    fn raster_map() -> Map {
+        let mut map = Map::new();
+        let src = Arc::new(crate::raster::RasterSource::new("https://t.example/{z}/{x}/{y}.png", false, 19).unwrap());
+        map.add_source("img", MapSource::raster(src)).unwrap();
+        map.add_layer(StyleLayer::raster("img", "img")).unwrap();
+        map
+    }
+
+    fn solid_tile(r: u8, g: u8, b: u8) -> RasterTile {
+        let rgba = image::RgbaImage::from_pixel(256, 256, image::Rgba([r, g, b, 255]));
+        RasterTile { id: 4242 + r as u32, png: vec![1, 2, 3], rgba }
+    }
+
+    #[test]
+    fn raster_layers_draw_cells_or_kitty_images() {
+        let mut map = raster_map();
+        let cam = Camera::new(0.0, 0.0, 0.0);
+        let area = Rect::new(0, 0, 40, 20);
+        let reqs = map.tile_requests(&cam, area);
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].is_raster() && reqs[0].id == (0, 0, 0));
+        map.insert_loaded("img", (0, 0, 0), Ok(Loaded(LoadedTile::Raster(Some(solid_tile(10, 200, 30)))))).unwrap();
+        assert!(map.tile_requests(&cam, area).is_empty());
+        // Cells: every cell takes the image color.
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(10, 200, 30));
+        // Kitty: nothing in the cells; the image is sent once, then only placed.
+        map.raster_mode = RasterMode::Kitty { cell_px: (10.0, 20.0) };
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset);
+        let mut k = KittyState::default();
+        let first = map.kitty_commands(&cam, area, &mut k);
+        assert!(first.starts_with(crate::kitty::CLEAR_PLACEMENTS) && first.contains("a=t,f=100") && first.contains("z=-1000"));
+        let second = map.kitty_commands(&cam, area, &mut k);
+        assert!(!second.contains("a=t,") && second.contains("a=p,"));
+        map.set_visibility("img", false).unwrap();
+        assert!(!map.kitty_commands(&cam, area, &mut k).contains("a=p,"), "hidden layers aren't placed");
+    }
+
+    #[test]
+    fn failed_loads_are_stored_empty() {
+        let mut map = raster_map();
+        let cam = Camera::new(0.0, 0.0, 0.0);
+        let area = Rect::new(0, 0, 40, 20);
+        assert!(map.insert_loaded("img", (0, 0, 0), Err(anyhow!("HTTP 500"))).is_err());
+        assert!(map.tile_requests(&cam, area).is_empty(), "not requested again");
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset);
+    }
+
+    #[test]
+    fn query_features_lists_drawn_and_undrawn() {
+        let mvt = crate::mvt::tests_support::square_tile("water", 4096);
+        let mut map = sample();
+        // A z0-only source, so the camera's z15 view uses this tile.
+        map.add_source("v", MapSource::vector_tiles(0, 0)).unwrap();
+        map.add_layers(vec![StyleLayer::fill("lakes", "v").source_layer("water").filter(json!(["==", "class", "lake"])).color("#00f")], Some("zones")).unwrap();
+        map.insert_tile("v", (0, 0, 0), Some(&mvt)).unwrap();
+        let cam = Camera::new(-77.0353, 38.8895, 15.0);
+        let area = Rect::new(0, 0, 60, 20);
+        let picks = map.query_features(&cam, area, (60.0, 40.0));
+        let got: Vec<(String, Option<String>, bool)> =
+            picks.iter().map(|p| (p.title(), p.style_layer.as_deref().map(str::to_string), p.drawn)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Pin".into(), Some("pins".into()), true),
+                ("Box".into(), Some("zones".into()), true),
+                ("water".into(), None, false),
+            ],
+            "GeoJSON (top layers) first; the unstyled water square is listed but not drawn"
+        );
+        map.set_visibility("pins", false).unwrap();
+        let pin = &map.query_features(&cam, area, (60.0, 40.0))[0];
+        assert!(pin.title() == "Pin" && !pin.drawn, "hidden layers don't count as drawing");
+    }
+
+    #[test]
+    fn geojson_overlay_layers() {
+        let mut map = Map::new();
+        map.add_source("mine", MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"name": "Pin"}, "geometry": {"type": "Point", "coordinates": [-77.0353, 38.8895]}}]})).unwrap()).unwrap();
+        map.add_layers(crate::geojson::overlay_layers("mine", Color::Rgb(255, 99, 132), true), None).unwrap();
+        assert_eq!(map.layer_ids(), vec!["mine-fill", "mine-line", "mine-point", "mine-label"]);
+        let cam = Camera::new(-77.0353, 38.8895, 15.0);
+        let buf = render(&map, &cam, Rect::new(0, 0, 60, 20));
+        let row: String = (0..60).map(|x| buf[(x, 10)].symbol().to_string()).collect();
+        assert!(row.contains("● Pin"), "{row}");
+        assert_eq!(buf[(30, 10)].fg, Color::Rgb(255, 99, 132));
     }
 }

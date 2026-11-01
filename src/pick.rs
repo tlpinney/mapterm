@@ -1,14 +1,11 @@
 //! Feature picking for inspection: which features are under a screen cell, like MapLibre's
 //! `queryRenderedFeatures`, with their properties and some measurements for analysis.
 
-use std::{collections::HashSet, sync::Arc};
-
-use ratatui::layout::Rect;
+use std::sync::Arc;
 
 use crate::{
     mvt::{GeomType, Value},
-    render::{Camera, Viewport, to_lonlat, to_world},
-    store::{TileId, TileStore},
+    store::TileId,
 };
 
 /// How close (in braille dots) a line must pass, and a point must be, to count as hit.
@@ -74,6 +71,12 @@ impl Pick {
         let mut m = serde_json::Map::new();
         m.insert("_layer".into(), self.layer.to_string().into());
         m.insert("_geometry".into(), geom_name(self.geom).into());
+        if let Some(l) = &self.style_layer {
+            m.insert("_style_layer".into(), l.to_string().into());
+        }
+        if let Some(src) = &self.source {
+            m.insert("_source".into(), src.to_string().into());
+        }
         if let Some(t) = self.tile {
             m.insert("_tile".into(), format!("{}/{}/{}", t.0, t.1, t.2).into());
         }
@@ -186,136 +189,6 @@ pub(crate) fn hit(geom: GeomType, dots: &[Vec<(f64, f64)>], target: (f64, f64), 
     }
 }
 
-/// Features under absolute cell (`col`, `row`) of a map drawn in `area` with `cam`, most
-/// specific first: points, then lines, then polygons from smallest to largest.
-pub fn pick(store: &TileStore, cam: &Camera, min_zoom: u8, max_zoom: u8, area: Rect, col: u16, row: u16) -> Vec<Pick> {
-    if !area.contains(ratatui::layout::Position::new(col, row)) {
-        return Vec::new();
-    }
-    // The cell's center, in dots relative to the map area.
-    let target = ((col - area.x) as f64 * 2.0 + 1.0, (row - area.y) as f64 * 4.0 + 2.0);
-    pick_dot(store, cam, min_zoom, max_zoom, area, target)
-}
-
-/// Like [`pick`], at a lon/lat (e.g. an exact click position).
-pub fn pick_lonlat(store: &TileStore, cam: &Camera, min_zoom: u8, max_zoom: u8, area: Rect, lon: f64, lat: f64) -> Vec<Pick> {
-    let target = Viewport::new(cam, area).dot_ll(lon, lat);
-    pick_dot(store, cam, min_zoom, max_zoom, area, target)
-}
-
-/// Like [`pick`], at a braille-dot position relative to the map area (2 dots per column, 4 per
-/// row), for pointer positions finer than a cell.
-pub fn pick_dot(store: &TileStore, cam: &Camera, min_zoom: u8, max_zoom: u8, area: Rect, target: (f64, f64)) -> Vec<Pick> {
-    let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
-    if area.width == 0 || target.0 < 0.0 || target.1 < 0.0 || target.0 >= w || target.1 >= h {
-        return Vec::new();
-    }
-    let vp = Viewport::new(cam, area);
-    let tz = cam.tile_zoom(min_zoom, max_zoom);
-    let n = (1u64 << tz) as f64;
-    // The tile under the spot (MVT tiles carry a buffer, so features near an edge are there too).
-    let (lon, lat) = vp.dot_to_lonlat(target.0, target.1);
-    let (wx, wy) = to_world(lon, lat);
-    let id: TileId = (tz, (wx * n).floor().clamp(0.0, n - 1.0) as u32, (wy * n).floor().clamp(0.0, n - 1.0) as u32);
-    let Some((tid, tile)) = store.get_or_ancestor(id) else { return Vec::new() };
-    let tn = (1u64 << tid.0) as f64;
-
-    let mut hits: Vec<(u8, f64, Pick)> = Vec::new();
-    let mut seen = HashSet::new();
-    for f in &tile.features {
-        let to_world_pt = |p: &[f32; 2]| ((tid.1 as f64 + p[0] as f64) / tn, (tid.2 as f64 + p[1] as f64) / tn);
-        let dots: Vec<Vec<(f64, f64)>> =
-            f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = to_world_pt(p); vp.dot(x, y) }).collect()).collect();
-        let (hit, rank, score) = match f.geom {
-            GeomType::Point => {
-                let d = dots.iter().flatten().map(|p| {
-                    let (dx, dy) = ((p.0 - target.0).abs(), (p.1 - target.1).abs());
-                    if dx <= POINT_TOLERANCE.0 && dy <= POINT_TOLERANCE.1 { dx.hypot(dy) } else { f64::MAX }
-                });
-                let best = d.fold(f64::MAX, f64::min);
-                (best < f64::MAX, 0u8, best)
-            }
-            GeomType::Line => {
-                let best = dots
-                    .iter()
-                    .flat_map(|p| p.windows(2).map(|w| seg_dist(target, w[0], w[1])))
-                    .fold(f64::MAX, f64::min);
-                (best <= LINE_TOLERANCE_DOTS, 1, best)
-            }
-            GeomType::Polygon => (inside(target, &dots), 2, 0.0),
-            GeomType::Unknown => (false, 3, 0.0),
-        };
-        if !hit {
-            continue;
-        }
-        // A feature cut by tile edges can appear more than once; keep one.
-        let key = format!("{}|{:?}|{:?}", f.layer, f.geom, f.props);
-        if !seen.insert(key) {
-            continue;
-        }
-        let lonlat: Vec<Vec<(f64, f64)>> =
-            f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = to_world_pt(p); to_lonlat(x, y) }).collect()).collect();
-        let st = stats(f.geom, &lonlat);
-        let score = if f.geom == GeomType::Polygon { st.area_km2.unwrap_or(0.0) } else { score };
-        hits.push((
-            rank,
-            score,
-            Pick { tile: Some(tid), layer: f.layer.clone(), geom: f.geom, props: f.props.clone(), lonlat, drawn: f.drawn, stats: st, source: None, style_layer: None },
-        ));
-    }
-    hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    hits.into_iter().map(|(_, _, p)| p).collect()
-}
-
-/// Features of GeoJSON layers under a braille-dot position (relative to the map area), most
-/// specific first, the same way [`pick_dot`] ranks basemap features.
-pub fn pick_layers(layers: &[crate::geojson::GeoJson], cam: &Camera, area: Rect, target: (f64, f64)) -> Vec<Pick> {
-    let vp = Viewport::new(cam, area);
-    let mut hits: Vec<(u8, f64, Pick)> = Vec::new();
-    for layer in layers {
-        for f in &layer.features {
-            // Cheap reject: the target's world position against the feature's padded bbox.
-            let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
-            let (hit, rank, score) = match f.geom {
-                GeomType::Point => {
-                    let best = dots
-                        .iter()
-                        .flatten()
-                        .map(|p| {
-                            let (dx, dy) = ((p.0 - target.0).abs(), (p.1 - target.1).abs());
-                            if dx <= POINT_TOLERANCE.0 && dy <= POINT_TOLERANCE.1 { dx.hypot(dy) } else { f64::MAX }
-                        })
-                        .fold(f64::MAX, f64::min);
-                    (best < f64::MAX, 0u8, best)
-                }
-                GeomType::Line => {
-                    let best = dots.iter().flat_map(|p| p.windows(2).map(|w| seg_dist(target, w[0], w[1]))).fold(f64::MAX, f64::min);
-                    (best <= LINE_TOLERANCE_DOTS, 1, best)
-                }
-                GeomType::Polygon => {
-                    let on_edge = dots.iter().flat_map(|p| p.windows(2).map(|w| seg_dist(target, w[0], w[1]))).fold(f64::MAX, f64::min)
-                        <= LINE_TOLERANCE_DOTS;
-                    (inside(target, &dots) || on_edge, 2, 0.0)
-                }
-                GeomType::Unknown => (false, 3, 0.0),
-            };
-            if !hit {
-                continue;
-            }
-            let lonlat: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| to_lonlat(x, y)).collect()).collect();
-            let st = stats(f.geom, &lonlat);
-            let score = if f.geom == GeomType::Polygon { st.area_km2.unwrap_or(0.0) } else { score };
-            hits.push((
-                rank,
-                score,
-                Pick { tile: None, layer: Arc::from(layer.name.as_str()), geom: f.geom, props: f.props.clone(), lonlat, drawn: true, stats: st, source: None, style_layer: None },
-            ));
-        }
-    }
-    hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    hits.into_iter().map(|(_, _, p)| p).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,22 +207,6 @@ mod tests {
     fn line_distance() {
         assert!((seg_dist((5.0, 3.0), (0.0, 0.0), (10.0, 0.0)) - 3.0).abs() < 1e-9);
         assert!((seg_dist((-4.0, 3.0), (0.0, 0.0), (10.0, 0.0)) - 5.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn picks_geojson_layer_features() {
-        let doc = br#"{"type":"FeatureCollection","features":[
-          {"type":"Feature","properties":{"name":"box"},"geometry":{"type":"Polygon","coordinates":[[[-77.05,38.88],[-77.02,38.88],[-77.02,38.90],[-77.05,38.90],[-77.05,38.88]]]}},
-          {"type":"Feature","properties":{"name":"pin"},"geometry":{"type":"Point","coordinates":[-77.0353,38.8895]}}]}"#;
-        let layer = crate::geojson::parse(doc, "mine".into(), crate::geojson::PALETTE[0]).unwrap();
-        let cam = Camera::new(-77.0353, 38.8895, 15.0);
-        let area = Rect::new(0, 0, 100, 40);
-        let center = (100.0, 80.0);
-        let picks = pick_layers(std::slice::from_ref(&layer), &cam, area, center);
-        let names: Vec<String> = picks.iter().map(|p| p.title()).collect();
-        assert_eq!(names, vec!["pin", "box"], "point first, then the polygon around it");
-        assert!(picks.iter().all(|p| p.tile.is_none() && &*p.layer == "mine"));
-        assert!(pick_layers(std::slice::from_ref(&layer), &cam, area, (2.0, 2.0)).iter().all(|p| p.title() == "box"));
     }
 
     #[test]

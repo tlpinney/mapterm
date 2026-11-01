@@ -292,6 +292,13 @@ impl Canvas {
         }
     }
 
+    /// Set one cell's background.
+    pub(crate) fn set_bg(&mut self, col: usize, row: usize, c: Color) {
+        if col < self.w && row < self.h {
+            self.bg[row * self.w + col] = Some(c);
+        }
+    }
+
     /// Place text starting at cell (col,row) if it fits and the cells are free (with 1-cell padding).
     pub(crate) fn text_at(&mut self, col: i64, row: i64, s: &str, st: TStyle, pad: bool) -> bool {
         let wdt = s.width() as i64;

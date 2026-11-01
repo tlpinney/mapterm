@@ -2,20 +2,20 @@
 //!
 //! - [`source::Source`] reads tiles from PMTiles (file or HTTP range requests), XYZ URLs or
 //!   TileJSON, with timeouts, size caps and a disk cache.
-//! - [`store::prepare`] decodes MVT and styles features for the Protomaps or OpenMapTiles schema.
+//! - [`stylejson`] loads MapLibre style documents and has built-in terminal styles for the
+//!   OpenMapTiles and Protomaps schemas.
 //! - [`map::Map`] a map, MapLibre GL style: named sources (vector tiles, GeoJSON) drawn by an
 //!   ordered list of [`spec::StyleLayer`]s whose paint and filters are [`expr`] expressions,
 //!   plus [`CustomLayer`]s for anything else. [`Map::view`] draws it and
 //!   [`Map::query_rendered_features`] says what's under a spot.
-//! - [`layer`] custom layers and [`LayerStack`], which draws borrowed custom layers without a
-//!   `Map` ([`VectorTiles`], [`geojson::GeoJson`], [`Markers`]).
+//! - [`layer`] custom layers: draw anything through a [`DrawContext`]; [`Markers`] is one.
 //! - [`interact::Controller`] MapLibre-style interaction: wheel zoom, drag with inertia,
 //!   double-click and box zoom, eased keyboard moves, and click reporting for inspection.
-//! - [`pick::pick`] finds the features under a spot (drawn or not) with their properties and
-//!   measurements, for inspection and analysis.
-//! - [`raster`] PNG/JPEG XYZ or TMS layers under the vector map, drawn as images with the
-//!   [`kitty`] graphics protocol or as cell colors in any terminal.
-//! - [`geojson`] GeoJSON files or URLs as overlay layers of points, lines and polygons.
+//! - [`Map::query_features`] finds every feature under a spot (drawn or not) with its
+//!   properties and measurements ([`Pick`]), for inspection and analysis.
+//! - [`raster`] PNG/JPEG/WebP XYZ, TMS or PMTiles sources for raster layers, drawn as images
+//!   with the [`kitty`] graphics protocol ([`Map::kitty_commands`]) or as cell colors.
+//! - [`geojson`] GeoJSON files or URLs, and ready-made overlay style layers for them.
 //! - [`smooth`] opt-in pixel smooth vertical panning for the Ghostty smooth-scroll fork.
 
 pub mod expr;
@@ -35,14 +35,12 @@ pub mod source;
 pub mod spec;
 pub mod store;
 pub mod stylejson;
-pub mod style;
 
 pub use interact::{Click, Controller};
-pub use pick::{Pick, pick, pick_dot, pick_lonlat};
-pub use layer::{CustomLayer, DrawContext, LayerStack, Markers, PickContext, VectorTiles, pick_all};
-pub use map::{Map, MapSource, MapView};
+pub use pick::Pick;
+pub use layer::{CustomLayer, DrawContext, Markers, PickContext};
+pub use map::{KittyState, Map, MapSource, MapView, RasterMode, TileRequest};
 pub use spec::StyleLayer;
 pub use render::{Camera, Overlay, Viewport};
 pub use source::Source;
-pub use store::{TileId, TileStore, prepare};
-pub use style::{Style, Theme};
+pub use store::TileId;

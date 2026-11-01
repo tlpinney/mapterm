@@ -140,6 +140,11 @@ impl StyleLayer {
         Self::new(id, Kind::Symbol, Some(source.into()))
     }
 
+    /// Image tiles from a raster source.
+    pub fn raster(id: impl Into<String>, source: impl Into<String>) -> Self {
+        Self::new(id, Kind::Raster, Some(source.into()))
+    }
+
     /// The source-layer of a vector source to draw.
     pub fn source_layer(mut self, name: impl Into<String>) -> Self {
         self.source_layer = Some(name.into());

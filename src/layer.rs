@@ -3,24 +3,21 @@
 //! Add one to a [`crate::Map`] with `add_custom_layer` for anything style layers can't express,
 //! the way MapLibre's `CustomLayerInterface` works.
 //!
-//! [`LayerStack`] draws a camera and a borrowed list of custom layers without a `Map`, which the
-//! viewer still uses for its basemap ([`VectorTiles`]) until that moves onto style layers.
+//! [`Markers`] is a ready-made one for a list of [`Overlay`] markers and lines.
 
 use std::collections::HashSet;
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style as TStyle},
-    widgets::Widget,
+    style::{Color, Style as TStyle},
+
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
     pick::Pick,
     render::{Camera, Canvas, Overlay, TILE_DOTS, Viewport, to_world},
-    store::TileStore,
-    style::Paint,
 };
 
 /// Something drawn on the map by your own code.
@@ -113,6 +110,11 @@ impl DrawContext<'_> {
         self.fill_dots(&d, color);
     }
 
+    /// Set the background of one cell (column, row relative to the map area).
+    pub fn cell_bg(&mut self, col: u16, row: u16, color: Color) {
+        self.canvas.set_bg(col as usize, row as usize, color);
+    }
+
     /// A text marker at a dot position, with an optional label to its right.
     pub fn marker_dot(&mut self, p: (f64, f64), glyph: &str, style: TStyle, priority: i32, label: Option<(String, TStyle)>) {
         self.markers.push((self.base.saturating_add(priority), p, glyph.to_string(), style, label));
@@ -138,12 +140,6 @@ pub struct PickContext<'a> {
     pub area: Rect,
     pub viewport: Viewport,
     pub target: (f64, f64),
-}
-
-/// Features under `target` (dots relative to `area`) across `layers`, top layer first.
-pub fn pick_all(layers: &[&dyn CustomLayer], camera: &Camera, area: Rect, target: (f64, f64)) -> Vec<Pick> {
-    let ctx = PickContext { camera, area, viewport: Viewport::new(camera, area), target };
-    layers.iter().rev().flat_map(|l| l.pick(&ctx)).collect()
 }
 
 /// Set up a canvas for `area`, let `draw` fill it, then place markers and labels (highest
@@ -201,117 +197,17 @@ pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: i
     canvas.flush(area, buf);
 }
 
-/// Draws a camera and a borrowed stack of custom layers (first at the bottom).
-pub struct LayerStack<'a> {
-    pub camera: &'a Camera,
-    pub layers: &'a [&'a dyn CustomLayer],
-}
+/// A list of [`Overlay`] markers and lines as a custom layer.
+#[derive(Default)]
+pub struct Markers(pub Vec<Overlay>);
 
-impl Widget for LayerStack<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        render_with(self.camera, area, buf, |ctx| {
-            for layer in self.layers {
-                layer.draw(ctx);
-            }
-        });
-    }
-}
-
-/// The vector tile basemap (from a [`TileStore`]) as a layer.
-pub struct VectorTiles<'a> {
-    pub store: &'a TileStore,
-    pub min_zoom: u8,
-    pub max_zoom: u8,
-    /// Area fills (water, parks, buildings); turn off over a raster to keep it visible.
-    pub fills: bool,
-    /// Roads, rivers, boundaries.
-    pub lines: bool,
-    pub labels: bool,
-}
-
-impl<'a> VectorTiles<'a> {
-    pub fn new(store: &'a TileStore, min_zoom: u8, max_zoom: u8) -> Self {
-        Self { store, min_zoom, max_zoom, fills: true, lines: true, labels: true }
-    }
-}
-
-impl CustomLayer for VectorTiles<'_> {
-    fn name(&self) -> &str {
-        "basemap"
-    }
-
-    fn draw(&self, ctx: &mut DrawContext) {
-        let vp = ctx.viewport;
-        let tz = ctx.camera.tile_zoom(self.min_zoom, self.max_zoom);
-        // Loaded tiles (or stand-in ancestors), each once, ancestors first so real tiles win.
-        let mut seen = HashSet::new();
-        let mut tiles = Vec::new();
-        for id in vp.tiles(tz) {
-            if let Some((aid, t)) = self.store.get_or_ancestor(id)
-                && seen.insert(aid)
-            {
-                tiles.push((aid, t));
-            }
-        }
-        tiles.sort_by_key(|(id, _)| id.0);
-        let mut items: Vec<(u16, usize, usize)> = Vec::new();
-        for (ti, (_, t)) in tiles.iter().enumerate() {
-            for (ii, it) in t.items.iter().enumerate() {
-                items.push((it.order, ti, ii));
-            }
-        }
-        items.sort_by_key(|(o, _, _)| *o);
-        for (_, ti, ii) in items {
-            let ((z, tx, ty), t) = &tiles[ti];
-            let n = (1u64 << z) as f64;
-            let it = &t.items[ii];
-            let to_dot = |p: &[f32; 2]| vp.dot((*tx as f64 + p[0] as f64) / n, (*ty as f64 + p[1] as f64) / n);
-            match &it.paint {
-                Paint::Fill(c) if self.fills => {
-                    let rings: Vec<Vec<(f64, f64)>> = it.parts.iter().map(|r| r.iter().map(to_dot).collect()).collect();
-                    ctx.fill_dots(&rings, *c);
-                }
-                Paint::Line(c) if self.lines => {
-                    for part in it.parts.iter() {
-                        let pts: Vec<(f64, f64)> = part.iter().map(to_dot).collect();
-                        ctx.line_dots(&pts, *c);
-                    }
-                }
-                Paint::Label { text, color, priority, bold } if self.labels => {
-                    // Anchor at fixed vertices along the feature (not the middle of whatever is
-                    // on screen), so labels stay put while the map pans.
-                    let anchor = it.parts.iter().find_map(|part| {
-                        let step = (part.len() / 3).max(1);
-                        (step / 2..part.len()).step_by(step).map(|i| to_dot(&part[i])).find(|p| ctx.inside(*p))
-                    });
-                    if let Some(p) = anchor {
-                        let mut st = TStyle::new().fg(*color);
-                        if *bold {
-                            st = st.add_modifier(Modifier::BOLD);
-                        }
-                        ctx.label_dot(p, text, st, *priority);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    fn pick(&self, ctx: &PickContext) -> Vec<Pick> {
-        crate::pick::pick_dot(self.store, ctx.camera, self.min_zoom, self.max_zoom, ctx.area, ctx.target)
-    }
-}
-
-/// A list of [`Overlay`] markers and lines as a layer.
-pub struct Markers<'a>(pub &'a [Overlay]);
-
-impl CustomLayer for Markers<'_> {
+impl CustomLayer for Markers {
     fn name(&self) -> &str {
         "markers"
     }
 
     fn draw(&self, ctx: &mut DrawContext) {
-        for o in self.0 {
+        for o in &self.0 {
             match o {
                 Overlay::Line { pts, color } => ctx.line_lonlat(pts, *color),
                 Overlay::Marker { lon, lat, glyph, style, label, priority } => {
