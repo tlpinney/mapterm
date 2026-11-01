@@ -202,7 +202,7 @@ pub const PRESETS: &[Preset] = &[
         attribution: "© Mapbox © Maxar",
         tile_px: 512,
         max_zoom: 22,
-        cache: false,
+        cache: true,
     },
     Preset {
         name: "maptiler",
@@ -369,6 +369,8 @@ impl RasterSource {
         s.tile_px = p.tile_px;
         s.name = p.name.to_string();
         s.attribution = p.attribution.to_string();
+        // Mapbox's tiles are kept as long as their headers say (12 hours, as of 2026).
+        s.by_headers = crate::mapbox::is_mapbox_host(p.template);
         if s.is_google() {
             // Kept only as long as each tile's headers say (a day, as of 2026), and apart per
             // map type: the URL template is the same for all of them.
@@ -566,63 +568,13 @@ impl RasterSource {
 }
 
 impl RasterSource {
-    /// A tile cached by its HTTP headers: used as is until its `max-age` runs out (at most
-    /// 30 days), then asked for again with `If-None-Match`, so an unchanged tile comes back as
-    /// a 304 and is kept. `no-store`/`no-cache` responses aren't kept. Bytes are stored as
-    /// received. Each tile has a `.meta` file beside it: "expires-unix-seconds etag".
+    /// A tile cached by its HTTP headers (see [`crate::source::fetch_by_headers`]).
     async fn tile_by_headers(&self, z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>> {
-        let img = self.cache_dir.join(format!("{z}/{x}/{y}.img"));
-        let meta = img.with_extension("meta");
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let cached = if self.cache { read_meta(&meta).zip(std::fs::read(&img).ok()) } else { None };
-        if let Some(((expires, _), bytes)) = &cached
-            && now < *expires
-        {
-            return Ok(Some(bytes.clone()));
-        }
+        let file = self.cache_dir.join(format!("{z}/{x}/{y}.img"));
         let url = self.fill_key(&self.url(z, x, y));
         let headers: Vec<(String, String)> = self.headers.iter().map(|(k, v)| (k.clone(), self.fill_key(v))).collect();
-        let etag = cached.as_ref().and_then(|((_, e), _)| e.clone());
-        let r = crate::source::get_revalidated(crate::source::keyed_client(), &url, &headers, etag.as_deref()).await.map_err(|e| self.redact(e))?;
-        let keep = r.policy.max_age.min(crate::source::DISK_TTL.as_secs());
-        if r.not_modified {
-            let Some(((_, old_etag), bytes)) = cached else { bail!("{z}/{x}/{y}: HTTP 304 without a cached tile") };
-            if self.cache && !r.policy.no_store {
-                let _ = write_meta(&meta, now + keep, r.etag.as_deref().or(old_etag.as_deref()));
-            }
-            return Ok(Some(bytes));
-        }
-        if self.cache {
-            match &r.bytes {
-                Some(b) if !r.policy.no_store && keep > 0 => {
-                    if let Some(d) = img.parent() {
-                        let _ = std::fs::create_dir_all(d);
-                    }
-                    if std::fs::write(&img, b).is_ok() {
-                        let _ = write_meta(&meta, now + keep, r.etag.as_deref());
-                    }
-                }
-                _ => {
-                    // Not to be kept (or no tile): drop any older copy.
-                    let _ = std::fs::remove_file(&img);
-                    let _ = std::fs::remove_file(&meta);
-                }
-            }
-        }
-        Ok(r.bytes)
+        crate::source::fetch_by_headers(crate::source::keyed_client(), &file, &url, &headers, self.cache).await.map_err(|e| self.redact(e))
     }
-}
-
-/// "expires etag" from a `.meta` file (etag may be absent).
-fn read_meta(p: &std::path::Path) -> Option<(u64, Option<String>)> {
-    let s = std::fs::read_to_string(p).ok()?;
-    let mut it = s.trim().splitn(2, ' ');
-    let expires = it.next()?.parse().ok()?;
-    Some((expires, it.next().map(str::to_string).filter(|e| !e.is_empty())))
-}
-
-fn write_meta(p: &std::path::Path, expires: u64, etag: Option<&str>) -> std::io::Result<()> {
-    std::fs::write(p, format!("{expires} {}", etag.unwrap_or("")))
 }
 
 static NEXT_IMAGE_ID: AtomicU32 = AtomicU32::new(1);
@@ -1036,15 +988,15 @@ mod tests {
         assert_eq!(s.tile(3, 2, 1).await.unwrap().as_deref(), Some(&b"tile"[..]));
         assert_eq!(hits.load(Ordering::SeqCst), 1, "served from the cache");
         let meta = dir.join("3/2/1.meta");
-        let (expires, etag) = read_meta(&meta).unwrap();
+        let (expires, etag) = crate::source::read_meta(&meta).unwrap();
         assert_eq!(etag.as_deref(), Some("\"v1\""));
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert!(expires > now + 86000 && expires <= now + 86400, "kept for the header's max-age");
         // Expired: asked again with If-None-Match, 304 keeps the bytes and renews the expiry.
-        write_meta(&meta, 0, etag.as_deref()).unwrap();
+        crate::source::write_meta(&meta, 0, etag.as_deref()).unwrap();
         assert_eq!(s.tile(3, 2, 1).await.unwrap().as_deref(), Some(&b"tile"[..]));
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert!(read_meta(&meta).unwrap().0 > now, "renewed");
+        assert!(crate::source::read_meta(&meta).unwrap().0 > now, "renewed");
         let _ = std::fs::remove_dir_all(&dir);
 
         // no-store: nothing kept, every use asks again.

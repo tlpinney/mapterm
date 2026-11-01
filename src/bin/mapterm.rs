@@ -36,7 +36,11 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL, drawn
                 with mapterm's terminal style (default: OpenFreeMap planet)
   --style       a MapLibre style instead: liberty, positron, bright, dark or fiord
-                (OpenFreeMap), a style URL, or a style.json file
+                (OpenFreeMap), a style URL, a style.json file, or a Mapbox style such
+                as mapbox://styles/mapbox/streets-v12 (needs a Mapbox token)
+  --mapbox-token-cmd CMD
+                print the Mapbox access token with a command (else MAPBOX_ACCESS_TOKEN);
+                used for mapbox:// styles and --raster mapbox
   --geojson     a data file or URL drawn as a layer over the map: GeoJSON, CSV with
                 lat/lon (or WKT) columns, GPX, KML or FlatGeobuf (repeatable; each gets its own color;
                 names from a `name` property; inspect shows properties)
@@ -104,6 +108,7 @@ struct Args {
     geojson: Vec<String>,
     raster_attribution: Option<String>,
     raster_key_cmd: Option<String>,
+    mapbox_token_cmd: Option<String>,
     raster_headers: Vec<String>,
     raster_cache: Option<bool>,
     /// --raster-limit: Some(None) is "off", Some(Some(n)) n a minute, None the default.
@@ -123,7 +128,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, no_labels: false, snapshot: None, format: "text".into(), pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_limit: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
+    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, no_labels: false, snapshot: None, format: "text".into(), pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, mapbox_token_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_limit: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
     let parse_limit = |v: &str| -> Result<Option<u32>> {
         match v.trim() {
             "off" | "none" | "0" => Ok(None),
@@ -149,6 +154,7 @@ fn args() -> Result<Args> {
             "--tms" => a.tms = true,
             "--geojson" => a.geojson.push(it.next().context("--geojson FILE|URL")?),
             "--raster-key-cmd" => a.raster_key_cmd = Some(it.next().context("--raster-key-cmd CMD")?),
+            "--mapbox-token-cmd" => a.mapbox_token_cmd = Some(it.next().context("--mapbox-token-cmd CMD")?),
             "--raster-header" => a.raster_headers.push(it.next().context("--raster-header 'Name: value'")?),
             "--raster-param" => {
                 let v = it.next().context("--raster-param NAME=VALUE")?;
@@ -497,6 +503,8 @@ async fn main() -> Result<()> {
     if a.style.is_some() && a.source.is_some() {
         bail!("give either a SOURCE (drawn with the built-in style) or --style, not both");
     }
+    // Mapbox's token, for mapbox:// styles and the mapbox imagery.
+    mapterm::mapbox::set_access_token(mapterm::raster::find_key(a.mapbox_token_cmd.as_deref(), &["MAPBOX_ACCESS_TOKEN"])?);
     let mut geo = Vec::new();
     for (i, g) in a.geojson.iter().enumerate() {
         let color = mapterm::geojson::PALETTE[i % mapterm::geojson::PALETTE.len()];
@@ -565,7 +573,10 @@ async fn main() -> Result<()> {
             let mut r = match mapterm::raster::preset(spec) {
                 None if spec.ends_with(".pmtiles") => mapterm::raster::RasterSource::from_pmtiles(spec).await?,
                 Some(p) => {
-                    let key = mapterm::raster::find_key(a.raster_key_cmd.as_deref(), p.key_env)?;
+                    let mut key = mapterm::raster::find_key(a.raster_key_cmd.as_deref(), p.key_env)?;
+                    if key.is_none() && p.name == "mapbox" {
+                        key = mapterm::mapbox::access_token();
+                    }
                     mapterm::raster::RasterSource::from_preset(p, key)?
                 }
                 None => {
