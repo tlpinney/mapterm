@@ -47,9 +47,13 @@ pub struct PixFrame {
     pub placed: Vec<PixPlacement>,
     /// Images to delete from the terminal (evicted from the cache).
     pub freed: Vec<u32>,
-    /// Tiles left blank this frame: their data is still loading, or there wasn't time to
+    /// Tiles not drawn this frame: their data is still loading, or there wasn't time to
     /// draw them. Draw again soon while this is above zero.
     pub pending: usize,
+    /// While tiles are pending: a low-resolution image of the whole map area (the map's
+    /// background, then cached tiles of any zoom scaled into place), to stretch over the
+    /// area's cells under the tiles, so nothing shows through where tiles aren't ready.
+    pub backdrop: Option<PixImage>,
 }
 
 /// Tile images drawn so far, by (grid tile, zoom, style signature), least recently used out
@@ -59,8 +63,6 @@ pub(crate) struct PixCache {
     pub(crate) tiles: std::collections::HashMap<PixKey, CachedTile>,
     pub(crate) bytes: usize,
     pub(crate) frame: u64,
-    /// Stand-in images shown for one frame, freed with the next.
-    pub(crate) temp: Vec<u32>,
     /// Tests: drawing time per frame instead of [`DRAW_BUDGET`].
     pub(crate) budget: Option<std::time::Duration>,
 }
@@ -79,9 +81,8 @@ pub(crate) struct CachedTile {
 /// Time to spend drawing new tiles per frame; the rest stay blank until later frames.
 pub(crate) const DRAW_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
-/// Time to spend building stand-ins (other zooms' tiles scaled into place) per frame; tiles
-/// past it, at the edges since the center comes first, stay blank for a frame or two.
-pub(crate) const STAND_IN_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
+/// The backdrop's resolution, as a fraction of the map area's pixels.
+pub(crate) const BACKDROP_SCALE: f64 = 1.0 / 3.0;
 
 /// Bytes of tile images to keep (the terminal holds them too).
 pub(crate) const PIX_BUDGET: usize = 192 << 20;
@@ -180,23 +181,24 @@ impl Pix {
     /// pixels, smoothly filtered: a stand-in from another zoom. Its edge pixels are carried
     /// out to the rectangle's hard edges (no fading border), so neighbouring tiles meet
     /// without a see-through seam.
+    #[cfg(test)]
     pub(crate) fn blit(&mut self, src: &Pixmap, x: f32, y: f32, k: f32) {
-        let (w, h) = (src.width() as f32 * k, src.height() as f32 * k);
+        self.blit_xy(src, x, y, k, k);
+    }
+
+    /// [`Pix::blit`] with separate scales across (`kx`) and down (`ky`).
+    pub(crate) fn blit_xy(&mut self, src: &Pixmap, x: f32, y: f32, kx: f32, ky: f32) {
+        let (w, h) = (src.width() as f32 * kx, src.height() as f32 * ky);
         let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) else { return };
         let shader = tiny_skia::Pattern::new(
             src.as_ref(),
             tiny_skia::SpreadMode::Pad,
             tiny_skia::FilterQuality::Bilinear,
             1.0,
-            Transform::from_row(k, 0.0, 0.0, k, x, y),
+            Transform::from_row(kx, 0.0, 0.0, ky, x, y),
         );
         let paint = Paint { shader, anti_alias: false, ..Paint::default() };
         self.map.fill_rect(rect, &paint, Transform::identity(), None);
-    }
-
-    /// Whether anything was drawn (a stand-in with no overlapping tiles stays blank).
-    pub(crate) fn is_empty(&self) -> bool {
-        self.map.pixels().iter().all(|p| p.alpha() == 0)
     }
 }
 

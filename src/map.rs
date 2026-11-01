@@ -571,14 +571,15 @@ impl Map {
         })
     }
 
-    /// What decides how tiles look besides their data: the layers and which are shown.
-    fn pixel_signature(&self, zoom: f64) -> u64 {
+    /// What decides how tiles look besides their data and the zoom: the layers and which are
+    /// switched on. Not their zoom ranges, so tiles from other zooms can stand in.
+    fn pixel_signature(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for e in &self.layers {
             e.id().hash(&mut h);
             if let Entry::Style(l) = e {
-                l.shown_at(zoom).hash(&mut h);
+                l.visible.hash(&mut h);
             }
         }
         for (id, _) in &self.sources {
@@ -589,7 +590,7 @@ impl Map {
 
     /// Pixel mode: draw (or reuse) the grid tiles over the view and plan where each goes.
     fn pixel_tiles(&self, cam: &Camera, area: Rect, cpx: (f64, f64)) -> crate::pixels::PixFrame {
-        use crate::pixels::{CachedTile, DRAW_BUDGET, PIX_BUDGET, Pix, PixFrame, PixPlacement, STAND_IN_BUDGET, next_image_id};
+        use crate::pixels::{BACKDROP_SCALE, CachedTile, DRAW_BUDGET, PIX_BUDGET, Pix, PixFrame, PixPlacement, next_image_id};
         let mut frame = PixFrame::default();
         let (cw, ch) = (cpx.0.max(1.0), cpx.1.max(1.0));
         let (sx, sy) = (cw / 2.0, ch / 4.0);
@@ -597,8 +598,6 @@ impl Map {
         cache.frame += 1;
         let now = cache.frame;
         let started = std::time::Instant::now();
-        let temp = std::mem::take(&mut cache.temp);
-        frame.freed.extend(temp);
         let zoom = cam.zoom;
         let imagery = self.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(zoom)));
         let bg_rgb = if imagery { None } else { self.background(zoom).map(|c| c.to_u8()) };
@@ -606,7 +605,7 @@ impl Map {
         // be thousands of pixels wide on a Retina screen).
         let gz = (cam.zoom + (sx / 2.0).log2()).floor().clamp(0.0, 24.0) as u8;
         let zkey = (cam.zoom * 64.0).round() as i64;
-        let sig = self.pixel_signature(cam.zoom);
+        let sig = self.pixel_signature();
         let vp = Viewport::new(cam, area);
         let s = crate::render::TILE_DOTS * 2f64.powf(cam.zoom);
         let n = (1u64 << gz) as f64;
@@ -618,7 +617,7 @@ impl Map {
         let mut others: Vec<Other> = cache
             .tiles
             .iter()
-            .filter(|(k, _)| k.2 == sig && k.1 != zkey)
+            .filter(|(k, _)| k.2 == sig)
             .map(|(k, t)| ((k.1 as f64 / 64.0 - zoom).abs(), k.0, k.1 as f64 / 64.0, t.pixmap.clone()))
             .collect();
         others.sort_by(|a, b| b.0.total_cmp(&a.0));
@@ -651,37 +650,9 @@ impl Map {
                         img
                     } else {
                         // Not drawn yet (out of time this frame, center tiles first, or its
-                        // data is still loading): stand in with the tiles drawn at other
-                        // zooms, scaled into place, as a web map does while zooming. Blank
-                        // when there are none.
+                        // data is still loading): the backdrop shows under it.
                         frame.pending += 1;
-                        if started.elapsed() >= DRAW_BUDGET + cache.budget.map_or(STAND_IN_BUDGET, |_| std::time::Duration::from_secs(60)) {
-                            continue;
-                        }
-                        let Some(mut pix) = Pix::sized(w, h, cpx) else { continue };
-                        // On the map's background, so gaps between what stands in aren't
-                        // see-through (the terminal's own background would show darker).
-                        // Over imagery the background isn't drawn, so neither is this.
-                        if let Some(bg) = bg_rgb {
-                            pix.clear(bg);
-                        }
-                        for (_, (oz, ox, oy), ozoom, pm) in &others {
-                            let on = (1u64 << oz) as f64;
-                            // Its world square, and whether it overlaps this tile's.
-                            let (sx0, sy0, size) = (*ox as f64 / on, *oy as f64 / on, 1.0 / on);
-                            if sx0 >= x0 + 1.0 / n || sy0 >= y0 + 1.0 / n || sx0 + size <= x0 || sy0 + size <= y0 {
-                                continue;
-                            }
-                            let k = 2f64.powf(zoom - ozoom);
-                            pix.blit(pm, ((sx0 - x0) * s * sx) as f32, ((sy0 - y0) * s * sy) as f32, k as f32);
-                        }
-                        if bg_rgb.is_none() && pix.is_empty() {
-                            continue;
-                        }
-                        let (img, _) = pix.finish(next_image_id());
-                        frame.new.push(img.clone());
-                        cache.temp.push(img.id);
-                        img
+                        continue;
                     }
                 }
             };
@@ -702,6 +673,37 @@ impl Map {
                 y_off: ((ay0 - row * ch).round() as u32).min(ch as u32 - 1),
                 src: ((ax0 - px).round() as u32, (ay0 - py).round() as u32, (ax1 - ax0).round().max(1.0) as u32, (ay1 - ay0).round().max(1.0) as u32),
             });
+        }
+        // Tiles missing: a backdrop of the whole area at low resolution, from the map's
+        // background and every cached tile (any zoom, nearest last) scaled into place, for the
+        // terminal to stretch over the area's cells under the tiles.
+        if frame.pending > 0 {
+            let (bw, bh) = ((aw * BACKDROP_SCALE).ceil().max(1.0), (ah * BACKDROP_SCALE).ceil().max(1.0));
+            let (fx, fy) = (bw / aw, bh / ah);
+            if let Some(mut pix) = Pix::sized(bw as u32, bh as u32, cpx) {
+                if let Some(bg) = bg_rgb {
+                    pix.clear(bg);
+                }
+                let view = {
+                    let (vx0, vy0) = (vp.dot_to_lonlat(0.0, 0.0), vp.dot_to_lonlat(area.width as f64 * 2.0, area.height as f64 * 4.0));
+                    let (a, b) = (crate::render::to_world(vx0.0, vx0.1), crate::render::to_world(vy0.0, vy0.1));
+                    [a.0, a.1, b.0, b.1]
+                };
+                for (_, (oz, ox, oy), ozoom, pm) in &others {
+                    let on = (1u64 << oz) as f64;
+                    let (sx0, sy0, size) = (*ox as f64 / on, *oy as f64 / on, 1.0 / on);
+                    if sx0 > view[2] || sy0 > view[3] || sx0 + size < view[0] || sy0 + size < view[1] {
+                        continue;
+                    }
+                    let (dx, dy) = vp.dot(sx0, sy0);
+                    let k = 2f64.powf(zoom - ozoom);
+                    // Pixels per dot differ across and down (cells aren't 2:4), so scale by
+                    // the backdrop's two factors; tiles were drawn with the same aspect.
+                    pix.blit_xy(pm, (dx * sx * fx) as f32, (dy * sy * fy) as f32, (k * fx) as f32, (k * fy) as f32);
+                }
+                let (img, _) = pix.finish(next_image_id());
+                frame.backdrop = Some(img);
+            }
         }
         // Over budget: the least recently used tiles this frame didn't use go.
         if cache.bytes > PIX_BUDGET {
@@ -2287,12 +2289,14 @@ mod tests {
     }
 
     #[test]
-    fn pixel_tiles_stand_in_while_zooming() {
+    fn pixel_backdrop_while_zooming() {
         // A blue square over a grey background, in pixel mode.
         let mut map = Map::new();
         map.add_source("sq", MapSource::geojson(&json!({"type": "Polygon", "coordinates": [[[-40, -30], [40, -30], [40, 30], [-40, 30], [-40, -30]]]})).unwrap()).unwrap();
         map.add_layer(StyleLayer::background("bg").color("#808080")).unwrap();
         map.add_layer(StyleLayer::fill("fill", "sq").color("#0000ff")).unwrap();
+        // Shown only up to zoom 2.2: zoom ranges mustn't stop zoom 2's tiles standing in.
+        map.add_layer(StyleLayer::fill("upto", "sq").color("#0000ff").max_zoom(2.2)).unwrap();
         map.pixel_mode = Some((10.0, 20.0));
         let area = Rect::new(0, 0, 40, 20);
         let mut buf = Buffer::empty(area);
@@ -2315,21 +2319,17 @@ mod tests {
         let f = map.take_pixels().unwrap();
         assert!(f.pending == 0 && !f.new.is_empty(), "everything drawn at zoom 2");
         assert_eq!(blue_at_center(&f), Some(vec![0, 0, 255, 255]));
-        // No time to draw: zooming in and out shows stand-ins scaled from zoom 2.
+        // No time to draw: zooming in and out, the backdrop shows zoom 2's tiles scaled
+        // into place over the whole area, with nothing see-through.
         map.pixcache.lock().unwrap().budget = Some(std::time::Duration::ZERO);
         for z in [2.5, 1.5] {
             map.view(&Camera::new(0.0, 0.0, z)).render(area, &mut buf);
             let f = map.take_pixels().unwrap();
-            assert!(f.pending > 0 && f.new.len() == f.placed.len(), "z{z}: all stand-ins");
-            assert_eq!(blue_at_center(&f), Some(vec![0, 0, 255, 255]), "z{z}: the square, scaled");
-            // Nothing see-through: the terminal's background would show darker.
-            for img in &f.new {
-                assert!(img.rgba.chunks(4).all(|p| p[3] == 255), "z{z}: stand-in {} has see-through pixels", img.id);
-            }
-            // Stand-ins last one frame: the next frame frees them.
-            map.view(&Camera::new(0.0, 0.0, z)).render(area, &mut buf);
-            let next = map.take_pixels().unwrap();
-            assert!(f.new.iter().all(|i| next.freed.contains(&i.id)), "z{z}: stand-ins freed");
+            assert!(f.pending > 0 && f.placed.is_empty(), "z{z}: no tiles drawn");
+            let b = f.backdrop.as_ref().expect("a backdrop");
+            assert!(b.rgba.chunks(4).all(|p| p[3] == 255), "z{z}: backdrop see-through");
+            let at = |x: u32, y: u32| b.rgba[((y * b.width + x) * 4) as usize..((y * b.width + x) * 4 + 4) as usize].to_vec();
+            assert_eq!(at(b.width / 2, b.height / 2), vec![0, 0, 255, 255], "z{z}: the square in the middle");
         }
     }
 

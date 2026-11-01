@@ -759,6 +759,20 @@ async fn main() -> Result<()> {
     let mut pixels_placed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // Tiles still blank (drawing or loading): keep drawing frames until they're in.
     let mut pixels_pending = 0usize;
+    // The backdrop shown under the tiles while some aren't ready.
+    let mut backdrop_shown: Option<u32> = None;
+    // MAPTERM_DEMO="+@2,+@3.5,-@5,right@6,q@9": press keys at those seconds after start
+    // (+ - left right up down, q quits), to replay a scenario for recordings and tests.
+    let mut demo: Vec<(f64, String)> = std::env::var("MAPTERM_DEMO")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|e| {
+            let (k, t) = e.trim().split_once('@')?;
+            Some((t.trim().parse().ok()?, k.trim().to_string()))
+        })
+        .collect();
+    demo.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let demo_start = Instant::now();
     let mut kstate = KittyState::default();
     // Terminal image memory to stay within (herdr keeps 64 MiB per pane).
     if let Some(mb) = std::env::var("MAPTERM_KITTY_BUDGET_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
@@ -847,6 +861,19 @@ async fn main() -> Result<()> {
     let mut credit_pending = false;
     let result: Result<()> = async {
         loop {
+            while demo.last().is_some_and(|(t, _)| demo_start.elapsed().as_secs_f64() >= *t) {
+                let (_, k) = demo.pop().unwrap_or_default();
+                let code = match k.as_str() {
+                    "q" => return Ok(()),
+                    "left" => KeyCode::Left,
+                    "right" => KeyCode::Right,
+                    "up" => KeyCode::Up,
+                    "down" => KeyCode::Down,
+                    other => KeyCode::Char(other.chars().next().unwrap_or(' ')),
+                };
+                dlog(|| format!("demo: {k} at {:.2} s", demo_start.elapsed().as_secs_f64()));
+                ctl.key(crossterm::event::KeyEvent::from(code));
+            }
             ctl.tick(Instant::now());
             // One synchronized update per frame when escape sequences follow the cells.
             let sync = smooth_on || kitty || pixels_on;
@@ -1022,6 +1049,14 @@ async fn main() -> Result<()> {
                     for id in &f.freed {
                         cmds.push_str(&mapterm::kitty::free(*id));
                     }
+                    // Under the tiles, stretched over the map area's cells.
+                    if let Some(b) = &f.backdrop {
+                        cmds.push_str(&mapterm::kitty::transmit_rgba(b.id, b.width, b.height, &b.rgba, pixels_shm));
+                        cmds.push_str(&mapterm::kitty::place(b.id, 1, map_area.x, map_area.y, (0, 0, b.width, b.height), map_area.width, map_area.height, -600));
+                    }
+                    if let Some(old) = std::mem::replace(&mut backdrop_shown, f.backdrop.as_ref().map(|b| b.id)) {
+                        cmds.push_str(&mapterm::kitty::free(old));
+                    }
                     pixels_placed = now;
                     pixels_pending = f.pending;
                     out.write_all(cmds.as_bytes())?;
@@ -1087,7 +1122,7 @@ async fn main() -> Result<()> {
             }
 
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
-            let idle = if ctl.animating() || pixels_pending > 0 { Duration::from_millis(16) } else { Duration::from_millis(500) };
+            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() { Duration::from_millis(16) } else { Duration::from_millis(500) };
             tokio::select! {
                 Some(first) = rx.recv() => {
                     let mut batch = vec![first];
@@ -1461,3 +1496,4 @@ impl Bucket {
         }
     }
 }
+
