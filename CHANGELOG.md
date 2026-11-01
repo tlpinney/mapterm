@@ -20,8 +20,19 @@ All notable changes to mapterm are listed here. The format follows
 
 - `Map::set_attribution` works on raster sources that are shared (it used to fail once
   the source had another owner), so credits can follow the view.
-- The viewer doesn't load paid imagery (keyed providers, billed per tile) for the views a
-  fly-to passes through, only where the camera stops.
+- While the camera moves, the viewer loads paid imagery (keyed providers, billed per tile)
+  for where it will stop: a jump's destination starts loading as the jump begins, and
+  eased zooms and drag glides keep their imagery, without the views on the way.
+- Tiles refused with HTTP 429 (too many requests, or a used-up quota) are retried without
+  limit instead of given up, and the viewer pauses imagery requests for a minute and says
+  so, instead of counting them as failed.
+
+### Added (viewer)
+
+- `--raster-limit N|off` (or `MAPTERM_RASTER_LIMIT`): at most N imagery tile requests a
+  minute. Default 300 for keyed, billed providers and none for free ones; `off` lifts it.
+- `Controller::target`: where the running animation ends. `map::is_rate_limited` tells
+  an HTTP 429 tile error apart from a failure.
 
 ## [0.1.2] - 2026-11-01
 

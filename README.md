@@ -169,7 +169,9 @@ Keys are only added to requests (Vantor's as the `maxar-api-key` header) and are
 blanked out of errors. Google's tiles need a session, which mapterm asks for at start;
 the status bar credits "Google Maps" and Google's imagery or map data credits for the
 view (asked again when it settles somewhere new), and Google tiles are never kept on disk
-(`--raster-cache` is refused). Paid imagery isn't loaded for views a fly-to passes through. Keyed providers don't cache tiles on disk unless you pass
+(`--raster-cache` is refused). While the camera moves, paid imagery loads for where it
+will stop, not for the views on the way, and `--raster-limit N|off` caps imagery requests
+a minute (300 by default for keyed providers). Keyed providers don't cache tiles on disk unless you pass
 `--raster-cache`, since commercial licenses often limit storing them. For any
 other service, use its URL with `{key}` where the key goes (filled from
 `MAPTERM_RASTER_KEY` or `--raster-key-cmd`), or for header-based keys

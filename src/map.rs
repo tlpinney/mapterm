@@ -519,8 +519,14 @@ pub struct RetryPolicy {
     /// Longest wait between attempts.
     pub max: std::time::Duration,
     /// After this many failures in a row the tile is stored empty and not requested again
-    /// (until it leaves the cache).
+    /// (until it leaves the cache). Rate-limited tiles (HTTP 429) are never given up.
     pub attempts: u32,
+}
+
+/// Whether a tile error is the provider asking for fewer requests (HTTP 429): such tiles are
+/// retried without limit, and apps can tell it apart from a real failure.
+pub fn is_rate_limited(e: &anyhow::Error) -> bool {
+    format!("{e:#}").contains("HTTP 429")
 }
 
 impl Default for RetryPolicy {
@@ -787,9 +793,13 @@ impl Map {
                 (t, None)
             }
             Err(e) => {
+                // A provider saying "too many requests" means later, not never: keep asking,
+                // with the growing wait, rather than giving the tile up.
+                let throttled = is_rate_limited(&e);
                 let e = e.context(format!("{source} tile {}/{}/{}", id.0, id.1, id.2));
                 let attempts = self.failed.get(&key).map_or(0, |f| f.0) + 1;
-                if attempts < self.retry.attempts {
+                let attempts = if throttled { attempts.min(self.retry.attempts.saturating_sub(1).max(1)) } else { attempts };
+                if throttled || attempts < self.retry.attempts {
                     // Ask again later; lower-zoom tiles stand in meanwhile.
                     let wait = self.retry.base.saturating_mul(1 << (attempts - 1).min(16)).min(self.retry.max);
                     self.failed.insert(key, (attempts, std::time::Instant::now() + wait));
@@ -1940,6 +1950,22 @@ mod tests {
         map.insert_loaded("img", (0, 0, 0), Ok(Loaded(LoadedTile::Raster(Some(solid_tile(1, 2, 3)))))).unwrap();
         assert!(map.failed.is_empty() && map.tile_requests(&cam, area).is_empty());
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn rate_limited_loads_are_never_given_up() {
+        use std::time::Duration;
+        let mut map = raster_map();
+        let cam = Camera::new(0.0, 0.0, 0.0);
+        let area = Rect::new(0, 0, 40, 20);
+        map.retry = RetryPolicy { base: Duration::ZERO, max: Duration::ZERO, attempts: 2 };
+        // Far more 429s than attempts: still asked for again each time.
+        for _ in 0..6 {
+            let e = map.insert_loaded("img", (0, 0, 0), Err(anyhow!("https://x/0/0/0: HTTP 429 Too Many Requests"))).unwrap_err();
+            assert!(is_rate_limited(&e));
+            assert_eq!(map.tile_requests(&cam, area).len(), 1, "still wanted");
+        }
+        assert!(!is_rate_limited(&anyhow!("HTTP 500")));
     }
 
     #[test]

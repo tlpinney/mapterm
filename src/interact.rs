@@ -249,6 +249,37 @@ impl Controller {
         self.area = area;
     }
 
+    /// Where the running animation ends (a fly-to's destination, the end of an eased zoom
+    /// or of a drag's glide), or None when nothing is moving. Apps can load that view's tiles
+    /// early instead of every view on the way.
+    pub fn target(&self) -> Option<Camera> {
+        self.anim.map(|a| self.anim_cam(&a, 1.0))
+    }
+
+    /// The camera `t` (0..1) of the way through an animation.
+    fn anim_cam(&self, a: &Anim, t: f64) -> Camera {
+        let e = a.easing.ease(t.min(1.0));
+        let mut cam = a.from;
+        match a.motion {
+            Motion::ZoomAround { to, at } => cam.zoom_at((to - a.from.zoom) * e, self.max_zoom, self.area, at.0, at.1),
+            Motion::Pan { dots } => cam.pan_dots(dots.0 * e, dots.1 * e),
+            Motion::Fly { to, fly } => {
+                let (dz, u) = if t >= 1.0 { (to.zoom - a.from.zoom, 1.0) } else { fly.at(e) };
+                let (fx, fy) = to_world(a.from.lon, a.from.lat);
+                let (tx, ty) = to_world(to.lon, to.lat);
+                let (lon, lat) = to_lonlat(fx + (tx - fx) * u, fy + (ty - fy) * u);
+                cam = Camera::new(lon, lat, (a.from.zoom + dz).clamp(self.min_zoom, self.max_zoom));
+            }
+            Motion::To { to } => {
+                let (fx, fy) = to_world(a.from.lon, a.from.lat);
+                let (tx, ty) = to_world(to.lon, to.lat);
+                let (lon, lat) = to_lonlat(fx + (tx - fx) * e, fy + (ty - fy) * e);
+                cam = Camera::new(lon, lat, a.from.zoom + (to.zoom - a.from.zoom) * e);
+            }
+        }
+        cam
+    }
+
     /// Whether a move is in flight (draw again soon, at about 60 fps).
     pub fn animating(&self) -> bool {
         self.anim.is_some()
@@ -359,26 +390,7 @@ impl Controller {
     pub fn tick(&mut self, now: Instant) -> bool {
         let Some(a) = self.anim else { return false };
         let t = now.saturating_duration_since(a.start).as_secs_f64() / a.dur.as_secs_f64().max(1e-6);
-        let e = a.easing.ease(t);
-        let mut cam = a.from;
-        match a.motion {
-            Motion::ZoomAround { to, at } => cam.zoom_at((to - a.from.zoom) * e, self.max_zoom, self.area, at.0, at.1),
-            Motion::Pan { dots } => cam.pan_dots(dots.0 * e, dots.1 * e),
-            Motion::Fly { to, fly } => {
-                let (dz, u) = if t >= 1.0 { (to.zoom - a.from.zoom, 1.0) } else { fly.at(e) };
-                let (fx, fy) = to_world(a.from.lon, a.from.lat);
-                let (tx, ty) = to_world(to.lon, to.lat);
-                let (lon, lat) = to_lonlat(fx + (tx - fx) * u, fy + (ty - fy) * u);
-                cam = Camera::new(lon, lat, (a.from.zoom + dz).clamp(self.min_zoom, self.max_zoom));
-            }
-            Motion::To { to } => {
-                let (fx, fy) = to_world(a.from.lon, a.from.lat);
-                let (tx, ty) = to_world(to.lon, to.lat);
-                let (lon, lat) = to_lonlat(fx + (tx - fx) * e, fy + (ty - fy) * e);
-                cam = Camera::new(lon, lat, a.from.zoom + (to.zoom - a.from.zoom) * e);
-            }
-        }
-        self.cam = cam;
+        self.cam = self.anim_cam(&a, t);
         if t >= 1.0 {
             self.anim = None;
         }
@@ -581,6 +593,24 @@ mod tests {
     fn finish(c: &mut Controller) {
         c.tick(Instant::now() + Duration::from_secs(10));
         assert!(!c.animating());
+    }
+
+    #[test]
+    fn target_is_where_animations_end() {
+        let mut c = ctl();
+        assert!(c.target().is_none(), "nothing moving");
+        // A long fly-to: the target is the destination.
+        let to = Camera::new(77.03, 15.42, 14.0);
+        c.fly_to(to);
+        let t = c.target().unwrap();
+        assert!((t.lon - to.lon).abs() < 1e-9 && (t.lat - to.lat).abs() < 1e-9 && (t.zoom - to.zoom).abs() < 1e-9, "{t:?}");
+        // An eased zoom: where tick lands at the end.
+        let mut c = ctl();
+        c.ease_zoom(1.0, (30, 10));
+        let t = c.target().unwrap();
+        finish(&mut c);
+        assert!((t.lon - c.cam.lon).abs() < 1e-9 && (t.lat - c.cam.lat).abs() < 1e-9 && (t.zoom - c.cam.zoom).abs() < 1e-9);
+        assert!(c.target().is_none());
     }
 
     #[test]

@@ -58,6 +58,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --raster-list-mosaics   list the Planet mosaics your key can use, then exit
   --raster-cache / --raster-no-cache
                           keep tiles on disk or not (default: on, off for keyed providers)
+  --raster-limit N|off    at most N imagery tile requests a minute (default 300 for keyed,
+                          billed providers, none for free ones; also MAPTERM_RASTER_LIMIT)
   --raster-attribution T  credit for the layer (known providers are filled in)
   --tms                   count raster rows from the bottom (TMS) even with a plain {y}
   --light       light theme (the built-in style; t switches)
@@ -103,6 +105,8 @@ struct Args {
     raster_key_cmd: Option<String>,
     raster_headers: Vec<String>,
     raster_cache: Option<bool>,
+    /// --raster-limit: Some(None) is "off", Some(Some(n)) n a minute, None the default.
+    raster_limit: Option<Option<u32>>,
     raster_params: Vec<(String, String)>,
     list_mosaics: bool,
     /// Experimental smooth scrolling, from MAPTERM_SMOOTH only (no flag): `1` pans the wheel
@@ -118,7 +122,16 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, no_labels: false, snapshot: None, format: "text".into(), pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
+    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, no_labels: false, snapshot: None, format: "text".into(), pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_limit: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
+    let parse_limit = |v: &str| -> Result<Option<u32>> {
+        match v.trim() {
+            "off" | "none" | "0" => Ok(None),
+            n => Ok(Some(n.parse::<u32>().with_context(|| format!("--raster-limit {n}: a number of tiles a minute, or off"))?)),
+        }
+    };
+    if let Ok(v) = std::env::var("MAPTERM_RASTER_LIMIT") {
+        a.raster_limit = Some(parse_limit(&v)?);
+    }
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -144,6 +157,7 @@ fn args() -> Result<Args> {
             "--raster-list-mosaics" => a.list_mosaics = true,
             "--date" => a.raster_params.push(("date".into(), it.next().context("--date YYYY-MM-DD")?)),
             "--raster-cache" => a.raster_cache = Some(true),
+            "--raster-limit" => a.raster_limit = Some(parse_limit(&it.next().context("--raster-limit N|off")?)?),
             "--raster-no-cache" => a.raster_cache = Some(false),
             "--raster-list" => {
                 println!("raster providers (--raster NAME):\n");
@@ -753,6 +767,15 @@ async fn main() -> Result<()> {
     // for the credits there (a quarter of the view's width counts as a new spot).
     let google = raster.as_ref().filter(|r| r.is_google()).cloned();
     let billed_raster = raster.as_ref().is_some_and(|r| r.is_google() || r.wants_key());
+    // Imagery requests a minute: a bucket that holds a minute's worth and refills steadily.
+    let mut limiter = match a.raster_limit {
+        Some(n) => n,
+        None if billed_raster => Some(300),
+        None => None,
+    }
+    .map(|n| Bucket::new(n.max(1)));
+    let mut held_back = false;
+    let mut throttled_at: Option<Instant> = None;
     let (ctx, mut crx) = mpsc::unbounded_channel::<Result<String>>();
     let mut credit_view: Option<(i32, i64, i64)> = None;
     let mut credit_seen: Option<((i32, i64, i64), Instant)> = None;
@@ -855,6 +878,13 @@ async fn main() -> Result<()> {
                 if errors > 0 {
                     spans.push(Span::styled(format!("{errors} failed "), TStyle::new().fg(Color::Red)));
                 }
+                if let Some(t) = throttled_at.filter(|t| t.elapsed() < Duration::from_secs(60)) {
+                    let wait = 60 - t.elapsed().as_secs();
+                    spans.push(Span::styled(format!("imagery: provider says too many requests (or daily quota used up), trying again in {wait} s "), TStyle::new().fg(Color::Yellow)));
+                } else if held_back {
+                    let n = limiter.as_ref().map_or(0, |b| b.per_min);
+                    spans.push(Span::styled(format!("imagery limit {n}/min (--raster-limit) "), TStyle::new().fg(Color::Yellow)));
+                }
                 if smooth_on {
                     let tag = match (shift_mode, ctl.pixel_mouse.is_some()) {
                         (true, true) => "smooth·shift·px ",
@@ -913,18 +943,37 @@ async fn main() -> Result<()> {
             }
 
             // Fetch what the view needs that we don't have yet.
-            for req in map.tile_requests(&draw_cam, map_area) {
-                // Paid imagery (keyed providers, billed per tile) loads where the camera stops,
-                // not for every view a fly-to passes through.
-                if billed_raster && req.source == RASTER && ctl.animating() {
+            // While the camera moves, paid imagery (keyed providers, billed per tile) loads for
+            // where it will stop (a jump's destination, the end of a zoom or glide), not for
+            // every view on the way.
+            let target = ctl.target().filter(|_| billed_raster);
+            let mut reqs: Vec<_> = map.tile_requests(&draw_cam, map_area).into_iter().filter(|r| target.is_none() || r.source != RASTER).collect();
+            if let Some(t) = target {
+                reqs.extend(map.tile_requests(&t, map_area).into_iter().filter(|r| r.source == RASTER));
+            }
+            held_back = false;
+            for req in reqs {
+                if pending.contains(&(req.source.clone(), req.id)) {
                     continue;
                 }
-                if pending.insert((req.source.clone(), req.id)) {
-                    if req.source == RASTER {
-                        dlog(|| format!("raster tile {:?}", req.id));
-                    }
-                    spawn_load(req, tx.clone());
+                // The provider said "too many requests" (or its daily quota is used up): ask it
+                // nothing for a minute, rather than every waiting tile asking on its own.
+                if req.source == RASTER && throttled_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+                    continue;
                 }
+                if req.source == RASTER
+                    && let Some(b) = limiter.as_mut()
+                    && !b.take()
+                {
+                    // Over --raster-limit: asked for again on a later frame.
+                    held_back = true;
+                    continue;
+                }
+                if req.source == RASTER {
+                    dlog(|| format!("raster tile {:?}", req.id));
+                }
+                pending.insert((req.source.clone(), req.id));
+                spawn_load(req, tx.clone());
             }
 
             if let Some(g) = google.as_ref().filter(|_| !credit_pending) {
@@ -962,7 +1011,11 @@ async fn main() -> Result<()> {
                         if let Err(e) = map.insert_loaded(&source, id, r) {
                             // The map asks for it again after a growing wait.
                             dlog(|| format!("{e:#}"));
-                            errors += 1;
+                            if mapterm::map::is_rate_limited(&e) {
+                                throttled_at = Some(Instant::now());
+                            } else {
+                                errors += 1;
+                            }
                         }
                     }
                 }
@@ -1290,4 +1343,30 @@ async fn main() -> Result<()> {
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
+}
+
+/// A token bucket for --raster-limit: holds a minute's worth of requests, refilled steadily.
+struct Bucket {
+    per_min: u32,
+    tokens: f64,
+    last: Instant,
+}
+
+impl Bucket {
+    fn new(per_min: u32) -> Self {
+        Self { per_min, tokens: per_min as f64, last: Instant::now() }
+    }
+
+    /// Take one request if there's one left.
+    fn take(&mut self) -> bool {
+        let now = Instant::now();
+        self.tokens = (self.tokens + now.duration_since(self.last).as_secs_f64() * self.per_min as f64 / 60.0).min(self.per_min as f64);
+        self.last = now;
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
