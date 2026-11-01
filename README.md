@@ -37,14 +37,6 @@ Docs, a tour and the full guide: [mapterm.com](https://mapterm.com)
 
 ## Install
 
-With [Homebrew](https://brew.sh) on macOS or Linux:
-
-```sh
-brew tap tlpinney/tap
-brew trust --formula tlpinney/tap/mapterm
-brew install tlpinney/tap/mapterm
-```
-
 With Cargo (Rust 1.89 or newer, from [rustup.rs](https://rustup.rs)):
 
 ```sh
