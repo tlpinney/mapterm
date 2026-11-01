@@ -1,0 +1,44 @@
+# cargo-deny: known vulnerabilities, licenses, duplicate crates and where crates come from.
+# CI runs `cargo deny check` on every push and pull request, and nightly for new advisories.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# Check the platforms mapterm is built for.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+# RustSec advisories: vulnerabilities fail; unmaintained crates and yanked versions are
+# reported too.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# Every dependency must be usable in an MIT-licensed crate: only these licenses are
+# accepted (for "A OR B", one of them is enough).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Two versions of the same crate are reported, not fatal (common in Rust trees).
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Crates only from crates.io; no git dependencies.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

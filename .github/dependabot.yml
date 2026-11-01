@@ -1,0 +1,28 @@
+# Dependabot version updates: weekly pull requests for Cargo dependencies and the pinned
+# GitHub Actions (their commit hashes in ci.yml). Security fixes come separately, as soon
+# as an advisory affects a dependency (repository setting).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Minor and patch updates together; a new major version gets its own PR.
+      cargo:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
