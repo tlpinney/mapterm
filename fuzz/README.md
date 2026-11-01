@@ -16,6 +16,7 @@ cargo +nightly fuzz run mvt -- -max_total_time=300
 | `mvt` | a vector tile |
 | `pmtiles` | a PMTiles header or directory |
 | `fgb` | a FlatGeobuf file |
+| `shp` | a Shapefile: a `.shp` and a `.dbf`, split at the length in the first four bytes |
 | `formats` | a `--geojson` file: the first byte picks GeoJSON, CSV, GPX, KML or FlatGeobuf |
 | `raster` | a PNG, JPEG or WebP tile |
 | `style` | a MapLibre style, drawn over a few features; fails if a control character reaches a cell |

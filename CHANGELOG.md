@@ -6,8 +6,21 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+The next release is 0.2.0: the library's `formats::Format` gains a variant (Shapefile).
+
 ### Added
 
+- Shapefiles with `--geojson roads.shp` (a file or URL): the geometry, the `.dbf`
+  attributes beside it with their text decoded by the `.cpg` code page, and the `.prj`.
+  Lon/lat only for now: a projected `.prj` is refused with its name, as is a file without
+  one whose coordinates aren't lon/lat. Points, lines, polygons with holes and multipoints,
+  with Z and M dropped; multipatches are skipped. Read with the `shapefile` crate
+  (`mapterm::shp`).
+- Differential tests (`tests/differential.rs`): the Shapefile, FlatGeobuf, GPX and KML
+  readers against GDAL 3.9 on 29 real files (`tests/fixtures/corpus/`, from FlatGeobuf,
+  Natural Earth and the georust `gpx` and `kml` crates), geometry and attributes. GDAL's
+  output is stored beside each file, so the tests need neither GDAL nor network.
+- A fuzz target for Shapefiles (`shp`).
 - Google Maps 2D tiles as raster providers: `--raster google` (satellite),
   `google-roadmap` and `google-terrain`, with a Map Tiles API key from
   `GOOGLE_MAP_TILES_KEY` or `--raster-key-cmd`. `RasterSource::start_session` gets the
@@ -21,6 +34,8 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Changed
 
+- **Breaking (library):** `formats::Format` has a `Shapefile` variant and is now
+  `#[non_exhaustive]`, so later formats won't break matches again.
 - `Map::set_attribution` works on raster sources that are shared (it used to fail once
   the source had another owner), so credits can follow the view.
 - While the camera moves, the viewer loads paid imagery (keyed providers, billed per tile)
@@ -43,6 +58,20 @@ All notable changes to mapterm are listed here. The format follows
   minute. Default 300 for keyed, billed providers and none for free ones; `off` lifts it.
 - `Controller::target`: where the running animation ends. `map::is_rate_limited` tells
   an HTTP 429 tile error apart from a failure.
+
+### Fixed
+
+- Text that looks like a zero-padded number stays text in CSV, GPX and KML properties:
+  ZIP code `02139` and route name `001` were read as the numbers 2139 and 1 (found by the
+  differential tests).
+
+### Security
+
+- A Shapefile record that claims more parts or points than it holds, or whose parts start
+  outside its points, is refused before the `shapefile` crate reads it: the crate reserves
+  memory for the claimed counts and part sizes before checking them, so one record
+  claiming two billion parts reserved 7 GB, and a part claiming 200 million points in a
+  record of none 3.5 GB (found by the new fuzz target).
 
 ## [0.1.2] - 2026-11-01
 
@@ -192,6 +221,7 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
+[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.1.2...HEAD
 [0.1.2]: https://github.com/tlpinney/mapterm/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tlpinney/mapterm/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.3...v0.1.0

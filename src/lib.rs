@@ -55,7 +55,7 @@
 //! - [`raster`]: image tile sources (XYZ, TMS, PMTiles, named providers) for raster layers,
 //!   drawn as [`kitty`] graphics ([`Map::kitty_commands`]) or as cell colors.
 //! - [`geojson`]: GeoJSON files or URLs, and ready-made overlay style layers for them.
-//! - [`formats`]: CSV, GPX, KML and FlatGeobuf ([`fgb`]) as GeoJSON.
+//! - [`formats`]: CSV, GPX, KML, FlatGeobuf ([`fgb`]) and Shapefiles ([`shp`]) as GeoJSON.
 //! - [`index`] and [`cluster`]: the spatial index and point clustering behind GeoJSON sources.
 //!
 //! ## Output and the rest
@@ -89,6 +89,7 @@ pub mod pick;
 pub mod pmtiles;
 pub mod raster;
 pub mod render;
+pub mod shp;
 pub mod smooth;
 pub mod source;
 pub mod spec;

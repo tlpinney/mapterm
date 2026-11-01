@@ -61,3 +61,10 @@ path = "fuzz_targets/style.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "shp"
+path = "fuzz_targets/shp.rs"
+test = false
+doc = false
+bench = false
