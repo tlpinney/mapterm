@@ -118,7 +118,7 @@ impl MapSource {
         match self {
             MapSource::Vector(v) => v.attribution.as_deref(),
             MapSource::GeoJson(g) => g.attribution.as_deref(),
-            MapSource::Raster(r) => Some(r.src.attribution.as_str()),
+            MapSource::Raster(r) => Some(r.credit.as_deref().unwrap_or(r.src.attribution.as_str())),
         }
         .filter(|a| !a.trim().is_empty())
     }
@@ -130,7 +130,7 @@ impl MapSource {
 
     /// Image tiles (PNG, JPEG, WebP) for raster layers.
     pub fn raster(src: Arc<RasterSource>) -> Self {
-        MapSource::Raster(RasterTiles { src, tiles: RasterStore::default() })
+        MapSource::Raster(RasterTiles { src, tiles: RasterStore::default(), credit: None })
     }
 }
 
@@ -139,6 +139,9 @@ pub struct RasterTiles {
     /// Where the tiles come from.
     pub src: Arc<RasterSource>,
     tiles: RasterStore,
+    /// Credit set with [`Map::set_attribution`], over the source's own (which can't change
+    /// once the source is shared).
+    credit: Option<String>,
 }
 
 /// How raster layers are drawn.
@@ -593,17 +596,15 @@ impl Map {
     }
 
     /// Set a source's credit (plain text, or HTML that [`crate::source::plain_attribution`]
-    /// turns into text); empty removes it. Raster sources keep theirs on the shared source.
+    /// turns into text); empty removes it. Can change any time, e.g. as credits that depend
+    /// on the view (Google's) are updated.
     pub fn set_attribution(&mut self, id: &str, text: &str) -> Result<()> {
         let text = crate::source::plain_attribution(text);
         let value = (!text.is_empty()).then_some(text);
         match self.sources.iter_mut().find(|(s, _)| s == id) {
             Some((_, MapSource::Vector(v))) => v.attribution = value,
             Some((_, MapSource::GeoJson(g))) => g.attribution = value,
-            Some((_, MapSource::Raster(r))) => match Arc::get_mut(&mut r.src) {
-                Some(src) => src.attribution = value.unwrap_or_default(),
-                None => bail!("raster source \"{id}\" is shared; set its attribution before adding it"),
-            },
+            Some((_, MapSource::Raster(r))) => r.credit = Some(value.unwrap_or_default()),
             None => bail!("no source \"{id}\""),
         }
         Ok(())
@@ -2052,6 +2053,20 @@ mod tests {
         map.set_data("other", &json!({"type": "Point", "coordinates": [1, 1]})).unwrap();
         assert_eq!(map.attributions(16.0), vec!["Other Data"], "new data keeps the credit");
         assert!(map.set_attribution("nope", "x").is_err());
+    }
+
+    #[test]
+    fn shared_raster_credits_can_change() {
+        // Credits that follow the view (Google's) change after the source is shared.
+        let src = Arc::new(crate::raster::RasterSource::from_preset(crate::raster::preset("osm").unwrap(), None).unwrap());
+        let mut map = Map::new();
+        map.add_source("img", MapSource::raster(src.clone())).unwrap();
+        assert_eq!(map.source("img").and_then(|s| s.attribution()), Some("© OpenStreetMap contributors"));
+        map.set_attribution("img", "Google Maps · Imagery ©2026 Example").unwrap();
+        assert_eq!(map.source("img").and_then(|s| s.attribution()), Some("Google Maps · Imagery ©2026 Example"));
+        map.set_attribution("img", "").unwrap();
+        assert_eq!(map.source("img").and_then(|s| s.attribution()), None, "empty removes it");
+        drop(src);
     }
 
     #[test]

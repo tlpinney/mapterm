@@ -12,8 +12,16 @@ All notable changes to mapterm are listed here. The format follows
   `google-roadmap` and `google-terrain`, with a Map Tiles API key from
   `GOOGLE_MAP_TILES_KEY` or `--raster-key-cmd`. `RasterSource::start_session` gets the
   session Google needs before the first tile (a no-op for other sources), and
-  `RasterSource::google_attribution` sets the credits ("Google Maps" plus Google's
-  imagery or map data credits) for a view. Google tiles are never cached on disk.
+  `RasterSource::google_credits` gives the credits ("Google Maps" plus Google's
+  imagery or map data credits) for a view; the viewer asks again whenever the view
+  settles somewhere new. Google tiles are never cached on disk.
+
+### Changed
+
+- `Map::set_attribution` works on raster sources that are shared (it used to fail once
+  the source had another owner), so credits can follow the view.
+- The viewer doesn't load paid imagery (keyed providers, billed per tile) for the views a
+  fly-to passes through, only where the camera stops.
 
 ## [0.1.2] - 2026-11-01
 

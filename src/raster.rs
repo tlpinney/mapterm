@@ -440,9 +440,10 @@ impl RasterSource {
         Ok(())
     }
 
-    /// Set the credits to Google's for a view (its viewport endpoint): "Google Maps · ...".
-    /// `bounds` is (north, south, east, west) in degrees.
-    pub async fn google_attribution(&mut self, zoom: u8, bounds: (f64, f64, f64, f64)) -> Result<()> {
+    /// Google's credits for a view, from its viewport endpoint: "Google Maps · ...". They
+    /// change with the imagery on screen, so ask again when the view moves (and show them with
+    /// [`crate::Map::set_attribution`]). `bounds` is (north, south, east, west) in degrees.
+    pub async fn google_credits(&self, zoom: u8, bounds: (f64, f64, f64, f64)) -> Result<String> {
         let (Some(session), Some(key)) = (self.param("session").map(str::to_string), self.key.clone()) else {
             bail!("no Google session yet");
         };
@@ -451,8 +452,7 @@ impl RasterSource {
         let bytes = get_with(crate::source::keyed_client(), &url, None, &[]).await.map_err(|e| self.redact(e))?.unwrap_or_default();
         let v: serde_json::Value = serde_json::from_slice(&bytes).context("Google viewport info: not JSON")?;
         let copyright = v["copyright"].as_str().unwrap_or("").trim();
-        self.attribution = if copyright.is_empty() { "Google Maps".to_string() } else { format!("Google Maps · {copyright}") };
-        Ok(())
+        Ok(if copyright.is_empty() { "Google Maps".to_string() } else { format!("Google Maps · {copyright}") })
     }
 
     /// Add a request header (`Name: value`; `{key}` in the value is replaced by the key).

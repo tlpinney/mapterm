@@ -594,12 +594,15 @@ async fn main() -> Result<()> {
                 }
                 r.cache = c;
             }
-            // Google's credits depend on the view; take them for the start view (about the
-            // terminal's width of map around the center). "Google Maps" alone if that fails.
+            // Google's credits depend on the view: these are for the start view (about the
+            // terminal's width of map around the center); the viewer updates them as you move.
+            // "Google Maps" alone if that fails.
             if r.is_google() {
                 let span = 360.0 / 2f64.powf(cam.zoom) * 2.0;
                 let bounds = ((cam.lat + span * 0.4).min(85.0), (cam.lat - span * 0.4).max(-85.0), cam.lon + span, cam.lon - span);
-                let _ = r.google_attribution(cam.zoom.round().clamp(0.0, 22.0) as u8, bounds).await;
+                if let Ok(c) = r.google_credits(cam.zoom.round().clamp(0.0, 22.0) as u8, bounds).await {
+                    r.attribution = c;
+                }
             }
             if let Some(t) = &a.raster_attribution {
                 r.attribution = t.clone();
@@ -746,6 +749,14 @@ async fn main() -> Result<()> {
     let (stx, mut srx) = mpsc::unbounded_channel::<StyleDone>();
     let mut style_loading: Option<String> = None;
     let mut pointer: Option<(f64, f64)> = None;
+    // Google's credits follow the view: once it has stayed on a new spot for a moment, ask
+    // for the credits there (a quarter of the view's width counts as a new spot).
+    let google = raster.as_ref().filter(|r| r.is_google()).cloned();
+    let billed_raster = raster.as_ref().is_some_and(|r| r.is_google() || r.wants_key());
+    let (ctx, mut crx) = mpsc::unbounded_channel::<Result<String>>();
+    let mut credit_view: Option<(i32, i64, i64)> = None;
+    let mut credit_seen: Option<((i32, i64, i64), Instant)> = None;
+    let mut credit_pending = false;
     let result: Result<()> = async {
         loop {
             ctl.tick(Instant::now());
@@ -903,8 +914,38 @@ async fn main() -> Result<()> {
 
             // Fetch what the view needs that we don't have yet.
             for req in map.tile_requests(&draw_cam, map_area) {
+                // Paid imagery (keyed providers, billed per tile) loads where the camera stops,
+                // not for every view a fly-to passes through.
+                if billed_raster && req.source == RASTER && ctl.animating() {
+                    continue;
+                }
                 if pending.insert((req.source.clone(), req.id)) {
+                    if req.source == RASTER {
+                        dlog(|| format!("raster tile {:?}", req.id));
+                    }
                     spawn_load(req, tx.clone());
+                }
+            }
+
+            if let Some(g) = google.as_ref().filter(|_| !credit_pending) {
+                let vp = Viewport::new(&cam, map_area);
+                let (west, north) = vp.cell_to_lonlat(0, 0);
+                let (east, south) = vp.cell_to_lonlat(map_area.width, map_area.height);
+                let step = ((east - west).abs() / 4.0).max(1e-9);
+                let key = (cam.zoom.round() as i32, (cam.lon / step).round() as i64, (cam.lat / step).round() as i64);
+                match credit_seen {
+                    Some((k, since)) if k == key => {
+                        if credit_view != Some(key) && since.elapsed() >= Duration::from_millis(600) && !ctl.animating() {
+                            credit_view = Some(key);
+                            credit_pending = true;
+                            let (g, ctx) = (g.clone(), ctx.clone());
+                            let zoom = cam.zoom.round().clamp(0.0, 22.0) as u8;
+                            tokio::spawn(async move {
+                                let _ = ctx.send(g.google_credits(zoom, (north.min(85.0), south.max(-85.0), east, west)).await);
+                            });
+                        }
+                    }
+                    _ => credit_seen = Some((key, Instant::now())),
                 }
             }
 
@@ -923,6 +964,13 @@ async fn main() -> Result<()> {
                             dlog(|| format!("{e:#}"));
                             errors += 1;
                         }
+                    }
+                }
+                Some(c) = crx.recv() => {
+                    credit_pending = false;
+                    // On failure keep the credits shown; the next new view asks again.
+                    if let Ok(text) = c {
+                        let _ = map.set_attribution(RASTER, &text);
                     }
                 }
                 Some((spec, r)) = srx.recv() => {
