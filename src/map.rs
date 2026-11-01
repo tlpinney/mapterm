@@ -589,7 +589,7 @@ impl Map {
 
     /// Pixel mode: draw (or reuse) the grid tiles over the view and plan where each goes.
     fn pixel_tiles(&self, cam: &Camera, area: Rect, cpx: (f64, f64)) -> crate::pixels::PixFrame {
-        use crate::pixels::{CachedTile, DRAW_BUDGET, PIX_BUDGET, Pix, PixFrame, PixPlacement, next_image_id};
+        use crate::pixels::{CachedTile, DRAW_BUDGET, PIX_BUDGET, Pix, PixFrame, PixPlacement, STAND_IN_BUDGET, next_image_id};
         let mut frame = PixFrame::default();
         let (cw, ch) = (cpx.0.max(1.0), cpx.1.max(1.0));
         let (sx, sy) = (cw / 2.0, ch / 4.0);
@@ -597,6 +597,9 @@ impl Map {
         cache.frame += 1;
         let now = cache.frame;
         let started = std::time::Instant::now();
+        let temp = std::mem::take(&mut cache.temp);
+        frame.freed.extend(temp);
+        let zoom = cam.zoom;
         // A grid fine enough that each tile is about 512 pixels across (braille's tiles would
         // be thousands of pixels wide on a Retina screen).
         let gz = (cam.zoom + (sx / 2.0).log2()).floor().clamp(0.0, 24.0) as u8;
@@ -607,6 +610,16 @@ impl Map {
         let n = (1u64 << gz) as f64;
         let d = s / n;
         let (aw, ah) = (area.width as f64 * cw, area.height as f64 * ch);
+        // Tiles drawn at other zooms (same style), nearest zoom last, for stand-ins.
+        // (distance in zoom, grid tile, its zoom, pixmap)
+        type Other = (f64, (u8, u32, u32), f64, std::sync::Arc<tiny_skia::Pixmap>);
+        let mut others: Vec<Other> = cache
+            .tiles
+            .iter()
+            .filter(|(k, _)| k.2 == sig && k.1 != zkey)
+            .map(|(k, t)| ((k.1 as f64 / 64.0 - zoom).abs(), k.0, k.1 as f64 / 64.0, t.pixmap.clone()))
+            .collect();
+        others.sort_by(|a, b| b.0.total_cmp(&a.0));
         for (z, tx, ty) in vp.tiles(gz) {
             let key = ((z, tx, ty), zkey, sig);
             let image = match cache.tiles.get_mut(&key) {
@@ -615,30 +628,53 @@ impl Map {
                     t.image.clone()
                 }
                 None => {
-                    // Blank, like a web map's tile that hasn't arrived: out of drawing time
-                    // this frame (center tiles come first), or its data is still loading.
-                    if started.elapsed() >= DRAW_BUDGET {
-                        frame.pending += 1;
-                        continue;
-                    }
                     // A camera that puts this tile's top-left corner at dot (0, 0).
                     let (x0, y0) = (tx as f64 / n, ty as f64 / n);
                     let (cols, rows) = ((d / 2.0).ceil() as u16 + 1, (d / 4.0).ceil() as u16 + 1);
                     let (lon, lat) = crate::render::to_lonlat(x0 + cols as f64 / s, y0 + 2.0 * rows as f64 / s);
                     let tcam = Camera::new(lon, lat, cam.zoom);
                     let rect = Rect::new(0, 0, cols, rows);
-                    if !self.tiles_complete(&tcam, rect) {
+                    let (w, h) = ((d * sx).ceil() as u32, (d * sy).ceil() as u32);
+                    if started.elapsed() < cache.budget.unwrap_or(DRAW_BUDGET) && self.tiles_complete(&tcam, rect) {
+                        let Some(mut pix) = Pix::sized(w, h, cpx) else { continue };
+                        let mut scratch = Buffer::empty(rect);
+                        draw_layers(self, &tcam, rect, &mut scratch, Some(&mut pix), false);
+                        let (img, pixmap) = pix.finish(next_image_id());
+                        frame.new.push(img.clone());
+                        cache.bytes += img.rgba.len() + pixmap.data().len();
+                        // The terminal gets the pixels once; the cache keeps the pixmap.
+                        let mut kept = img.clone();
+                        kept.rgba = Default::default();
+                        cache.tiles.insert(key, CachedTile { image: kept, pixmap: std::sync::Arc::new(pixmap), used: now });
+                        img
+                    } else {
+                        // Not drawn yet (out of time this frame, center tiles first, or its
+                        // data is still loading): stand in with the tiles drawn at other
+                        // zooms, scaled into place, as a web map does while zooming. Blank
+                        // when there are none.
                         frame.pending += 1;
-                        continue;
+                        if started.elapsed() >= DRAW_BUDGET + cache.budget.map_or(STAND_IN_BUDGET, |_| std::time::Duration::from_secs(60)) {
+                            continue;
+                        }
+                        let Some(mut pix) = Pix::sized(w, h, cpx) else { continue };
+                        for (_, (oz, ox, oy), ozoom, pm) in &others {
+                            let on = (1u64 << oz) as f64;
+                            // Its world square, and whether it overlaps this tile's.
+                            let (sx0, sy0, size) = (*ox as f64 / on, *oy as f64 / on, 1.0 / on);
+                            if sx0 >= x0 + 1.0 / n || sy0 >= y0 + 1.0 / n || sx0 + size <= x0 || sy0 + size <= y0 {
+                                continue;
+                            }
+                            let k = 2f64.powf(zoom - ozoom);
+                            pix.blit(pm, ((sx0 - x0) * s * sx) as f32, ((sy0 - y0) * s * sy) as f32, k as f32);
+                        }
+                        if pix.is_empty() {
+                            continue;
+                        }
+                        let (img, _) = pix.finish(next_image_id());
+                        frame.new.push(img.clone());
+                        cache.temp.push(img.id);
+                        img
                     }
-                    let Some(mut pix) = Pix::sized((d * sx).ceil() as u32, (d * sy).ceil() as u32, cpx) else { continue };
-                    let mut scratch = Buffer::empty(rect);
-                    draw_layers(self, &tcam, rect, &mut scratch, Some(&mut pix), false);
-                    let img = pix.finish(next_image_id());
-                    frame.new.push(img.clone());
-                    cache.bytes += img.rgba.len();
-                    cache.tiles.insert(key, CachedTile { image: img.clone(), used: now });
-                    img
                 }
             };
             // Where it goes, in pixels from the map area's corner, cut to the area.
@@ -668,7 +704,7 @@ impl Map {
                     break;
                 }
                 if let Some(t) = cache.tiles.remove(&k) {
-                    cache.bytes -= t.image.rgba.len();
+                    cache.bytes -= (t.image.width * t.image.height * 4) as usize * 2;
                     frame.freed.push(t.image.id);
                 }
             }
@@ -2240,6 +2276,49 @@ mod tests {
         map.set_data("other", &json!({"type": "Point", "coordinates": [1, 1]})).unwrap();
         assert_eq!(map.attributions(16.0), vec!["Other Data"], "new data keeps the credit");
         assert!(map.set_attribution("nope", "x").is_err());
+    }
+
+    #[test]
+    fn pixel_tiles_stand_in_while_zooming() {
+        // A blue square over a grey background, in pixel mode.
+        let mut map = Map::new();
+        map.add_source("sq", MapSource::geojson(&json!({"type": "Polygon", "coordinates": [[[-40, -30], [40, -30], [40, 30], [-40, 30], [-40, -30]]]})).unwrap()).unwrap();
+        map.add_layer(StyleLayer::background("bg").color("#808080")).unwrap();
+        map.add_layer(StyleLayer::fill("fill", "sq").color("#0000ff")).unwrap();
+        map.pixel_mode = Some((10.0, 20.0));
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        let blue_at_center = |f: &crate::pixels::PixFrame| {
+            // The topmost image placed over the view's center pixel (neighbours overlap by
+            // a pixel), and that pixel's color.
+            let (cx, cy) = (200u32, 200u32);
+            f.placed.iter().rev().find_map(|p| {
+                let (x0, y0) = (p.col as u32 * 10 + p.x_off, p.row as u32 * 20 + p.y_off);
+                let (sx, sy, sw, sh) = p.src;
+                if cx < x0 || cy < y0 || cx >= x0 + sw || cy >= y0 + sh {
+                    return None;
+                }
+                let img = f.new.iter().find(|i| i.id == p.id)?;
+                let o = (((cy - y0 + sy) * img.width) + cx - x0 + sx) as usize * 4;
+                Some(img.rgba[o..o + 4].to_vec())
+            })
+        };
+        map.view(&Camera::new(0.0, 0.0, 2.0)).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(f.pending == 0 && !f.new.is_empty(), "everything drawn at zoom 2");
+        assert_eq!(blue_at_center(&f), Some(vec![0, 0, 255, 255]));
+        // No time to draw: zooming in and out shows stand-ins scaled from zoom 2.
+        map.pixcache.lock().unwrap().budget = Some(std::time::Duration::ZERO);
+        for z in [2.5, 1.5] {
+            map.view(&Camera::new(0.0, 0.0, z)).render(area, &mut buf);
+            let f = map.take_pixels().unwrap();
+            assert!(f.pending > 0 && f.new.len() == f.placed.len(), "z{z}: all stand-ins");
+            assert_eq!(blue_at_center(&f), Some(vec![0, 0, 255, 255]), "z{z}: the square, scaled");
+            // Stand-ins last one frame: the next frame frees them.
+            map.view(&Camera::new(0.0, 0.0, z)).render(area, &mut buf);
+            let next = map.take_pixels().unwrap();
+            assert!(f.new.iter().all(|i| next.freed.contains(&i.id)), "z{z}: stand-ins freed");
+        }
     }
 
     #[test]

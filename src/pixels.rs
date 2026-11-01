@@ -59,18 +59,29 @@ pub(crate) struct PixCache {
     pub(crate) tiles: std::collections::HashMap<PixKey, CachedTile>,
     pub(crate) bytes: usize,
     pub(crate) frame: u64,
+    /// Stand-in images shown for one frame, freed with the next.
+    pub(crate) temp: Vec<u32>,
+    /// Tests: drawing time per frame instead of [`DRAW_BUDGET`].
+    pub(crate) budget: Option<std::time::Duration>,
 }
 
 /// A grid tile (z, x, y), the zoom in 1/64ths, and a signature of the style and visibility.
 pub(crate) type PixKey = ((u8, u32, u32), i64, u64);
 
 pub(crate) struct CachedTile {
+    /// Its id and size (the pixels go to the terminal once and aren't kept here).
     pub(crate) image: PixImage,
+    /// The drawn tile, premultiplied, for stand-ins at other zooms.
+    pub(crate) pixmap: std::sync::Arc<Pixmap>,
     pub(crate) used: u64,
 }
 
 /// Time to spend drawing new tiles per frame; the rest stay blank until later frames.
 pub(crate) const DRAW_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// Time to spend building stand-ins (other zooms' tiles scaled into place) per frame; tiles
+/// past it, at the edges since the center comes first, stay blank for a frame or two.
+pub(crate) const STAND_IN_BUDGET: std::time::Duration = std::time::Duration::from_millis(12);
 
 /// Bytes of tile images to keep (the terminal holds them too).
 pub(crate) const PIX_BUDGET: usize = 192 << 20;
@@ -148,15 +159,27 @@ impl Pix {
         self.map.stroke_path(&p, &Self::paint(c), &stroke, Transform::identity(), None);
     }
 
-    /// The finished image, un-premultiplied for the terminal.
-    pub(crate) fn finish(self, id: u32) -> PixImage {
+    /// The finished image, un-premultiplied for the terminal, and the drawn pixmap.
+    pub(crate) fn finish(self, id: u32) -> (PixImage, Pixmap) {
         let (width, height) = (self.map.width(), self.map.height());
         let mut rgba = Vec::with_capacity(self.map.data().len());
         for px in self.map.pixels() {
             let c = px.demultiply();
             rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
         }
-        PixImage { id, width, height, rgba: std::sync::Arc::new(rgba) }
+        (PixImage { id, width, height, rgba: std::sync::Arc::new(rgba) }, self.map)
+    }
+
+    /// Draw `src` (another tile's pixmap) scaled by `k` with its top-left at (`x`, `y`)
+    /// pixels, smoothly filtered: a stand-in from another zoom.
+    pub(crate) fn blit(&mut self, src: &Pixmap, x: f32, y: f32, k: f32) {
+        let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
+        self.map.draw_pixmap(0, 0, src.as_ref(), &paint, Transform::from_row(k, 0.0, 0.0, k, x, y), None);
+    }
+
+    /// Whether anything was drawn (a stand-in with no overlapping tiles stays blank).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.map.pixels().iter().all(|p| p.alpha() == 0)
     }
 }
 
@@ -165,12 +188,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn blit_scales_into_place() {
+        let mut src = Pix::sized(10, 10, (10.0, 20.0)).unwrap();
+        src.fill(&[vec![(0.0, 0.0), (2.0, 0.0), (2.0, 2.0), (0.0, 2.0)]], Color::Rgb(0, 0, 255));
+        let (_, pm) = src.finish(1);
+        let mut dst = Pix::sized(20, 20, (10.0, 20.0)).unwrap();
+        dst.blit(&pm, 0.0, 0.0, 1.414);
+        let (f, _) = dst.finish(2);
+        let px = |x: usize, y: usize| f.rgba[(y * 20 + x) * 4..(y * 20 + x) * 4 + 4].to_vec();
+        assert_eq!(px(0, 0), vec![0, 0, 255, 255], "corner");
+        assert_eq!(px(7, 7), vec![0, 0, 255, 255], "inside the scaled square");
+        assert_eq!(px(18, 18)[3], 0, "past it");
+    }
+
+    #[test]
     fn fills_and_strokes_land_in_pixels() {
         // 10x5 cells of 10x20 px: 100x100 pixels, 5 px per dot.
         let mut p = Pix::sized(100, 100, (10.0, 20.0)).unwrap();
         p.fill(&[vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]], Color::Rgb(0, 0, 255));
         p.stroke(&[(0.0, 15.0), (20.0, 15.0)], Color::Rgb(255, 0, 0), 4.0, None);
-        let f = p.finish(1);
+        let (f, _) = p.finish(1);
         assert_eq!((f.width, f.height), (100, 100));
         let at = |x: usize, y: usize| &f.rgba[(y * 100 + x) * 4..(y * 100 + x) * 4 + 4];
         assert_eq!(at(25, 25), &[0, 0, 255, 255], "inside the fill");

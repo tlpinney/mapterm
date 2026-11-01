@@ -35,5 +35,19 @@ Numbers (Mapbox Streets, Georgetown z16, 30 tiles on screen): panning with the a
 112 frames, p50 0.6 ms a frame (was 65-95 ms), 5 tiles drawn in all (max 2 in a frame,
 worst frame 11.7 ms). A cold full screen is ~18 tiles at ~9 ms each, filled in over ~0.3 s.
 
-Still: a smooth zoom changes the zoom every frame, so tiles are redrawn (cached per 1/64
-zoom); feature-state changes (hover highlights) don't invalidate tiles yet.
+## Zooming: stand-ins from other zooms
+
+A tile not drawn yet at this zoom (out of time, or its data loading) is filled with the
+cached tiles of other zooms, scaled into place (bilinear) into a tile-sized image placed
+pixel-exactly, as web maps do while zooming: zooming in scales up the coarser tiles,
+zooming out scales down the finer ones. The nearest zoom is drawn last. Stand-ins last one
+frame and are freed with the next; the exact tile replaces them once drawn. Stand-ins get
+12 ms a frame after the 8 ms of exact drawing; past that, edge tiles stay blank for a frame.
+(Kitty can only stretch an image to whole cells, so scaling in the terminal would leave
+seams; composing stand-ins ourselves keeps them exact.)
+
+Numbers (Mapbox Streets, two zoom-ins and three zoom-outs with + and -, 229 frames): p50
+1.1 ms, p90 21 ms, max 30 ms (156 ms before the stand-in budget), no blank frames.
+
+Still: feature-state changes (hover highlights) don't invalidate tiles yet; no cross-fade
+(a stand-in is swapped for the exact tile at once).
