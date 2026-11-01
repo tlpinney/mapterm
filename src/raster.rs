@@ -433,7 +433,9 @@ impl RasterSource {
         }
         let url = self.fill_key(&self.url(z, x, y));
         let headers: Vec<(String, String)> = self.headers.iter().map(|(k, v)| (k.clone(), self.fill_key(v))).collect();
-        let bytes = get_with(&self.http, &url, None, &headers).await.map_err(|e| self.redact(e))?;
+        // A key in a header or the URL must not follow a redirect to another host.
+        let http = if self.key.is_some() || !headers.is_empty() { crate::source::keyed_client() } else { &self.http };
+        let bytes = get_with(http, &url, None, &headers).await.map_err(|e| self.redact(e))?;
         if self.cache {
             if let Some(d) = path.parent() {
                 let _ = std::fs::create_dir_all(d);
@@ -506,7 +508,6 @@ pub fn decode(bytes: &[u8]) -> Result<RasterTile> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().context("decoding raster tile")?;
     reader.limits(limits);
     let img = reader.decode().context("decoding raster tile")?;
-    let rgba = img.to_rgba8();
     let png = if bytes.starts_with(b"\x89PNG") {
         bytes.to_vec()
     } else {
@@ -514,22 +515,37 @@ pub fn decode(bytes: &[u8]) -> Result<RasterTile> {
         img.write_to(&mut out, image::ImageFormat::Png)?;
         out.into_inner()
     };
+    // Move the pixels instead of copying them (no copy at all for RGBA images).
+    let rgba = img.into_rgba8();
     Ok(RasterTile { id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png, rgba })
 }
 
-/// Decoded raster tiles with a size bound. Evicted image ids are kept for the caller to free
-/// from the terminal.
+/// The most memory a [`RasterStore`] keeps by default (pixels and PNG bytes): 512 MiB holds
+/// all 256 tiles at 512 px, but only a few dozen of the largest (4096 px) tiles a hostile
+/// server could send.
+pub const RASTER_STORE_BUDGET: usize = 512 << 20;
+
+/// Decoded raster tiles with a size bound: at most 256 tiles and [`RASTER_STORE_BUDGET`]
+/// bytes, oldest dropped first. Evicted image ids are kept for the caller to free from the
+/// terminal.
 pub struct RasterStore {
     tiles: HashMap<TileId, Arc<RasterTile>>,
     order: VecDeque<TileId>,
     cap: usize,
+    bytes: usize,
+    budget: usize,
     evicted: Vec<u32>,
 }
 
 impl Default for RasterStore {
     fn default() -> Self {
-        Self { tiles: HashMap::new(), order: VecDeque::new(), cap: 256, evicted: Vec::new() }
+        Self { tiles: HashMap::new(), order: VecDeque::new(), cap: 256, bytes: 0, budget: RASTER_STORE_BUDGET, evicted: Vec::new() }
     }
+}
+
+/// Memory a stored tile holds: its pixels and its PNG bytes.
+fn tile_bytes(t: &RasterTile) -> usize {
+    t.rgba.as_raw().len() + t.png.len()
 }
 
 impl RasterStore {
@@ -546,18 +562,32 @@ impl RasterStore {
             png: Vec::new(),
             rgba: image::RgbaImage::new(1, 1),
         });
+        self.bytes += tile_bytes(&t);
         if let Some(old) = self.tiles.insert(id, Arc::new(t)) {
+            self.bytes -= tile_bytes(&old);
             self.evicted.push(old.id);
         } else {
             self.order.push_back(id);
         }
-        while self.order.len() > self.cap {
+        // Drop the oldest until both limits hold; the newest tile always stays.
+        while self.order.len() > 1 && (self.order.len() > self.cap || self.bytes > self.budget) {
             if let Some(old) = self.order.pop_front()
                 && let Some(t) = self.tiles.remove(&old)
             {
+                self.bytes -= tile_bytes(&t);
                 self.evicted.push(t.id);
             }
         }
+    }
+
+    /// Memory the stored tiles hold now (pixels and PNG bytes).
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Change the byte budget (default [`RASTER_STORE_BUDGET`]); takes effect on the next insert.
+    pub fn set_budget(&mut self, bytes: usize) {
+        self.budget = bytes.max(1);
     }
 
     /// Image ids dropped since the last call, to delete from the terminal.
@@ -824,6 +854,26 @@ mod tests {
 
 #[cfg(test)]
 mod pm_pipeline_tests {
+
+    #[test]
+    fn the_store_keeps_to_its_byte_budget() {
+        let tile = |px: u32| RasterTile { id: 0, png: vec![0; 1000], rgba: image::RgbaImage::new(px, px) };
+        let mut store = RasterStore::default();
+        store.set_budget(40 << 20);
+        // 1024 px tiles are 4 MiB of pixels each: about ten fit in 40 MiB.
+        for i in 0..30 {
+            store.insert((10, i, 0), Some(tile(1024)));
+            assert!(store.bytes() <= 40 << 20, "over budget after {i}: {}", store.bytes());
+        }
+        assert!(store.contains(&(10, 29, 0)), "the newest tile stays");
+        assert!(!store.contains(&(10, 0, 0)), "the oldest went first");
+        assert_eq!(store.take_evicted().len(), 30 - store.order.len());
+        // One tile bigger than the whole budget is still kept (alone), so the view can draw.
+        store.set_budget(1 << 20);
+        store.insert((11, 0, 0), Some(tile(1024)));
+        assert_eq!(store.order.len(), 1);
+    }
+
     use super::*;
 
     /// End to end for a local raster PMTiles named by MAPTERM_TEST_PMTILES (skipped when unset).

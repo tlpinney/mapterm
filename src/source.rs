@@ -22,14 +22,46 @@ const MAX_FETCH: usize = 8 << 20;
 const MAX_INFLATE: usize = 32 << 20;
 const DISK_TTL: Duration = Duration::from_secs(30 * 86400);
 
-/// An HTTP client with mapterm's user agent and timeouts.
+/// An HTTP client with mapterm's user agent and timeouts. It follows redirects (some tile
+/// and archive hosts redirect to storage URLs) but never sends a `Referer`, which would carry
+/// the previous URL, query and all, to the next host. For requests that carry an API key, use
+/// [`keyed_client`].
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("mapterm/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
+        .referer(false)
         .build()
         .expect("http client")
+}
+
+/// The client for requests that carry an API key (in a header or the URL): like
+/// [`http_client`], but it follows a redirect only to the same origin (scheme, host and
+/// port). reqwest drops `Authorization` on a cross-origin redirect but keeps custom headers
+/// such as `maxar-api-key`, so a tile server that redirects elsewhere would hand the key to
+/// another host; here such a redirect comes back as an error instead.
+pub fn keyed_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(concat!("mapterm/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(30))
+            .referer(false)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                let same = attempt.previous().last().is_some_and(|prev| same_origin(prev, attempt.url()));
+                if same && attempt.previous().len() < 10 { attempt.follow() } else { attempt.stop() }
+            }))
+            .build()
+            .expect("http client")
+    })
+}
+
+/// Whether two URLs share scheme, host and port (so a redirect between them stays with the
+/// server the request was meant for).
+pub(crate) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme() && a.host_str() == b.host_str() && a.port_or_known_default() == b.port_or_known_default()
 }
 
 /// gunzip if the bytes are gzip, with a hard output cap.
@@ -437,6 +469,17 @@ mod tests {
 
 #[cfg(test)]
 mod pm_file_tests {
+
+    #[test]
+    fn keyed_requests_only_follow_same_origin_redirects() {
+        let u = |s: &str| reqwest::Url::parse(s).unwrap();
+        assert!(super::same_origin(&u("https://api.maxar.com/a"), &u("https://api.maxar.com/b?x=1")));
+        assert!(super::same_origin(&u("https://t.example/a"), &u("https://t.example:443/b")));
+        assert!(!super::same_origin(&u("https://t.example/a"), &u("https://evil.example/a")));
+        assert!(!super::same_origin(&u("https://t.example/a"), &u("http://t.example/a")), "no downgrade");
+        assert!(!super::same_origin(&u("http://127.0.0.1:8201/a"), &u("http://127.0.0.1:8202/a")), "other port");
+    }
+
     /// Reads a local raster PMTiles named by MAPTERM_TEST_PMTILES (skipped when unset).
     #[tokio::test]
     async fn reads_local_raster_pmtiles() {

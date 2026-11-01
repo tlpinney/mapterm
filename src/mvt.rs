@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::pbf::{Reader, packed_u32, zigzag32, zigzag64};
 
@@ -102,14 +102,24 @@ pub struct Tile {
     pub layers: Vec<Layer>,
 }
 
-/// Decode MVT bytes (already decompressed).
+/// The most memory a tile's feature properties may take once decoded. Each feature gets its
+/// own copy of the keys and values it references from the layer's dictionaries, so a small
+/// tile (one long string shared by many features) could otherwise decode to gigabytes.
+/// Each entry counts its text plus 64 bytes of overhead; real tiles stay far below it.
+pub const MAX_PROP_BYTES: usize = 64 << 20;
+/// Bytes counted per property entry on top of its text (map entry and string headers).
+const PROP_OVERHEAD: usize = 64;
+
+/// Decode MVT bytes (already decompressed). Fails if the features' properties would take
+/// more than [`MAX_PROP_BYTES`].
 pub fn decode(buf: &[u8]) -> Result<Tile> {
     let mut r = Reader::new(buf);
     let mut tile = Tile::default();
+    let mut budget = MAX_PROP_BYTES;
     while !r.done() {
         let (field, wire) = r.key()?;
         if field == 3 && wire == 2 {
-            tile.layers.push(layer(r.bytes()?)?);
+            tile.layers.push(layer(r.bytes()?, &mut budget)?);
         } else {
             r.skip(wire)?;
         }
@@ -117,7 +127,7 @@ pub fn decode(buf: &[u8]) -> Result<Tile> {
     Ok(tile)
 }
 
-fn layer(b: &[u8]) -> Result<Layer> {
+fn layer(b: &[u8], budget: &mut usize) -> Result<Layer> {
     let mut r = Reader::new(b);
     let mut name = String::new();
     let mut extent = 4096u32;
@@ -134,7 +144,16 @@ fn layer(b: &[u8]) -> Result<Layer> {
             (_, w) => r.skip(w)?,
         }
     }
-    let features = raw.into_iter().map(|f| feature(f, &keys, &values)).collect::<Result<_>>()?;
+    let mut features = Vec::with_capacity(raw.len());
+    for f in raw {
+        let f = feature(f, &keys, &values)?;
+        let cost: usize = f.props.iter().map(|(k, v)| k.len() + v.as_str().map_or(0, str::len) + PROP_OVERHEAD).sum();
+        *budget = match budget.checked_sub(cost) {
+            Some(left) => left,
+            None => bail!("tile properties decode past {} MB", MAX_PROP_BYTES >> 20),
+        };
+        features.push(f);
+    }
     Ok(Layer { name, extent, features })
 }
 
@@ -230,6 +249,53 @@ fn geometry(cmds: &[u32]) -> Vec<Vec<[i32; 2]>> {
 
 #[cfg(test)]
 mod tests {
+
+    /// One long string in the layer's dictionary, referenced by many tiny features: the
+    /// raw tile is small, but each feature would get its own copy of the string.
+    fn amplifying_tile(features: usize, string_bytes: usize) -> Vec<u8> {
+        fn varint(out: &mut Vec<u8>, mut v: u64) {
+            while v >= 0x80 {
+                out.push(v as u8 | 0x80);
+                v >>= 7;
+            }
+            out.push(v as u8);
+        }
+        fn field(out: &mut Vec<u8>, n: u64, b: &[u8]) {
+            varint(out, n << 3 | 2);
+            varint(out, b.len() as u64);
+            out.extend_from_slice(b);
+        }
+        let mut layer = Vec::new();
+        field(&mut layer, 1, b"poi");
+        for _ in 0..features {
+            // tags [0, 0]; type POINT; MoveTo(1) to (100, 100)
+            let mut f = Vec::new();
+            field(&mut f, 2, &[0, 0]);
+            f.extend_from_slice(&[3 << 3, 1]);
+            field(&mut f, 4, &[9, 200, 1, 200, 1]);
+            field(&mut layer, 2, &f);
+        }
+        field(&mut layer, 3, b"name");
+        let mut value = Vec::new();
+        field(&mut value, 1, &vec![b'A'; string_bytes]);
+        field(&mut layer, 4, &value);
+        let mut tile = Vec::new();
+        field(&mut tile, 3, &layer);
+        tile
+    }
+
+    #[test]
+    fn a_small_tile_cannot_decode_to_gigabytes() {
+        // 1 MiB raw; 1000 copies of the string would be about 1 GiB.
+        let tile = amplifying_tile(1000, 1 << 20);
+        assert!(tile.len() < 2 << 20);
+        let err = decode(&tile).expect_err("should be refused").to_string();
+        assert!(err.contains("decode past"), "{err}");
+        // A few copies are fine.
+        let ok = decode(&amplifying_tile(10, 1 << 20)).unwrap();
+        assert_eq!(ok.layers[0].features.len(), 10);
+    }
+
     use super::*;
 
     #[test]

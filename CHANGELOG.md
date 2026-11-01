@@ -4,6 +4,23 @@ All notable changes to mapterm are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor version may break the API).
 
+## [Unreleased]
+
+### Security
+
+- A small vector tile can no longer decode to gigabytes: each feature gets its own copy of
+  the dictionary strings it references, so one long string shared by many features (a
+  1 MiB tile, 5 KiB gzipped) took 2 GiB. A tile's feature properties are now limited to
+  64 MB decoded (`mvt::MAX_PROP_BYTES`); real tiles stay far below it.
+- API keys no longer follow redirects to other hosts. Requests that carry a key (in a
+  header such as `maxar-api-key`, or in the URL) follow a redirect only to the same scheme,
+  host and port; reqwest dropped `Authorization` on a cross-origin redirect but kept custom
+  key headers. No request sends a `Referer` any more, which carried the previous URL,
+  including a key in its query, to the next host.
+- The raster tile store is limited to 512 MB (`raster::RASTER_STORE_BUDGET`) as well as 256
+  tiles: 4096 px tiles that compress to a few hundred KB each could fill about 16 GB.
+  Decoding also moves the pixels instead of copying them, halving the peak per tile.
+
 ## [0.1.0] - 2026-11-01
 
 The first stable-numbered release, so plain Cargo commands find it (they skip
