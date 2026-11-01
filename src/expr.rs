@@ -270,6 +270,10 @@ pub enum Expr {
     ToColor(Vec<Expr>),
     Length(Box<Expr>),
     TypeOf(Box<Expr>),
+    /// `["index-of", keyword, input, from?]`: character position, or -1.
+    IndexOf(Vec<Expr>),
+    /// `["slice", input, start, end?]`: characters (or array items) from start to end.
+    Slice(Vec<Expr>),
     Assert(Assert, Vec<Expr>),
     /// A legacy `"{name}"` text template.
     Template(Vec<Part>),
@@ -521,6 +525,8 @@ impl Expr {
             "to-color" => Expr::ToColor(args(a)?),
             "length" => Expr::Length(one(a, op)?),
             "typeof" => Expr::TypeOf(one(a, op)?),
+            "index-of" if (2..=3).contains(&a.len()) => Expr::IndexOf(args(a)?),
+            "slice" if (2..=3).contains(&a.len()) => Expr::Slice(args(a)?),
             "string" => Expr::Assert(Assert::Str, args(a)?),
             "number" => Expr::Assert(Assert::Num, args(a)?),
             "boolean" => Expr::Assert(Assert::Bool, args(a)?),
@@ -536,7 +542,7 @@ impl Expr {
             Expr::Cmp(_, a, b) | Expr::In(a, b) => a.is_constant() && b.is_constant(),
             Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) | Expr::TypeOf(a) => a.is_constant(),
             Expr::InList(a, _) => a.is_constant(),
-            Expr::All(v) | Expr::Any(v) | Expr::Coalesce(v) | Expr::Math(_, v) | Expr::Concat(v) | Expr::ToNum(v) | Expr::ToColor(v) | Expr::Assert(_, v) => {
+            Expr::All(v) | Expr::Any(v) | Expr::Coalesce(v) | Expr::Math(_, v) | Expr::Concat(v) | Expr::ToNum(v) | Expr::ToColor(v) | Expr::Assert(_, v) | Expr::IndexOf(v) | Expr::Slice(v) => {
                 v.iter().all(Expr::is_constant)
             }
             Expr::Match { input, arms, default } => input.is_constant() && default.is_constant() && arms.iter().all(|(_, e)| e.is_constant()),
@@ -642,6 +648,38 @@ impl Expr {
                 }
                 .into(),
             ),
+            Expr::IndexOf(v) => {
+                let (needle, hay) = (v[0].eval(c), v[1].eval(c));
+                let from = v.get(2).and_then(|e| e.eval(c).as_num()).unwrap_or(0.0).max(0.0) as usize;
+                Val::Num(match hay {
+                    Val::Str(h) => {
+                        let (h, n): (Vec<char>, Vec<char>) = (h.chars().collect(), needle.to_text().chars().collect());
+                        (from..=h.len().saturating_sub(n.len())).find(|&i| h.len() >= n.len() && h[i..i + n.len()] == n[..]).map_or(-1.0, |i| i as f64)
+                    }
+                    Val::Array(a) => a.iter().skip(from).position(|x| loose_eq(x, &needle)).map_or(-1.0, |i| (i + from) as f64),
+                    _ => -1.0,
+                })
+            }
+            Expr::Slice(v) => {
+                let input = v[0].eval(c);
+                let len = match &input {
+                    Val::Str(s) => s.chars().count(),
+                    Val::Array(a) => a.len(),
+                    _ => return Val::Null,
+                } as f64;
+                // Negative positions count from the end, as in JavaScript.
+                let pos = |e: Option<&Expr>, default: f64| {
+                    let p = e.and_then(|e| e.eval(c).as_num()).unwrap_or(default);
+                    (if p < 0.0 { len + p } else { p }).clamp(0.0, len) as usize
+                };
+                let (start, end) = (pos(v.get(1), 0.0), pos(v.get(2), len));
+                let end = end.max(start);
+                match input {
+                    Val::Str(s) => Val::Str(s.chars().skip(start).take(end - start).collect()),
+                    Val::Array(a) => Val::Array(a[start..end].to_vec()),
+                    _ => Val::Null,
+                }
+            }
             Expr::Assert(kind, v) => v
                 .iter()
                 .map(|e| e.eval(c))
@@ -771,6 +809,13 @@ mod tests {
         assert_eq!(e(json!(["format", ["get", "name"], {"font-scale": 1.2}])), Val::Str("Mall".into()));
         assert_eq!(e(json!(["to-number", "x", "7"])), Val::Num(7.0));
         assert_eq!(e(json!(["typeof", ["get", "rank"]])), Val::Str("number".into()));
+        assert_eq!(e(json!(["index-of", ";", "I 270;US 40"])), Val::Num(5.0));
+        assert_eq!(e(json!(["index-of", "x", "abc"])), Val::Num(-1.0));
+        assert_eq!(e(json!(["index-of", "a", "banana", 2])), Val::Num(3.0));
+        assert_eq!(e(json!(["slice", "I 270;US 40", 0, 5])), Val::Str("I 270".into()));
+        assert_eq!(e(json!(["slice", "I 270", 2])), Val::Str("270".into()));
+        assert_eq!(e(json!(["slice", "abc", -2])), Val::Str("bc".into()));
+        assert_eq!(e(json!(["slice", ["literal", [1, 2, 3]], 1, 2])), Val::Array(vec![Val::Num(2.0)]));
         let c = e(json!(["interpolate", ["linear"], ["zoom"], 10, "#000000", 14, "#ffffff"])).as_color().unwrap();
         assert_eq!(c.to_u8(), (128, 128, 128));
         assert!(Expr::parse(&json!(["distance", 1])).is_err());

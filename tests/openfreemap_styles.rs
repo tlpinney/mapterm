@@ -24,3 +24,26 @@ fn terminal_styles_parse_without_warnings() {
         }
     }
 }
+
+#[test]
+fn shield_text_tidies_refs() {
+    use mapterm::{expr::{Ctx, Expr, Val}, mvt::{GeomType, Value}, stylejson::shield_text};
+    let e = Expr::parse(&shield_text()).unwrap();
+    let text = |r: &str, network: &str| {
+        let mut props = vec![("ref".to_string(), Value::Str(r.into()))];
+        if !network.is_empty() {
+            props.push(("network".to_string(), Value::Str(network.into())));
+        }
+        match e.eval(&Ctx { zoom: 12.0, geom: GeomType::Line, props: &props }) {
+            Val::Str(s) => s,
+            v => panic!("{v:?}"),
+        }
+    };
+    assert_eq!(text("395", "us-interstate"), "I-395");
+    assert_eq!(text("1", "us-highway"), "US 1");
+    assert_eq!(text("I 270;US 40", ""), "I-270");
+    assert_eq!(text("I 395", "us-interstate"), "I-395");
+    assert_eq!(text("I 395 Alternate", "road"), "I-395 Alternate");
+    assert_eq!(text("MD 355", "us-state"), "MD 355");
+    assert_eq!(text("50", "us-state"), "50");
+}

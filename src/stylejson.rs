@@ -183,6 +183,33 @@ async fn open_vector(s: &Json) -> Result<crate::map::VectorSource> {
     }
 }
 
+/// The display text of a road `ref`, as an expression: the first of several (`I 270;US 40`
+/// -> `I 270`), `I 66` -> `I-66`, and bare numbers prefixed from the `network` OpenMapTiles
+/// gives them (`395` on `us-interstate` -> `I-395`, `1` on `us-highway` -> `US 1`).
+pub fn shield_text() -> Json {
+    use serde_json::json;
+    let r = json!(["to-string", ["get", "ref"]]);
+    let semi = json!(["index-of", ";", r]);
+    let first = json!(["case", [">=", semi, 0], ["slice", r, 0, semi], r]);
+    let numeric = json!([">=", ["to-number", first, -1], 0]);
+    json!(["case",
+        ["==", ["slice", first, 0, 2], "I "], ["concat", "I-", ["slice", first, 2]],
+        ["all", numeric, ["==", ["get", "network"], "us-interstate"]], ["concat", "I-", first],
+        ["all", numeric, ["==", ["get", "network"], "us-highway"]], ["concat", "US ", first],
+        first])
+}
+
+/// Road label text: major roads by their ref (falling back to the name), others by name.
+fn road_text(major: bool) -> Json {
+    use serde_json::json;
+    let shield = json!(["case", ["has", "ref"], shield_text(), ["get", "name"]]);
+    if major {
+        shield
+    } else {
+        json!(["case", ["has", "name"], ["get", "name"], shield])
+    }
+}
+
 /// Vector tile schemas the built-in terminal styles know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Schema {
@@ -226,7 +253,10 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
         ("trunk", c("#e1a046", "#c3781e"), 0, 0, -25),
         ("motorway", c("#eb6e3c", "#cd5028"), 0, 0, -30),
     ];
+    // Road labels come from lines only: OpenMapTiles also has motorway junction points
+    // (exit numbers like "2A; 2B") in transportation_name.
     let label = |id: &str, src_layer: &str, filter: Json, text: Json, color: &Json, sort: Json, bold: Json| {
+        let filter = json!(["all", ["==", ["geometry-type"], "LineString"], filter]);
         json!({"id": id, "type": "symbol", "source": BASEMAP, "source-layer": src_layer, "filter": filter,
                "layout": {"text-field": text, "symbol-sort-key": sort, "symbol-placement": "line",
                           "text-font": ["case", bold, ["literal", ["Bold"]], ["literal", ["Regular"]]]},
@@ -264,7 +294,7 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
             for (name, color, _, min_label, sort) in &roads {
                 let class = if *name == "minor" { json!(["!", ["in", ["get", "class"], ["literal", ["motorway", "trunk", "primary", "secondary", "tertiary"]]]]) } else { json!(["==", ["get", "class"], name]) };
                 // Major roads are labelled by their ref (I 66), others by name.
-                let text = if *sort <= -20 { json!(["coalesce", ["get", "ref"], ["get", "name"]]) } else { json!(["coalesce", ["get", "name"], ["get", "ref"]]) };
+                let text = road_text(*sort <= -20);
                 let mut l = label(&format!("road-{name}-label"), "transportation_name", class, text, color, json!(sort), json!(*sort <= -25));
                 l["minzoom"] = json!(min_label);
                 layers.push(l);
@@ -302,7 +332,7 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
                                "filter": ["==", ["geometry-type"], "Point"],
                                "layout": {"text-field": ["get", "name"], "text-font": ["Italic"]}, "paint": {"text-color": waterway}}));
             for (name, color, _, min_label, sort) in &roads {
-                let text = if *sort <= -20 { json!(["coalesce", ["get", "ref"], ["get", "name"]]) } else { json!(["coalesce", ["get", "name"], ["get", "ref"]]) };
+                let text = road_text(*sort <= -20);
                 let mut l = label(&format!("road-{name}-label"), "roads", filter(name), text, color, json!(sort), json!(*sort <= -25));
                 l["minzoom"] = json!(min_label);
                 layers.push(l);
