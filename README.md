@@ -6,6 +6,10 @@ A map in your terminal, with the pan, zoom and styling of a web map, that also w
 over SSH.
 
 <img src="https://raw.githubusercontent.com/tlpinney/mapterm/main/assets/hero.jpg" alt="mapterm in a terminal: the Potomac from Key Bridge to Georgetown, with roads, parks and labels drawn in braille characters">
+<details>
+<summary>Watch it move (45 s, in Ghostty with the experimental smooth-scroll mode)</summary>
+https://github.com/user-attachments/assets/8bf59b7f-3156-4820-aeeb-2b138fc5bc2b
+</details>
 
 - **Any vector tiles:** OpenFreeMap out of the box (no key), PMTiles files locally or over
   HTTP, XYZ URLs and TileJSON, drawn in braille with cell-color fills and labels that
