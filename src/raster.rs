@@ -212,7 +212,46 @@ pub const PRESETS: &[Preset] = &[
         max_zoom: 20,
         cache: false,
     },
+    Preset {
+        name: "google",
+        about: "Google Maps satellite (Map Tiles API 2D tiles), needs an API key; billed per tile",
+        template: GOOGLE_2D,
+        headers: &[],
+        key_env: &["GOOGLE_MAP_TILES_KEY"],
+        params: &[("maptype", "GOOGLE_MAP_TYPE", "satellite")],
+        attribution: "Google Maps",
+        tile_px: 256,
+        max_zoom: 22,
+        cache: false,
+    },
+    Preset {
+        name: "google-roadmap",
+        about: "Google Maps road map (Map Tiles API 2D tiles), needs an API key; billed per tile",
+        template: GOOGLE_2D,
+        headers: &[],
+        key_env: &["GOOGLE_MAP_TILES_KEY"],
+        params: &[("maptype", "", "roadmap")],
+        attribution: "Google Maps",
+        tile_px: 256,
+        max_zoom: 22,
+        cache: false,
+    },
+    Preset {
+        name: "google-terrain",
+        about: "Google Maps terrain (Map Tiles API 2D tiles), needs an API key; billed per tile",
+        template: GOOGLE_2D,
+        headers: &[],
+        key_env: &["GOOGLE_MAP_TILES_KEY"],
+        params: &[("maptype", "", "terrain")],
+        attribution: "Google Maps",
+        tile_px: 256,
+        max_zoom: 22,
+        cache: false,
+    },
 ];
+
+/// Google Map Tiles API 2D tiles. `{session}` comes from [`RasterSource::start_session`].
+const GOOGLE_2D: &str = "https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session={session}&key={key}";
 
 /// A provider by name (any case).
 pub fn preset(name: &str) -> Option<&'static Preset> {
@@ -350,6 +389,70 @@ impl RasterSource {
             name,
             attribution,
         })
+    }
+
+    /// Whether this is a Google Map Tiles API source (needs a session, and Google's credits).
+    pub fn is_google(&self) -> bool {
+        self.template.starts_with("https://tile.googleapis.com/")
+    }
+
+    fn param(&self, name: &str) -> Option<&str> {
+        self.params.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+
+    /// Get a session for sources that need one before the first tile (Google's Map Tiles API:
+    /// `createSession` with the `maptype` parameter, which fills `{session}` and the tile size).
+    /// Does nothing for other sources. Sessions last about two weeks; this asks for a new one
+    /// each run.
+    pub async fn start_session(&mut self) -> Result<()> {
+        if !self.is_google() || self.param("session").is_some() {
+            return Ok(());
+        }
+        let key = self.key.clone().context("Google Map Tiles need a key")?;
+        let map_type = self.param("maptype").unwrap_or("satellite").to_string();
+        let mut body = serde_json::json!({ "mapType": map_type, "language": "en-US", "region": "US" });
+        match map_type.as_str() {
+            "satellite" | "roadmap" => {}
+            // Terrain only comes with the road layer on top.
+            "terrain" => body["layerTypes"] = serde_json::json!(["layerRoadmap"]),
+            other => bail!("Google map type {other:?}: use satellite, roadmap or terrain"),
+        }
+        let url = format!("https://tile.googleapis.com/v1/createSession?key={key}");
+        let resp = crate::source::keyed_client()
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body.to_string())
+            .send()
+            .await
+            .map_err(|e| self.redact(e.into()))?;
+        let status = resp.status();
+        let text = resp.text().await.map_err(|e| self.redact(e.into()))?;
+        if !status.is_success() {
+            bail!("Google createSession: HTTP {status}: {}", self.redact(anyhow::anyhow!(text.chars().take(300).collect::<String>())));
+        }
+        let v: serde_json::Value = serde_json::from_str(&text).context("Google createSession: not JSON")?;
+        let session = v["session"].as_str().context("Google createSession: no session in the reply")?;
+        self.set_param("session", session);
+        if let Some(w) = v["tileWidth"].as_u64().filter(|w| (64..=1024).contains(w)) {
+            self.tile_px = w as u32;
+        }
+        self.name = format!("google {map_type}");
+        Ok(())
+    }
+
+    /// Set the credits to Google's for a view (its viewport endpoint): "Google Maps · ...".
+    /// `bounds` is (north, south, east, west) in degrees.
+    pub async fn google_attribution(&mut self, zoom: u8, bounds: (f64, f64, f64, f64)) -> Result<()> {
+        let (Some(session), Some(key)) = (self.param("session").map(str::to_string), self.key.clone()) else {
+            bail!("no Google session yet");
+        };
+        let (n, s, e, w) = bounds;
+        let url = format!("https://tile.googleapis.com/tile/v1/viewport?session={session}&key={key}&zoom={zoom}&north={n}&south={s}&east={e}&west={w}");
+        let bytes = get_with(crate::source::keyed_client(), &url, None, &[]).await.map_err(|e| self.redact(e))?.unwrap_or_default();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).context("Google viewport info: not JSON")?;
+        let copyright = v["copyright"].as_str().unwrap_or("").trim();
+        self.attribution = if copyright.is_empty() { "Google Maps".to_string() } else { format!("Google Maps · {copyright}") };
+        Ok(())
     }
 
     /// Add a request header (`Name: value`; `{key}` in the value is replaced by the key).
@@ -759,6 +862,24 @@ mod tests {
         let esri = RasterSource::new("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", false, 19).unwrap();
         assert_eq!(esri.url(15, 9372, 12536), "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/15/12536/9372");
         assert_eq!(esri.attribution, "Esri, Maxar, Earthstar Geographics");
+    }
+
+    #[test]
+    fn google_presets() {
+        for (name, map_type) in [("google", "satellite"), ("google-roadmap", "roadmap"), ("google-terrain", "terrain")] {
+            let p = preset(name).unwrap();
+            assert!(RasterSource::from_preset(p, None).is_err(), "{name} needs a key");
+            let s = RasterSource::from_preset(p, Some("AIzaTESTKEY".into())).unwrap();
+            assert!(s.is_google() && !s.cache, "{name}: Google tiles must not be kept on disk");
+            assert_eq!(s.param("maptype"), Some(map_type));
+            // The session comes from start_session; until then it is missing.
+            assert_eq!(s.missing_params(), vec!["session".to_string()]);
+            assert!(!s.redact(anyhow::anyhow!("GET https://tile.googleapis.com/v1/2dtiles/1/0/0?key=AIzaTESTKEY")).to_string().contains("AIza"));
+        }
+        let mut s = RasterSource::from_preset(preset("google").unwrap(), Some("k3y-123".into())).unwrap();
+        s.set_param("session", "SESS");
+        assert_eq!(s.fill_key(&s.url(3, 2, 1)), "https://tile.googleapis.com/v1/2dtiles/3/2/1?session=SESS&key=k3y-123");
+        assert!(!RasterSource::from_preset(preset("osm").unwrap(), None).unwrap().is_google());
     }
 
     #[test]

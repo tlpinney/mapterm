@@ -153,6 +153,7 @@ imagery that works offline.
 | `planet` | Planet basemaps (your subscription's mosaics) | `PL_API_KEY` + a mosaic |
 | `mapbox` | Mapbox Satellite, Retina tiles | `MAPBOX_ACCESS_TOKEN` |
 | `maptiler` | MapTiler Satellite | `MAPTILER_KEY` |
+| `google`, `google-roadmap`, `google-terrain` | Google Maps satellite, road map, terrain (Map Tiles API, billed per tile) | `GOOGLE_MAP_TILES_KEY` |
 
 API keys never go on the command line: they come from the provider's
 environment variable or from a command that prints the key, such as your password
@@ -165,7 +166,9 @@ mapterm --raster vantor --raster-key-cmd 'secret-tool lookup service vantor'    
 ```
 
 Keys are only added to requests (Vantor's as the `maxar-api-key` header) and are
-blanked out of errors. Keyed providers don't cache tiles on disk unless you pass
+blanked out of errors. Google's tiles need a session, which mapterm asks for at start;
+the status bar credits "Google Maps" and Google's imagery or map data credits for the
+start view, and Google tiles are never kept on disk (`--raster-cache` is refused). Keyed providers don't cache tiles on disk unless you pass
 `--raster-cache`, since commercial licenses often limit storing them. For any
 other service, use its URL with `{key}` where the key goes (filled from
 `MAPTERM_RASTER_KEY` or `--raster-key-cmd`), or for header-based keys

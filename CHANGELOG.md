@@ -4,6 +4,17 @@ All notable changes to mapterm are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor version may break the API).
 
+## [Unreleased]
+
+### Added
+
+- Google Maps 2D tiles as raster providers: `--raster google` (satellite),
+  `google-roadmap` and `google-terrain`, with a Map Tiles API key from
+  `GOOGLE_MAP_TILES_KEY` or `--raster-key-cmd`. `RasterSource::start_session` gets the
+  session Google needs before the first tile (a no-op for other sources), and
+  `RasterSource::google_attribution` sets the credits ("Google Maps" plus Google's
+  imagery or map data credits) for a view. Google tiles are never cached on disk.
+
 ## [0.1.2] - 2026-11-01
 
 Cleaner rivers in the built-in style, and label-free snapshots.

@@ -147,9 +147,10 @@ fn args() -> Result<Args> {
             "--raster-no-cache" => a.raster_cache = Some(false),
             "--raster-list" => {
                 println!("raster providers (--raster NAME):\n");
+                let w = mapterm::raster::PRESETS.iter().map(|p| p.name.len()).max().unwrap_or(10);
                 for p in mapterm::raster::PRESETS {
                     let key = if p.key_env.is_empty() { "no key".to_string() } else { format!("key: {}", p.key_env.join(" or ")) };
-                    println!("  {:<11} {}\n              {key}", p.name, p.about);
+                    println!("  {:<w$} {}\n  {:<w$} {key}", p.name, p.about, "");
                 }
                 println!("\nKeys can also come from --raster-key-cmd, a command that prints the key (e.g. a password manager's CLI).");
                 std::process::exit(0);
@@ -577,6 +578,7 @@ async fn main() -> Result<()> {
             for (n, v) in &a.raster_params {
                 r.set_param(n, v);
             }
+            r.start_session().await?;
             let missing = r.missing_params();
             if !missing.is_empty() {
                 let hint = if missing.iter().any(|m| m == "mosaic") {
@@ -587,7 +589,17 @@ async fn main() -> Result<()> {
                 bail!("the raster URL needs {}: use --raster-param NAME=VALUE{hint}", missing.iter().map(|m| format!("{{{m}}}")).collect::<Vec<_>>().join(", "));
             }
             if let Some(c) = a.raster_cache {
+                if c && r.is_google() {
+                    bail!("--raster-cache: Google's terms don't allow storing its tiles");
+                }
                 r.cache = c;
+            }
+            // Google's credits depend on the view; take them for the start view (about the
+            // terminal's width of map around the center). "Google Maps" alone if that fails.
+            if r.is_google() {
+                let span = 360.0 / 2f64.powf(cam.zoom) * 2.0;
+                let bounds = ((cam.lat + span * 0.4).min(85.0), (cam.lat - span * 0.4).max(-85.0), cam.lon + span, cam.lon - span);
+                let _ = r.google_attribution(cam.zoom.round().clamp(0.0, 22.0) as u8, bounds).await;
             }
             if let Some(t) = &a.raster_attribution {
                 r.attribution = t.clone();
