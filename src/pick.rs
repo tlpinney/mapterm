@@ -39,6 +39,10 @@ pub struct Pick {
     pub lonlat: Vec<Vec<(f64, f64)>>,
     /// Whether the map style draws it (unstyled features are picked too).
     pub drawn: bool,
+    /// The [`crate::Map`] source it came from.
+    pub source: Option<Arc<str>>,
+    /// The style (or custom) layer that drew it, for [`crate::Map::query_rendered_features`].
+    pub style_layer: Option<Arc<str>>,
     pub stats: Stats,
 }
 
@@ -131,7 +135,7 @@ fn haversine_km(a: (f64, f64), b: (f64, f64)) -> f64 {
     2.0 * 6371.0088 * h.sqrt().asin()
 }
 
-fn stats(geom: GeomType, parts: &[Vec<(f64, f64)>]) -> Stats {
+pub(crate) fn stats(geom: GeomType, parts: &[Vec<(f64, f64)>]) -> Stats {
     let all = parts.iter().flatten();
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     let mut vertices = 0;
@@ -154,6 +158,32 @@ fn stats(geom: GeomType, parts: &[Vec<(f64, f64)>]) -> Stats {
         signed.abs()
     });
     Stats { center, length_km, area_km2, vertices }
+}
+
+/// Whether a feature (parts in dots) is under `target`: its rank (points 0, lines 1,
+/// polygons 2) and a score to sort by within the rank (distance; polygons score 0).
+/// `edges` also counts a polygon as hit near its outline.
+pub(crate) fn hit(geom: GeomType, dots: &[Vec<(f64, f64)>], target: (f64, f64), edges: bool) -> Option<(u8, f64)> {
+    let near_line = || dots.iter().flat_map(|p| p.windows(2).map(|w| seg_dist(target, w[0], w[1]))).fold(f64::MAX, f64::min);
+    match geom {
+        GeomType::Point => {
+            let best = dots
+                .iter()
+                .flatten()
+                .map(|p| {
+                    let (dx, dy) = ((p.0 - target.0).abs(), (p.1 - target.1).abs());
+                    if dx <= POINT_TOLERANCE.0 && dy <= POINT_TOLERANCE.1 { dx.hypot(dy) } else { f64::MAX }
+                })
+                .fold(f64::MAX, f64::min);
+            (best < f64::MAX).then_some((0, best))
+        }
+        GeomType::Line => {
+            let best = near_line();
+            (best <= LINE_TOLERANCE_DOTS).then_some((1, best))
+        }
+        GeomType::Polygon => (inside(target, dots) || (edges && near_line() <= LINE_TOLERANCE_DOTS)).then_some((2, 0.0)),
+        GeomType::Unknown => None,
+    }
 }
 
 /// Features under absolute cell (`col`, `row`) of a map drawn in `area` with `cam`, most
@@ -230,7 +260,7 @@ pub fn pick_dot(store: &TileStore, cam: &Camera, min_zoom: u8, max_zoom: u8, are
         hits.push((
             rank,
             score,
-            Pick { tile: Some(tid), layer: f.layer.clone(), geom: f.geom, props: f.props.clone(), lonlat, drawn: f.drawn, stats: st },
+            Pick { tile: Some(tid), layer: f.layer.clone(), geom: f.geom, props: f.props.clone(), lonlat, drawn: f.drawn, stats: st, source: None, style_layer: None },
         ));
     }
     hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -278,7 +308,7 @@ pub fn pick_layers(layers: &[crate::geojson::GeoJson], cam: &Camera, area: Rect,
             hits.push((
                 rank,
                 score,
-                Pick { tile: None, layer: Arc::from(layer.name.as_str()), geom: f.geom, props: f.props.clone(), lonlat, drawn: true, stats: st },
+                Pick { tile: None, layer: Arc::from(layer.name.as_str()), geom: f.geom, props: f.props.clone(), lonlat, drawn: true, stats: st, source: None, style_layer: None },
             ));
         }
     }

@@ -51,6 +51,26 @@ fn ordered_props(f: &mvt::Feature) -> Vec<(String, Value)> {
     props
 }
 
+/// Decode MVT bytes into features (tile-relative geometry, ordered properties), unstyled.
+pub fn decode_features(bytes: &[u8]) -> Result<Vec<Feature>> {
+    let tile = mvt::decode(bytes)?;
+    let mut features = Vec::new();
+    for layer in &tile.layers {
+        let ext = layer.extent as f32;
+        let name: Arc<str> = Arc::from(layer.name.as_str());
+        for f in &layer.features {
+            if f.geometry.is_empty() || f.geom_type == GeomType::Unknown {
+                continue;
+            }
+            let parts: Parts = Arc::new(
+                f.geometry.iter().map(|p| p.iter().map(|[x, y]| [*x as f32 / ext, *y as f32 / ext]).collect()).collect(),
+            );
+            features.push(Feature { layer: name.clone(), geom: f.geom_type, props: ordered_props(f), parts, drawn: false });
+        }
+    }
+    Ok(features)
+}
+
 /// Decode MVT bytes and turn features into draw items.
 pub fn prepare(bytes: &[u8], style: &Style, z: u8) -> Result<Prepared> {
     let tile = mvt::decode(bytes)?;

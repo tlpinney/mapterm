@@ -104,7 +104,7 @@ mod tests {
         let mut cam = Camera::new(-77.0353, 38.8895, 13.0);
         cam.snap_rows();
         let (c0, _, oy0) = snap(&cam);
-        assert!(oy0 < 2 || oy0 > 997, "row-aligned camera has no y remainder: {oy0}");
+        assert!(!(2..=997).contains(&oy0), "row-aligned camera has no y remainder: {oy0}");
         // A quarter row down: same cell row, 250 thousandths of shift.
         cam.pan_cells(0.0, 0.25);
         let (c1, _, oy1) = snap(&cam);

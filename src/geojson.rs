@@ -10,7 +10,7 @@ use ratatui::style::{Modifier, Style as TStyle};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    layer::{DrawContext, Layer, PickContext},
+    layer::{CustomLayer, DrawContext, PickContext},
     mvt::{GeomType, Value},
     pick::Pick,
     render::to_world,
@@ -31,6 +31,7 @@ pub const PALETTE: [Color; 8] = [
     Color::Rgb(240, 120, 220),
 ];
 
+#[derive(Clone, Debug)]
 pub struct Feature {
     pub geom: GeomType,
     /// Parts in Web Mercator world coordinates 0..1 (points, lines, or polygon rings).
@@ -67,7 +68,7 @@ impl GeoJson {
     }
 }
 
-impl Layer for GeoJson {
+impl CustomLayer for GeoJson {
     fn name(&self) -> &str {
         &self.name
     }
@@ -150,6 +151,12 @@ pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
 /// Parse a GeoJSON document (FeatureCollection, Feature, or bare geometry).
 pub fn parse(bytes: &[u8], name: String, color: Color) -> Result<GeoJson> {
     let doc: Json = serde_json::from_slice(bytes).context("not valid JSON")?;
+    let (features, bbox) = features(&doc)?;
+    Ok(GeoJson { name, color, features, bbox, fill: true, labels: true })
+}
+
+/// The features of a parsed GeoJSON document and their bounding box in world coordinates.
+pub fn features(doc: &Json) -> Result<(Vec<Feature>, [f64; 4])> {
     let mut features = Vec::new();
     match doc["type"].as_str() {
         Some("FeatureCollection") => {
@@ -157,15 +164,15 @@ pub fn parse(bytes: &[u8], name: String, color: Color) -> Result<GeoJson> {
                 add_feature(f, &mut features);
             }
         }
-        Some("Feature") => add_feature(&doc, &mut features),
-        Some(_) => add_geometry(&doc, Vec::new(), None, &mut features),
+        Some("Feature") => add_feature(doc, &mut features),
+        Some(_) => add_geometry(doc, Vec::new(), None, &mut features),
         None => bail!("not GeoJSON: no \"type\""),
     }
     let mut bbox = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
     for f in &features {
         bbox = [bbox[0].min(f.bbox[0]), bbox[1].min(f.bbox[1]), bbox[2].max(f.bbox[2]), bbox[3].max(f.bbox[3])];
     }
-    Ok(GeoJson { name, color, features, bbox, fill: true, labels: true })
+    Ok((features, bbox))
 }
 
 fn to_value(v: &Json) -> Option<Value> {

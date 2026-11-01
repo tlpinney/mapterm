@@ -228,3 +228,49 @@ mod tests {
         }
     }
 }
+
+/// A tiny MVT encoder for tests.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    fn varint(out: &mut Vec<u8>, mut v: u64) {
+        while v >= 0x80 {
+            out.push((v as u8) | 0x80);
+            v >>= 7;
+        }
+        out.push(v as u8);
+    }
+
+    fn field_bytes(out: &mut Vec<u8>, field: u32, b: &[u8]) {
+        varint(out, ((field as u64) << 3) | 2);
+        varint(out, b.len() as u64);
+        out.extend_from_slice(b);
+    }
+
+    fn zz(v: i32) -> u32 {
+        ((v << 1) ^ (v >> 31)) as u32
+    }
+
+    /// One tile with one layer holding one polygon feature that covers the whole tile.
+    pub fn square_tile(layer: &str, extent: u32) -> Vec<u8> {
+        let e = extent as i32;
+        let cmds: Vec<u32> = vec![9, zz(0), zz(0), 26, zz(e), zz(0), zz(0), zz(e), zz(-e), zz(0), 15];
+        let mut geom = Vec::new();
+        for c in cmds {
+            varint(&mut geom, c as u64);
+        }
+        let mut feat = Vec::new();
+        varint(&mut feat, 3 << 3); // type
+        varint(&mut feat, 3); // polygon
+        field_bytes(&mut feat, 4, &geom);
+        let mut l = Vec::new();
+        varint(&mut l, 15 << 3);
+        varint(&mut l, 2);
+        field_bytes(&mut l, 1, layer.as_bytes());
+        field_bytes(&mut l, 2, &feat);
+        varint(&mut l, 5 << 3);
+        varint(&mut l, extent as u64);
+        let mut tile = Vec::new();
+        field_bytes(&mut tile, 3, &l);
+        tile
+    }
+}

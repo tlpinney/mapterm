@@ -1,15 +1,10 @@
-//! Layers, Leaflet style: a map is a camera plus an ordered stack of layers. Each layer says
-//! what to draw through a [`DrawContext`] (lines, fills, markers, labels in world or lon/lat
-//! coordinates) and, optionally, which of its features are under a spot. [`MapView`] draws the
-//! stack and resolves label and marker collisions across all layers at once.
+//! Custom layers: code that draws through a [`DrawContext`] (lines, fills, markers, labels in
+//! world or lon/lat coordinates) and, optionally, says which of its features are under a spot.
+//! Add one to a [`crate::Map`] with `add_custom_layer` for anything style layers can't express,
+//! the way MapLibre's `CustomLayerInterface` works.
 //!
-//! ```ignore
-//! let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
-//! let sites = mapterm::geojson::load("sites.geojson", PALETTE[0]).await?;
-//! let pins = Markers(&[Overlay::Marker { lon, lat, glyph: "◆".into(), .. }]);
-//! frame.render_widget(MapView { camera: &cam, layers: &[&tiles, &sites, &pins] }, area);
-//! let under = pick_all(&[&tiles, &sites, &pins], &cam, area, dot);
-//! ```
+//! [`LayerStack`] draws a camera and a borrowed list of custom layers without a `Map`, which the
+//! viewer still uses for its basemap ([`VectorTiles`]) until that moves onto style layers.
 
 use std::collections::HashSet;
 
@@ -28,8 +23,8 @@ use crate::{
     style::Paint,
 };
 
-/// Something drawn on the map: a tile layer, a GeoJSON layer, markers, or your own.
-pub trait Layer {
+/// Something drawn on the map by your own code.
+pub trait CustomLayer {
     /// A short name, shown when inspecting its features.
     fn name(&self) -> &str;
 
@@ -63,6 +58,8 @@ pub struct DrawContext<'a> {
     size: (f64, f64),
     markers: Vec<MarkerItem>,
     labels: Vec<LabelItem>,
+    /// Added to marker and label priorities, so higher layers win collisions.
+    pub(crate) base: i32,
 }
 
 impl DrawContext<'_> {
@@ -118,7 +115,7 @@ impl DrawContext<'_> {
 
     /// A text marker at a dot position, with an optional label to its right.
     pub fn marker_dot(&mut self, p: (f64, f64), glyph: &str, style: TStyle, priority: i32, label: Option<(String, TStyle)>) {
-        self.markers.push((priority, p, glyph.to_string(), style, label));
+        self.markers.push((self.base.saturating_add(priority), p, glyph.to_string(), style, label));
     }
 
     /// A text marker at (lon, lat).
@@ -130,7 +127,7 @@ impl DrawContext<'_> {
     /// A label centered on a dot position (skipped where it would overlap another).
     pub fn label_dot(&mut self, p: (f64, f64), text: &str, style: TStyle, priority: i32) {
         if self.inside(p) {
-            self.labels.push((priority, text.to_string(), style, p));
+            self.labels.push((self.base.saturating_add(priority), text.to_string(), style, p));
         }
     }
 }
@@ -144,70 +141,79 @@ pub struct PickContext<'a> {
 }
 
 /// Features under `target` (dots relative to `area`) across `layers`, top layer first.
-pub fn pick_all(layers: &[&dyn Layer], camera: &Camera, area: Rect, target: (f64, f64)) -> Vec<Pick> {
+pub fn pick_all(layers: &[&dyn CustomLayer], camera: &Camera, area: Rect, target: (f64, f64)) -> Vec<Pick> {
     let ctx = PickContext { camera, area, viewport: Viewport::new(camera, area), target };
     layers.iter().rev().flat_map(|l| l.pick(&ctx)).collect()
 }
 
-/// Draws a camera and a stack of layers (first at the bottom).
-pub struct MapView<'a> {
-    pub camera: &'a Camera,
-    pub layers: &'a [&'a dyn Layer],
+/// Set up a canvas for `area`, let `draw` fill it, then place markers and labels (highest
+/// priority first, never overlapping) and write the cells into `buf`.
+pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: impl FnOnce(&mut DrawContext)) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let mut canvas = Canvas::new(area.width as usize, area.height as usize);
+    let (vw, vh) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
+    let view = {
+        let (cx, cy) = to_world(camera.lon, camera.lat);
+        let s = TILE_DOTS * 2f64.powf(camera.zoom);
+        let (hw, hh) = (vw / 2.0 / s, vh / 2.0 / s);
+        [cx - hw, cy - hh, cx + hw, cy + hh]
+    };
+    let mut ctx = DrawContext {
+        camera,
+        viewport: Viewport::new(camera, area),
+        canvas: &mut canvas,
+        view,
+        size: (vw, vh),
+        markers: Vec::new(),
+        labels: Vec::new(),
+        base: 0,
+    };
+    draw(&mut ctx);
+    let DrawContext { mut markers, mut labels, .. } = ctx;
+
+    // Markers claim space first, then labels, highest priority first.
+    let inside = |p: (f64, f64)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < vw && p.1 < vh;
+    markers.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, p, glyph, st, label) in markers {
+        if !inside(p) {
+            continue;
+        }
+        let (col, row) = ((p.0 / 2.0) as i64, (p.1 / 4.0) as i64);
+        if canvas.text_at(col, row, &glyph, st, false)
+            && let Some((l, ls)) = label
+        {
+            canvas.text_at(col + glyph.width() as i64 + 1, row, &l, ls, true);
+        }
+    }
+    labels.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut placed = HashSet::new();
+    for (_, text, st, p) in labels {
+        if placed.contains(&text) {
+            continue;
+        }
+        let col = (p.0 / 2.0) as i64 - text.width() as i64 / 2;
+        if canvas.text_at(col, (p.1 / 4.0) as i64, &text, st, true) {
+            placed.insert(text);
+        }
+    }
+    canvas.flush(area, buf);
 }
 
-impl Widget for MapView<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width < 2 || area.height < 2 {
-            return;
-        }
-        let mut canvas = Canvas::new(area.width as usize, area.height as usize);
-        let (vw, vh) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
-        let view = {
-            let (cx, cy) = to_world(self.camera.lon, self.camera.lat);
-            let s = TILE_DOTS * 2f64.powf(self.camera.zoom);
-            let (hw, hh) = (vw / 2.0 / s, vh / 2.0 / s);
-            [cx - hw, cy - hh, cx + hw, cy + hh]
-        };
-        let mut ctx = DrawContext {
-            camera: self.camera,
-            viewport: Viewport::new(self.camera, area),
-            canvas: &mut canvas,
-            view,
-            size: (vw, vh),
-            markers: Vec::new(),
-            labels: Vec::new(),
-        };
-        for layer in self.layers {
-            layer.draw(&mut ctx);
-        }
-        let DrawContext { mut markers, mut labels, .. } = ctx;
+/// Draws a camera and a borrowed stack of custom layers (first at the bottom).
+pub struct LayerStack<'a> {
+    pub camera: &'a Camera,
+    pub layers: &'a [&'a dyn CustomLayer],
+}
 
-        // Markers claim space first, then labels, highest priority first.
-        let inside = |p: (f64, f64)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < vw && p.1 < vh;
-        markers.sort_by(|a, b| b.0.cmp(&a.0));
-        for (_, p, glyph, st, label) in markers {
-            if !inside(p) {
-                continue;
+impl Widget for LayerStack<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        render_with(self.camera, area, buf, |ctx| {
+            for layer in self.layers {
+                layer.draw(ctx);
             }
-            let (col, row) = ((p.0 / 2.0) as i64, (p.1 / 4.0) as i64);
-            if canvas.text_at(col, row, &glyph, st, false)
-                && let Some((l, ls)) = label
-            {
-                canvas.text_at(col + glyph.width() as i64 + 1, row, &l, ls, true);
-            }
-        }
-        labels.sort_by(|a, b| b.0.cmp(&a.0));
-        let mut placed = HashSet::new();
-        for (_, text, st, p) in labels {
-            if placed.contains(&text) {
-                continue;
-            }
-            let col = (p.0 / 2.0) as i64 - text.width() as i64 / 2;
-            if canvas.text_at(col, (p.1 / 4.0) as i64, &text, st, true) {
-                placed.insert(text);
-            }
-        }
-        canvas.flush(area, buf);
+        });
     }
 }
 
@@ -229,7 +235,7 @@ impl<'a> VectorTiles<'a> {
     }
 }
 
-impl Layer for VectorTiles<'_> {
+impl CustomLayer for VectorTiles<'_> {
     fn name(&self) -> &str {
         "basemap"
     }
@@ -299,7 +305,7 @@ impl Layer for VectorTiles<'_> {
 /// A list of [`Overlay`] markers and lines as a layer.
 pub struct Markers<'a>(pub &'a [Overlay]);
 
-impl Layer for Markers<'_> {
+impl CustomLayer for Markers<'_> {
     fn name(&self) -> &str {
         "markers"
     }

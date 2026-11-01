@@ -21,7 +21,7 @@ use std::io::Write;
 
 use mapterm::{
     Controller,
-    Camera, Layer, MapView, Markers, Overlay, Source, VectorTiles, pick_all, Style, Theme, TileId, TileStore, Viewport, prepare, smooth, source::OPENFREEMAP,
+    Camera, CustomLayer, LayerStack, Markers, Overlay, Source, VectorTiles, pick_all, Style, Theme, TileId, TileStore, Viewport, prepare, smooth, source::OPENFREEMAP,
     store::Prepared,
 };
 use tokio::sync::{Semaphore, mpsc};
@@ -471,8 +471,8 @@ async fn main() -> Result<()> {
         if let Some((c, r)) = a.pick {
             let dot = ((c as f64 - area.x as f64) * 2.0 + 1.0, (r as f64 - area.y as f64) * 4.0 + 2.0);
             let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
-            let mut stack: Vec<&dyn Layer> = vec![&tiles];
-            stack.extend(layers.iter().map(|l| l as &dyn Layer));
+            let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
+            stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
             for p in pick_all(&stack, &cam, area, dot) {
                 println!("{}", p.to_json());
             }
@@ -480,9 +480,9 @@ async fn main() -> Result<()> {
         }
         let mut buf = Buffer::empty(area);
         let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
-        let mut stack: Vec<&dyn Layer> = vec![&tiles];
-        stack.extend(layers.iter().map(|l| l as &dyn Layer));
-        MapView { camera: &cam, layers: &stack }.render(area, &mut buf);
+        let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
+        stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
+        LayerStack { camera: &cam, layers: &stack }.render(area, &mut buf);
         for y in 0..h {
             let line: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
             println!("{}", line.trim_end());
@@ -613,10 +613,10 @@ async fn main() -> Result<()> {
                     labels: labels && vector < 2,
                 };
                 let marks = Markers(&overlays);
-                let mut stack: Vec<&dyn Layer> = vec![&tiles];
-                stack.extend(layers.iter().map(|l| l as &dyn Layer));
+                let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
+                stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
                 stack.push(&marks);
-                f.render_widget(MapView { camera: &draw_cam, layers: &stack }, m);
+                f.render_widget(LayerStack { camera: &draw_cam, layers: &stack }, m);
                 list_rows = if panel_w > 0 { draw_inspector(f, panel, &picks, sel) } else { Vec::new() };
                 if let Some(r) = box_rect {
                     f.render_widget(Block::bordered().border_style(TStyle::new().fg(Color::Yellow)), r);
@@ -870,8 +870,8 @@ async fn main() -> Result<()> {
                                     let key = (dot.0.floor() as i32, dot.1.floor() as i32);
                                     if hover.as_ref().is_none_or(|(k, _)| *k != key) {
                                         let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
-                                        let mut stack: Vec<&dyn Layer> = vec![&tiles];
-                                        stack.extend(layers.iter().map(|l| l as &dyn Layer));
+                                        let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
+                                        stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
                                         let under = pick_all(&stack, &last_cam, map_area, dot);
                                         hover = Some((key, match under.first() {
                                             Some(p) => {
@@ -889,8 +889,8 @@ async fn main() -> Result<()> {
                                 {
                                     let dot = Viewport::new(&last_cam, map_area).dot_ll(k.lon, k.lat);
                                     let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
-                                    let mut stack: Vec<&dyn Layer> = vec![&tiles];
-                                    stack.extend(layers.iter().map(|l| l as &dyn Layer));
+                                    let mut stack: Vec<&dyn CustomLayer> = vec![&tiles];
+                                    stack.extend(layers.iter().map(|l| l as &dyn CustomLayer));
                                     picks = pick_all(&stack, &last_cam, map_area, dot);
                                     sel = 0;
                                     click_at = Some((k.lon, k.lat));
