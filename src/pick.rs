@@ -158,19 +158,29 @@ pub fn pick(store: &TileStore, cam: &Camera, min_zoom: u8, max_zoom: u8, area: R
     if !area.contains(ratatui::layout::Position::new(col, row)) {
         return Vec::new();
     }
-    let vp = Viewport::new(cam, area);
     // The cell's center, in dots relative to the map area.
     let target = ((col - area.x) as f64 * 2.0 + 1.0, (row - area.y) as f64 * 4.0 + 2.0);
+    pick_dot(store, cam, min_zoom, max_zoom, area, target)
+}
+
+/// Like [`pick`], at a lon/lat (e.g. an exact click position).
+pub fn pick_lonlat(store: &TileStore, cam: &Camera, min_zoom: u8, max_zoom: u8, area: Rect, lon: f64, lat: f64) -> Vec<Pick> {
+    let target = Viewport::new(cam, area).dot_ll(lon, lat);
+    pick_dot(store, cam, min_zoom, max_zoom, area, target)
+}
+
+/// Like [`pick`], at a braille-dot position relative to the map area (2 dots per column, 4 per
+/// row), for pointer positions finer than a cell.
+pub fn pick_dot(store: &TileStore, cam: &Camera, min_zoom: u8, max_zoom: u8, area: Rect, target: (f64, f64)) -> Vec<Pick> {
+    let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
+    if area.width == 0 || target.0 < 0.0 || target.1 < 0.0 || target.0 >= w || target.1 >= h {
+        return Vec::new();
+    }
+    let vp = Viewport::new(cam, area);
     let tz = cam.tile_zoom(min_zoom, max_zoom);
     let n = (1u64 << tz) as f64;
     // The tile under the spot (MVT tiles carry a buffer, so features near an edge are there too).
-    let (lon, lat) = {
-        let scale = 256.0 * 2f64.powf(cam.zoom);
-        let (cx, cy) = to_world(cam.lon, cam.lat);
-        let w = area.width as f64 * 2.0;
-        let h = area.height as f64 * 4.0;
-        to_lonlat(cx + (target.0 - w / 2.0) / scale, cy + (target.1 - h / 2.0) / scale)
-    };
+    let (lon, lat) = vp.dot_to_lonlat(target.0, target.1);
     let (wx, wy) = to_world(lon, lat);
     let id: TileId = (tz, (wx * n).floor().clamp(0.0, n - 1.0) as u32, (wy * n).floor().clamp(0.0, n - 1.0) as u32);
     let Some((tid, tile)) = store.get_or_ancestor(id) else { return Vec::new() };

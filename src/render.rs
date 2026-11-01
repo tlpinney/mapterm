@@ -128,6 +128,11 @@ impl Viewport {
         self.dot(x, y)
     }
 
+    /// Braille dot position (relative to the area; 2 dots per column, 4 per row) -> lon/lat.
+    pub fn dot_to_lonlat(&self, x: f64, y: f64) -> (f64, f64) {
+        to_lonlat(self.cx + (x - self.w / 2.0) / self.scale, self.cy + (y - self.h / 2.0) / self.scale)
+    }
+
     /// Screen cell (relative to the area) -> lon/lat.
     pub fn cell_to_lonlat(&self, col: u16, row: u16) -> (f64, f64) {
         let dx = (col as f64 * 2.0 + 1.0 - self.w / 2.0) / self.scale;

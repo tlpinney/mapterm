@@ -330,9 +330,10 @@ async fn main() -> Result<()> {
     let mut picks: Vec<mapterm::Pick> = Vec::new();
     let mut sel = 0usize;
     let mut click_at: Option<(f64, f64)> = None;
-    let mut hover: Option<((u16, u16), String)> = None;
-    // The cell under the pointer while inspecting, for the on-map crosshair.
-    let mut hover_cell: Option<(u16, u16)> = None;
+    let mut hover: Option<((i32, i32), String)> = None;
+    // The pointer position while inspecting, in braille dots relative to the map (2 per column,
+    // 4 per row), for the crosshair. Exact when the terminal reports pixels.
+    let mut hover_dot: Option<(f64, f64)> = None;
     let mut list_rows: Vec<(u16, usize)> = Vec::new();
     let mut panel_area = Rect::default();
     let mut note: Option<(Instant, String)> = None;
@@ -365,11 +366,14 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            if let (true, Some((col, row))) = (inspect, hover_cell)
-                && map_area.contains(ratatui::layout::Position::new(col, row))
-            {
-                let (lon, lat) = Viewport::new(&draw_cam, map_area).cell_to_lonlat(col - map_area.x, row - map_area.y);
-                overlays.push(Overlay::Marker { lon, lat, glyph: "┼".into(), style: TStyle::new().fg(Color::Rgb(255, 215, 0)), label: None, priority: 98 });
+            if let (true, Some((x, y))) = (inspect, hover_dot) {
+                // A small crosshair drawn with braille dots, centered on the pointer.
+                let vp = Viewport::new(&draw_cam, map_area);
+                let (x, y) = (x.floor() + 0.5, y.floor() + 0.5);
+                let cross = Color::Rgb(0, 235, 255);
+                for ((ax, ay), (bx, by)) in [((x - 3.0, y), (x + 3.0, y)), ((x, y - 3.0), (x, y + 3.0))] {
+                    overlays.push(Overlay::Line { pts: vec![vp.dot_to_lonlat(ax, ay), vp.dot_to_lonlat(bx, by)], color: cross });
+                }
             }
             if let (true, Some((lon, lat))) = (inspect && !picks.is_empty(), click_at) {
                 overlays.push(Overlay::Marker { lon, lat, glyph: "+".into(), style: TStyle::new().fg(Color::Rgb(255, 215, 0)), label: None, priority: 99 });
@@ -482,20 +486,28 @@ async fn main() -> Result<()> {
                                         picks.clear();
                                         click_at = None;
                                     }
-                                    KeyCode::Esc if inspect => {
+                                    KeyCode::Esc | KeyCode::Char('i') if inspect => {
                                         inspect = false;
+                                        picks.clear();
+                                        click_at = None;
                                         hover = None;
-                                        hover_cell = None;
+                                        hover_dot = None;
                                         set_pointer("default")?;
+                                        // Pixel mouse reports stay on only if smooth mode needs them.
+                                        if !smooth_on && ctl.pixel_mouse.is_some() {
+                                            ctl.pixel_mouse = None;
+                                            set_pixel_mouse(false)?;
+                                        }
                                     }
                                     KeyCode::Char('i') => {
-                                        inspect = !inspect;
-                                        set_pointer(if inspect { "crosshair" } else { "default" })?;
-                                        if !inspect {
-                                            picks.clear();
-                                            click_at = None;
-                                            hover = None;
-                                            hover_cell = None;
+                                        inspect = true;
+                                        set_pointer("crosshair")?;
+                                        // Exact pointer positions, for the crosshair and picking.
+                                        if ctl.pixel_mouse.is_none()
+                                            && let Some(px) = cell_px()
+                                        {
+                                            ctl.pixel_mouse = Some(px);
+                                            set_pixel_mouse(true)?;
                                         }
                                     }
                                     KeyCode::Tab if !picks.is_empty() => sel = (sel + 1) % picks.len(),
@@ -513,6 +525,10 @@ async fn main() -> Result<()> {
                                     KeyCode::Char('s') if smooth_available => {
                                         smooth_on = !smooth_on;
                                         apply_smooth(&mut ctl, smooth_on)?;
+                                        if inspect && ctl.pixel_mouse.is_none() {
+                                            ctl.pixel_mouse = cell_px();
+                                            set_pixel_mouse(ctl.pixel_mouse.is_some())?;
+                                        }
                                         if !smooth_on {
                                             let mut out = std::io::stdout();
                                             out.write_all(smooth::SMOOTH_OFF.as_bytes())?;
@@ -545,16 +561,27 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
                                 if inspect && !map_area.contains(pos) {
-                                    hover_cell = None;
+                                    hover_dot = None;
                                 }
                                 if inspect && m.kind == event::MouseEventKind::Moved && map_area.contains(pos) {
-                                    hover_cell = Some(cell);
-                                    if hover.as_ref().is_none_or(|(c, _)| *c != cell) {
-                                        let under = mapterm::pick(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, cell.0, cell.1);
-                                        hover = under.first().map(|p| {
-                                            let more = if under.len() > 1 { format!(" +{} more", under.len() - 1) } else { String::new() };
-                                            (cell, format!("{} ({}){more}", p.title(), p.kind()))
-                                        });
+                                    // The pointer in dots relative to the map: exact from pixel
+                                    // reports, else the middle of the cell.
+                                    let (ax, ay) = (map_area.x as f64, map_area.y as f64);
+                                    let dot = match ctl.pixel_mouse {
+                                        Some((cw, ch)) => ((m.column as f64 / cw - ax) * 2.0, (m.row as f64 / ch - ay) * 4.0),
+                                        None => ((cell.0 as f64 - ax) * 2.0 + 1.0, (cell.1 as f64 - ay) * 4.0 + 2.0),
+                                    };
+                                    hover_dot = Some(dot);
+                                    let key = (dot.0.floor() as i32, dot.1.floor() as i32);
+                                    if hover.as_ref().is_none_or(|(k, _)| *k != key) {
+                                        let under = mapterm::pick_dot(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, dot);
+                                        hover = Some((key, match under.first() {
+                                            Some(p) => {
+                                                let more = if under.len() > 1 { format!(" +{} more", under.len() - 1) } else { String::new() };
+                                                format!("{} ({}){more}", p.title(), p.kind())
+                                            }
+                                            None => "nothing here".into(),
+                                        }));
                                     }
                                     continue;
                                 }
@@ -562,7 +589,7 @@ async fn main() -> Result<()> {
                                 if let Some(k) = ctl.take_click()
                                     && inspect
                                 {
-                                    picks = mapterm::pick(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, k.col, k.row);
+                                    picks = mapterm::pick_lonlat(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, k.lon, k.lat);
                                     sel = 0;
                                     click_at = Some((k.lon, k.lat));
                                     if picks.is_empty() {

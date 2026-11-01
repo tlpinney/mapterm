@@ -23,7 +23,7 @@ pub mod store;
 pub mod style;
 
 pub use interact::{Click, Controller};
-pub use pick::{Pick, pick};
+pub use pick::{Pick, pick, pick_dot, pick_lonlat};
 pub use render::{Camera, MapWidget, Overlay, Viewport};
 pub use source::Source;
 pub use store::{TileId, TileStore, prepare};
