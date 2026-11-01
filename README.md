@@ -195,6 +195,11 @@ let under = map.query_rendered_features(&ctl.cam, area, dot, Some(&["pins"]));
   opacity (blended with the background), filters, zoom ranges, `text-field`,
   bold and italic fonts, `text-anchor` and `symbol-sort-key` are used. The
   `mapterm:glyph` layout property sets the character drawn at points.
+- `events::Events` turns the pointer and clicks into MapLibre-style layer events
+  (`Click`, `Enter`, `Leave` for the layers you name) and can set a `hover` feature
+  state, so a layer styled with `["feature-state", "hover"]` lights up under the
+  pointer. `set_feature_state` works for any feature with an id (GeoJSON `id`,
+  vector tile ids, or a source's `promoteId` property).
 - Anything else is a `CustomLayer`: `draw` (lines, fills, markers and labels
   through a `DrawContext`) and `pick`. Markers and labels from every layer are
   placed together, so they never overlap.

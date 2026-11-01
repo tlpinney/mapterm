@@ -35,7 +35,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     raster::{RasterSource, RasterStore, RasterTile},
-    expr::{Ctx, Rgba},
+    expr::{Ctx, Rgba, Val},
     geojson,
     layer::{CustomLayer, DrawContext, PickContext, render_with},
     mvt::GeomType,
@@ -63,12 +63,31 @@ impl MapSource {
     /// Vector tiles fetched from `src` by [`Map::load_tiles`].
     pub fn vector(src: Source) -> Self {
         let attribution = src.attribution.as_deref().map(crate::source::plain_attribution);
-        MapSource::Vector(VectorSource { min_zoom: src.min_zoom, max_zoom: src.max_zoom, attribution, fetch: Some(Arc::new(src)), tiles: Tiles::default() })
+        MapSource::Vector(VectorSource { min_zoom: src.min_zoom, max_zoom: src.max_zoom, attribution, promote_id: None, fetch: Some(Arc::new(src)), tiles: Tiles::default() })
     }
 
     /// Vector tiles the app supplies itself with [`Map::insert_tile`].
     pub fn vector_tiles(min_zoom: u8, max_zoom: u8) -> Self {
-        MapSource::Vector(VectorSource { min_zoom, max_zoom, attribution: None, fetch: None, tiles: Tiles::default() })
+        MapSource::Vector(VectorSource { min_zoom, max_zoom, attribution: None, promote_id: None, fetch: None, tiles: Tiles::default() })
+    }
+
+    /// The property used as feature id, if set (MapLibre's `promoteId`).
+    pub fn promote_id(&self) -> Option<&str> {
+        match self {
+            MapSource::Vector(v) => v.promote_id.as_deref(),
+            MapSource::GeoJson(g) => g.promote_id.as_deref(),
+            MapSource::Raster(_) => None,
+        }
+    }
+
+    /// Use a property as the feature id (MapLibre's `promoteId`), for feature state.
+    pub fn with_promote_id(mut self, prop: impl Into<String>) -> Self {
+        match &mut self {
+            MapSource::Vector(v) => v.promote_id = Some(prop.into()),
+            MapSource::GeoJson(g) => g.promote_id = Some(prop.into()),
+            MapSource::Raster(_) => {}
+        }
+        self
     }
 
     /// The source's credit as plain text, if it has one.
@@ -182,13 +201,15 @@ impl KittyState {
 
 impl From<geojson::GeoJson> for MapSource {
     fn from(g: geojson::GeoJson) -> Self {
-        MapSource::GeoJson(GeoJsonSource { features: g.features, bbox: g.bbox, attribution: None })
+        MapSource::GeoJson(GeoJsonSource { features: g.features, bbox: g.bbox, attribution: None, promote_id: None })
     }
 }
 
 pub struct VectorSource {
     pub min_zoom: u8,
     pub max_zoom: u8,
+    /// A property to use as the feature id (MapLibre's `promoteId`), for feature state.
+    pub promote_id: Option<String>,
     /// Credit to show while the source is drawn (plain text).
     pub attribution: Option<String>,
     fetch: Option<Arc<Source>>,
@@ -201,12 +222,14 @@ pub struct GeoJsonSource {
     pub bbox: [f64; 4],
     /// Credit to show while the source is drawn (plain text).
     pub attribution: Option<String>,
+    /// A property to use as the feature id (MapLibre's `promoteId`), for feature state.
+    pub promote_id: Option<String>,
 }
 
 impl GeoJsonSource {
     pub fn parse(doc: &Json) -> Result<Self> {
         let (features, bbox) = geojson::features(doc)?;
-        Ok(Self { features, bbox, attribution: None })
+        Ok(Self { features, bbox, attribution: None, promote_id: None })
     }
 }
 
@@ -241,7 +264,7 @@ struct MapTile {
 }
 
 /// Items of zoom-dependent layers by layer index, with the zoom they were evaluated at.
-type ZoomedItems = HashMap<u16, (ZoomKey, Arc<Vec<Item>>)>;
+type ZoomedItems = HashMap<u16, (ZoomKey, u64, Arc<Vec<Item>>)>;
 
 /// The zooms a zoom-dependent layer was evaluated at: filters and layout at the whole zoom
 /// level, paint at the camera zoom (to 1/20 of a level).
@@ -270,14 +293,18 @@ impl MapTile {
     /// evaluated when the tile loaded; the others are evaluated here, as MapLibre does:
     /// filters and layout at the whole zoom level (past the source's last tile zoom too),
     /// paint at the exact camera zoom. Kept until the zoom changes.
-    fn layer_items(&self, i: usize, l: &StyleLayer, zoom: f64, bg: Option<Rgba>) -> LayerItems<'_> {
-        if !l.uses_zoom() {
+    /// Layers reading feature state are evaluated here too, again when the state changes.
+    fn layer_items(&self, i: usize, l: &StyleLayer, zoom: f64, bg: Option<Rgba>, env: StateEnv) -> LayerItems<'_> {
+        let stateful = l.uses_state();
+        if !stateful && !l.uses_zoom() {
             return LayerItems::Cached(self.items_of(i));
         }
         let key = zoom_key(zoom);
+        let version = if stateful { env.version } else { 0 };
         let mut cache = self.zoomed.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((k, items)) = cache.get(&(i as u16))
+        if let Some((k, v, items)) = cache.get(&(i as u16))
             && *k == key
+            && *v == version
         {
             return LayerItems::Zoomed(items.clone());
         }
@@ -285,14 +312,14 @@ impl MapTile {
         if let Some(fs) = l.source_layer.as_deref().and_then(|s| self.by_layer.get(s)) {
             for &fi in fs {
                 let f = &self.features[fi as usize];
-                let c = Ctx { zoom: zoom.floor(), geom: f.geom, props: &f.props };
+                let c = Ctx { zoom: zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
                 if let Some(paint) = resolve(l, &c, zoom, bg) {
                     items.push(Item { layer: i as u16, feature: fi, paint });
                 }
             }
         }
         let items = Arc::new(items);
-        cache.insert(i as u16, (key, items.clone()));
+        cache.insert(i as u16, (key, version, items.clone()));
         LayerItems::Zoomed(items)
     }
 }
@@ -381,6 +408,34 @@ pub struct Map {
     pub retry: RetryPolicy,
     /// Tiles whose last load failed: attempts so far and when to try again.
     failed: HashMap<(String, TileId), (u32, std::time::Instant)>,
+    /// Feature state by source, then feature id (as text), then key.
+    states: HashMap<String, HashMap<String, Vec<(String, Val)>>>,
+    /// Bumped whenever feature state changes, so layers that read it are re-evaluated.
+    state_version: u64,
+}
+
+/// The id a source gives a feature: its `promoteId` property when set, else the feature's id.
+fn feature_id(promote: Option<&str>, id: &Option<crate::mvt::Value>, props: &[(String, crate::mvt::Value)]) -> Option<crate::mvt::Value> {
+    match promote {
+        Some(p) => props.iter().find(|(k, _)| k == p).map(|(_, v)| v.clone()),
+        None => id.clone(),
+    }
+}
+
+/// What layers reading feature state need: the source's states and `promoteId`, and the
+/// state version (part of the cache key).
+#[derive(Clone, Copy)]
+struct StateEnv<'a> {
+    states: Option<&'a HashMap<String, Vec<(String, Val)>>>,
+    promote: Option<&'a str>,
+    version: u64,
+}
+
+impl<'a> StateEnv<'a> {
+    fn of(&self, id: &Option<crate::mvt::Value>, props: &[(String, crate::mvt::Value)]) -> &'a [(String, Val)] {
+        let Some(states) = self.states else { return &[] };
+        feature_id(self.promote, id, props).and_then(|id| states.get(&id.to_string())).map_or(&[], |v| v.as_slice())
+    }
 }
 
 /// Retrying tiles that failed to load (timeouts, network or server errors). A tile that
@@ -480,6 +535,61 @@ impl Map {
             None => bail!("no source \"{id}\""),
         }
         Ok(())
+    }
+
+    /// Set feature state (MapLibre's `setFeatureState`): the keys of `state` (a JSON object)
+    /// are merged into the feature's state, which paint expressions read with
+    /// `["feature-state", key]`. `id` is the feature's id, or its `promoteId` property.
+    pub fn set_feature_state(&mut self, source: &str, id: &crate::mvt::Value, state: &Json) -> Result<()> {
+        if self.source(source).is_none() {
+            bail!("no source \"{source}\"");
+        }
+        let Some(obj) = state.as_object() else { bail!("feature state must be a JSON object") };
+        let entry = self.states.entry(source.to_string()).or_default().entry(id.to_string()).or_default();
+        for (k, v) in obj {
+            let v = crate::expr::Expr::parse(&serde_json::json!(["literal", v])).map(|e| e.eval(&Ctx { zoom: 0.0, geom: GeomType::Unknown, props: &[], state: &[] }))?;
+            match entry.iter_mut().find(|(key, _)| key == k) {
+                Some(slot) => slot.1 = v,
+                None => entry.push((k.clone(), v)),
+            }
+        }
+        self.state_version += 1;
+        Ok(())
+    }
+
+    /// Remove feature state: one key of one feature, all of one feature's state, or (with no
+    /// id) all state of the source.
+    pub fn remove_feature_state(&mut self, source: &str, id: Option<&crate::mvt::Value>, key: Option<&str>) {
+        let Some(by_id) = self.states.get_mut(source) else { return };
+        match (id, key) {
+            (None, _) => {
+                self.states.remove(source);
+            }
+            (Some(id), None) => {
+                by_id.remove(&id.to_string());
+            }
+            (Some(id), Some(k)) => {
+                if let Some(st) = by_id.get_mut(&id.to_string()) {
+                    st.retain(|(key, _)| key != k);
+                }
+            }
+        }
+        self.state_version += 1;
+    }
+
+    /// A feature's state as a JSON object (empty when none is set).
+    pub fn feature_state(&self, source: &str, id: &crate::mvt::Value) -> Json {
+        let mut m = serde_json::Map::new();
+        if let Some(st) = self.states.get(source).and_then(|s| s.get(&id.to_string())) {
+            for (k, v) in st {
+                m.insert(k.clone(), val_json(v));
+            }
+        }
+        Json::Object(m)
+    }
+
+    fn state_env(&self, source: &str) -> StateEnv<'_> {
+        StateEnv { states: self.states.get(source), promote: self.source(source).and_then(MapSource::promote_id), version: self.state_version }
     }
 
     /// The credits of the sources that the layers shown at `zoom` draw from, in source order
@@ -962,11 +1072,12 @@ impl Map {
                 continue;
             }
             let Some(sid) = l.source.as_deref() else { continue };
+            let env = self.state_env(sid);
             let style_layer: Arc<str> = Arc::from(l.id.as_str());
             let source: Arc<str> = Arc::from(sid);
             let edges = l.kind == Kind::Line;
             let mut hits: Vec<(u8, f64, Pick)> = Vec::new();
-            let mut push = |geom: GeomType, dots: &[Vec<(f64, f64)>], lonlat: Vec<Vec<(f64, f64)>>, layer: Arc<str>, props: &[(String, crate::mvt::Value)], tile: Option<TileId>| {
+            let mut push = |geom: GeomType, dots: &[Vec<(f64, f64)>], lonlat: Vec<Vec<(f64, f64)>>, layer: Arc<str>, props: &[(String, crate::mvt::Value)], tile: Option<TileId>, id: Option<crate::mvt::Value>| {
                 if let Some((rank, score)) = hit(geom, dots, target, edges) {
                     let st = stats(geom, &lonlat);
                     let score = if geom == GeomType::Polygon { st.area_km2.unwrap_or(0.0) } else { score };
@@ -980,6 +1091,7 @@ impl Map {
                         stats: st,
                         source: Some(source.clone()),
                         style_layer: Some(style_layer.clone()),
+                        id,
                     };
                     hits.push((rank, score, pick));
                 }
@@ -997,25 +1109,25 @@ impl Map {
                     let tn = (1u64 << tid.0) as f64;
                     let world = |p: &[f32; 2]| ((tid.1 as f64 + p[0] as f64) / tn, (tid.2 as f64 + p[1] as f64) / tn);
                     let mut seen = HashSet::new();
-                    for it in tile.layer_items(i, l, cam.zoom, bg).iter() {
+                    for it in tile.layer_items(i, l, cam.zoom, bg, env).iter() {
                         let f = &tile.features[it.feature as usize];
                         let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); vp.dot(x, y) }).collect()).collect();
                         if hit(f.geom, &dots, target, edges).is_none() || !seen.insert(format!("{:?}{:?}", f.geom, f.props)) {
                             continue;
                         }
                         let lonlat = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); to_lonlat(x, y) }).collect()).collect();
-                        push(f.geom, &dots, lonlat, f.layer.clone(), &f.props, Some(tid));
+                        push(f.geom, &dots, lonlat, f.layer.clone(), &f.props, Some(tid), feature_id(env.promote, &f.id, &f.props));
                     }
                 }
                 Some(MapSource::GeoJson(g)) => {
                     for f in &g.features {
-                        let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props };
+                        let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
                         if resolve(l, &c, cam.zoom, bg).is_none() {
                             continue;
                         }
                         let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
                         let lonlat = f.parts.iter().map(|p| p.iter().map(|&(x, y)| to_lonlat(x, y)).collect()).collect();
-                        push(f.geom, &dots, lonlat, source.clone(), &f.props, None);
+                        push(f.geom, &dots, lonlat, source.clone(), &f.props, None, feature_id(env.promote, &f.id, &f.props));
                     }
                 }
                 _ => {}
@@ -1045,12 +1157,13 @@ impl Map {
         let mut out = Vec::new();
         for (sid, src) in order {
             let source: Arc<str> = Arc::from(sid.as_str());
+            let env = self.state_env(sid);
             let mut hits: Vec<(u8, f64, Pick)> = Vec::new();
-            let mut push = |geom: GeomType, rank: u8, score: f64, lonlat: Vec<Vec<(f64, f64)>>, layer: Arc<str>, props: &[(String, crate::mvt::Value)], tile: Option<TileId>, by: Option<usize>| {
+            let mut push = |geom: GeomType, rank: u8, score: f64, lonlat: Vec<Vec<(f64, f64)>>, layer: Arc<str>, props: &[(String, crate::mvt::Value)], tile: Option<TileId>, by: Option<usize>, id: Option<crate::mvt::Value>| {
                 let st = stats(geom, &lonlat);
                 let score = if geom == GeomType::Polygon { st.area_km2.unwrap_or(0.0) } else { score };
                 let style_layer = by.map(|i| Arc::from(self.layers[i].id()));
-                let pick = Pick { tile, layer, geom, props: props.to_vec(), lonlat, drawn: by.is_some(), stats: st, source: Some(source.clone()), style_layer };
+                let pick = Pick { tile, layer, geom, props: props.to_vec(), lonlat, drawn: by.is_some(), stats: st, source: Some(source.clone()), style_layer, id };
                 hits.push((rank, score, pick));
             };
             match src {
@@ -1070,7 +1183,7 @@ impl Map {
                             && l.source.as_deref() == Some(sid.as_str())
                             && l.shown_at(cam.zoom)
                         {
-                            for it in tile.layer_items(i, l, cam.zoom, bg).iter() {
+                            for it in tile.layer_items(i, l, cam.zoom, bg, env).iter() {
                                 drawn_by.insert(it.feature, i);
                             }
                         }
@@ -1086,19 +1199,19 @@ impl Map {
                             continue;
                         }
                         let lonlat = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); to_lonlat(x, y) }).collect()).collect();
-                        push(f.geom, rank, score, lonlat, f.layer.clone(), &f.props, Some(tid), drawn_by.get(&(fi as u32)).copied());
+                        push(f.geom, rank, score, lonlat, f.layer.clone(), &f.props, Some(tid), drawn_by.get(&(fi as u32)).copied(), feature_id(env.promote, &f.id, &f.props));
                     }
                 }
                 MapSource::GeoJson(g) => {
                     for f in &g.features {
                         let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
                         let Some((rank, score)) = hit(f.geom, &dots, target, true) else { continue };
-                        let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props };
+                        let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
                         let by = self.layers.iter().rposition(|e| {
                             matches!(e, Entry::Style(l) if l.source.as_deref() == Some(sid.as_str()) && l.shown_at(cam.zoom) && resolve(l, &c, cam.zoom, bg).is_some())
                         });
                         let lonlat = f.parts.iter().map(|p| p.iter().map(|&(x, y)| to_lonlat(x, y)).collect()).collect();
-                        push(f.geom, rank, score, lonlat, source.clone(), &f.props, None, by);
+                        push(f.geom, rank, score, lonlat, source.clone(), &f.props, None, by, feature_id(env.promote, &f.id, &f.props));
                     }
                 }
                 MapSource::Raster(_) => {}
@@ -1113,7 +1226,7 @@ impl Map {
     fn background(&self, zoom: f64) -> Option<Rgba> {
         self.layers.iter().rev().find_map(|e| match e {
             Entry::Style(l) if l.kind == Kind::Background && l.shown_at(zoom) => {
-                let c = Ctx { zoom, geom: GeomType::Unknown, props: &[] };
+                let c = Ctx { zoom, geom: GeomType::Unknown, props: &[], state: &[] };
                 l.paint_expr("background-color").and_then(|e| e.eval(&c).as_color())
             }
             _ => None,
@@ -1129,7 +1242,7 @@ fn style_tile(layers: &[Entry], source: &str, features: &[store::Feature], zoom:
     }
     let bg = layers.iter().rev().find_map(|e| match e {
         Entry::Style(l) if l.kind == Kind::Background && l.shown_at(zoom) => {
-            l.paint_expr("background-color").and_then(|e| e.eval(&Ctx { zoom, geom: GeomType::Unknown, props: &[] }).as_color())
+            l.paint_expr("background-color").and_then(|e| e.eval(&Ctx { zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_color())
         }
         _ => None,
     });
@@ -1139,14 +1252,14 @@ fn style_tile(layers: &[Entry], source: &str, features: &[store::Feature], zoom:
         if l.source.as_deref() != Some(source) {
             continue;
         }
-        // Layers whose style depends on the zoom are evaluated when drawn.
-        if l.uses_zoom() {
+        // Layers whose style depends on the zoom or feature state are evaluated when drawn.
+        if l.uses_zoom() || l.uses_state() {
             continue;
         }
         let Some(fs) = l.source_layer.as_deref().and_then(|s| by_layer.get(s)) else { continue };
         for &fi in fs {
             let f = &features[fi];
-            if let Some(paint) = resolve(l, &Ctx { zoom, geom: f.geom, props: &f.props }, zoom, bg) {
+            if let Some(paint) = resolve(l, &Ctx { zoom, geom: f.geom, props: &f.props, state: &[] }, zoom, bg) {
                 items.push(Item { layer: li as u16, feature: fi as u32, paint });
             }
         }
@@ -1179,7 +1292,7 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
     {
         return None;
     }
-    let cp = Ctx { zoom: paint_zoom, geom: c.geom, props: c.props };
+    let cp = Ctx { zoom: paint_zoom, geom: c.geom, props: c.props, state: c.state };
     let color = |prop: &str, opacity: &str, default: Option<Rgba>| -> Option<Color> {
         let rgba = l.paint_expr(prop).and_then(|e| e.eval(&cp).as_color()).or(default)?;
         let o = l.paint_expr(opacity).and_then(|e| e.eval(&cp).as_num()).unwrap_or(1.0);
@@ -1386,6 +1499,18 @@ fn along(part: &[(f64, f64)], spacing: f64) -> Vec<(f64, f64)> {
     out
 }
 
+/// An expression value as JSON.
+fn val_json(v: &Val) -> Json {
+    match v {
+        Val::Null => Json::Null,
+        Val::Bool(b) => Json::Bool(*b),
+        Val::Num(n) => serde_json::Number::from_f64(*n).map_or(Json::Null, Json::Number),
+        Val::Str(s) => Json::String(s.clone()),
+        Val::Color(c) => Json::String(Val::Color(*c).to_text()),
+        Val::Array(a) => Json::Array(a.iter().map(val_json).collect()),
+    }
+}
+
 /// Draws a [`Map`] with a camera. Make one with [`Map::view`].
 pub struct MapView<'a> {
     pub map: &'a Map,
@@ -1420,8 +1545,8 @@ impl Widget for MapView<'_> {
                     continue;
                 }
                 if l.kind == Kind::Background {
-                    if let Some(c) = l.paint_expr("background-color").and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[] }).as_color())
-                        && let Some(c) = term_color(c, l.paint_expr("background-opacity").and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[] }).as_num()).unwrap_or(1.0), None)
+                    if let Some(c) = l.paint_expr("background-color").and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_color())
+                        && let Some(c) = term_color(c, l.paint_expr("background-opacity").and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_num()).unwrap_or(1.0), None)
                     {
                         let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
                         ctx.fill_dots(&[vec![(0.0, 0.0), (w, 0.0), (w, h), (0.0, h), (0.0, 0.0)]], c);
@@ -1429,11 +1554,12 @@ impl Widget for MapView<'_> {
                     continue;
                 }
                 let Some(sid) = l.source.as_deref() else { continue };
+                let env = map.state_env(sid);
                 match map.source(sid) {
                     Some(MapSource::Vector(_)) => {
                         for ((z, tx, ty), tile) in tiles.get(sid).into_iter().flatten() {
                             let n = (1u64 << z) as f64;
-                            for it in tile.layer_items(i, l, cam.zoom, bg).iter() {
+                            for it in tile.layer_items(i, l, cam.zoom, bg, env).iter() {
                                 let f = &tile.features[it.feature as usize];
                                 let dots: Vec<Vec<(f64, f64)>> = f
                                     .parts
@@ -1449,7 +1575,8 @@ impl Widget for MapView<'_> {
                             if !ctx.visible(f.bbox) {
                                 continue;
                             }
-                            let Some(r) = resolve(l, &Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props }, cam.zoom, bg) else { continue };
+                            let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
+                            let Some(r) = resolve(l, &c, cam.zoom, bg) else { continue };
                             let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
                             draw_resolved(ctx, &r, f.geom, &dots);
                         }
@@ -1459,7 +1586,7 @@ impl Widget for MapView<'_> {
                         // own background color isn't known); nearly transparent isn't drawn.
                         let opacity = l
                             .paint_expr("raster-opacity")
-                            .and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[] }).as_num())
+                            .and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_num())
                             .unwrap_or(1.0)
                             .clamp(0.0, 1.0);
                         if opacity <= 0.05 {
@@ -1958,5 +2085,37 @@ mod tests {
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(100, 50, 0));
         map.set_paint("img", "raster-opacity", &json!(0.0)).unwrap();
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(0, 0, 0), "invisible: the background shows");
+    }
+
+    #[test]
+    fn feature_state_by_id_and_promote_id() {
+        // A vector tile feature with id 42, styled by its state.
+        let mvt = crate::mvt::tests_support::square_tile_with_id("water", 4096, Some(42));
+        let mut map = Map::new();
+        map.add_source("v", MapSource::vector_tiles(0, 14)).unwrap();
+        map.add_layer(StyleLayer::fill("water", "v").source_layer("water")
+            .color(json!(["case", ["boolean", ["feature-state", "picked"], false], "#ff0000", "#0000ff"]))).unwrap();
+        map.insert_tile("v", (0, 0, 0), Some(&mvt)).unwrap();
+        let (cam, area) = (Camera::new(0.0, 0.0, 0.0), Rect::new(0, 0, 40, 20));
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(0, 0, 255));
+        let id = crate::mvt::Value::Num(42.0);
+        map.set_feature_state("v", &id, &json!({"picked": true})).unwrap();
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(255, 0, 0), "restyled when the state changes");
+        assert_eq!(map.feature_state("v", &id), json!({"picked": true}));
+        assert_eq!(map.query_rendered_features(&cam, area, (40.0, 40.0), None)[0].id, Some(id.clone()));
+        map.remove_feature_state("v", Some(&id), Some("picked"));
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(0, 0, 255));
+        assert!(map.set_feature_state("nope", &id, &json!({})).is_err());
+
+        // GeoJSON without ids, using a property instead (promoteId).
+        let mut map = Map::new();
+        map.add_source("g", MapSource::geojson(&json!({"type": "Feature", "properties": {"code": "DC"},
+            "geometry": {"type": "Polygon", "coordinates": [[[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]]]}})).unwrap()
+            .with_promote_id("code")).unwrap();
+        map.add_layer(StyleLayer::fill("g", "g").color(json!(["case", ["boolean", ["feature-state", "on"], false], "#00ff00", "#000000"]))).unwrap();
+        let cam = Camera::new(0.0, 0.0, 6.0);
+        map.set_feature_state("g", &crate::mvt::Value::Str("DC".into()), &json!({"on": true})).unwrap();
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(0, 255, 0));
+        assert_eq!(map.query_features(&cam, area, (40.0, 40.0))[0].id, Some(crate::mvt::Value::Str("DC".into())));
     }
 }

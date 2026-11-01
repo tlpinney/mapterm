@@ -29,6 +29,8 @@ pub const PALETTE: [Color; 8] = [
 
 #[derive(Clone, Debug)]
 pub struct Feature {
+    /// The feature's `id` (also kept in `props` for inspecting).
+    pub id: Option<Value>,
     pub geom: GeomType,
     /// Parts in Web Mercator world coordinates 0..1 (points, lines, or polygon rings).
     pub parts: Vec<Vec<(f64, f64)>>,
@@ -135,7 +137,7 @@ pub fn features(doc: &Json) -> Result<(Vec<Feature>, [f64; 4])> {
             }
         }
         Some("Feature") => add_feature(doc, &mut features),
-        Some(_) => add_geometry(doc, Vec::new(), None, &mut features),
+        Some(_) => add_geometry(doc, None, Vec::new(), None, &mut features),
         None => bail!("not GeoJSON: no \"type\""),
     }
     let mut bbox = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
@@ -168,7 +170,8 @@ fn add_feature(f: &Json, out: &mut Vec<Feature>) {
     let label = ["name", "title", "label", "NAME", "Name"]
         .iter()
         .find_map(|k| f["properties"][*k].as_str().filter(|s| !s.is_empty()).map(str::to_string));
-    add_geometry(&f["geometry"], props, label, out);
+    let id = f.get("id").and_then(to_value);
+    add_geometry(&f["geometry"], id, props, label, out);
 }
 
 /// One position -> world coordinates, rejecting anything that isn't a finite lon/lat.
@@ -181,7 +184,7 @@ fn line(v: &Json) -> Vec<(f64, f64)> {
     v.as_array().into_iter().flatten().filter_map(pos).collect()
 }
 
-fn add_geometry(g: &Json, props: Vec<(String, Value)>, label: Option<String>, out: &mut Vec<Feature>) {
+fn add_geometry(g: &Json, id: Option<Value>, props: Vec<(String, Value)>, label: Option<String>, out: &mut Vec<Feature>) {
     let c = &g["coordinates"];
     let (geom, parts): (GeomType, Vec<Vec<(f64, f64)>>) = match g["type"].as_str() {
         Some("Point") => (GeomType::Point, pos(c).map(|p| vec![vec![p]]).unwrap_or_default()),
@@ -194,7 +197,7 @@ fn add_geometry(g: &Json, props: Vec<(String, Value)>, label: Option<String>, ou
         }
         Some("GeometryCollection") => {
             for sub in g["geometries"].as_array().into_iter().flatten() {
-                add_geometry(sub, props.clone(), label.clone(), out);
+                add_geometry(sub, id.clone(), props.clone(), label.clone(), out);
             }
             return;
         }
@@ -208,7 +211,7 @@ fn add_geometry(g: &Json, props: Vec<(String, Value)>, label: Option<String>, ou
     for &(x, y) in parts.iter().flatten() {
         bbox = [bbox[0].min(x), bbox[1].min(y), bbox[2].max(x), bbox[3].max(y)];
     }
-    out.push(Feature { geom, parts, bbox, props, label });
+    out.push(Feature { id, geom, parts, bbox, props, label });
 }
 
 /// The camera (lon, lat, zoom) that fits lon/lat bounds into a map of `cols` x `rows` cells.

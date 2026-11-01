@@ -269,6 +269,12 @@ impl StyleLayer {
             || self.paint.iter().chain(&self.layout).any(|(k, e)| !matches!(k.as_str(), "line-width" | "line-dasharray") && e.uses_zoom())
     }
 
+    /// Whether a paint property reads feature state (so the layer is re-evaluated when the
+    /// app changes it).
+    pub fn uses_state(&self) -> bool {
+        self.paint.iter().any(|(_, e)| e.uses_state())
+    }
+
     /// Whether the layer draws at this zoom.
     pub fn shown_at(&self, zoom: f64) -> bool {
         self.visible && zoom >= self.min_zoom && zoom < self.max_zoom

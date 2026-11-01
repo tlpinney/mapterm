@@ -8,6 +8,7 @@
 //!   ordered list of [`spec::StyleLayer`]s whose paint and filters are [`expr`] expressions,
 //!   plus [`CustomLayer`]s for anything else. [`Map::view`] draws it and
 //!   [`Map::query_rendered_features`] says what's under a spot.
+//! - [`events`] layer events (click, enter, leave) and hover highlights with feature state.
 //! - [`layer`] custom layers: draw anything through a [`DrawContext`]; [`Markers`] is one.
 //! - [`interact::Controller`] MapLibre-style interaction: wheel zoom, drag with inertia,
 //!   double-click and box zoom, eased keyboard moves, and click reporting for inspection.
@@ -21,6 +22,7 @@
 //! - [`smooth`] opt-in pixel smooth vertical panning for the Ghostty smooth-scroll fork.
 
 pub mod export;
+pub mod events;
 pub mod expr;
 pub mod geocode;
 pub mod geojson;

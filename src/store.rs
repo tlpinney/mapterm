@@ -14,6 +14,8 @@ pub type Parts = Arc<Vec<Vec<[f32; 2]>>>;
 /// Everything a tile says about one feature, kept for inspection: drawn or not.
 pub struct Feature {
     pub layer: Arc<str>,
+    /// The tile's id for the feature, if any.
+    pub id: Option<Value>,
     pub geom: GeomType,
     /// Properties, with the identifying ones (name, class, kind, ...) first.
     pub props: Vec<(String, Value)>,
@@ -46,7 +48,8 @@ pub fn decode_features(bytes: &[u8]) -> Result<Vec<Feature>> {
             let parts: Parts = Arc::new(
                 f.geometry.iter().map(|p| p.iter().map(|[x, y]| [*x as f32 / ext, *y as f32 / ext]).collect()).collect(),
             );
-            features.push(Feature { layer: name.clone(), geom: f.geom_type, props: ordered_props(f), parts, drawn: false });
+            let id = f.id.map(|v| Value::Num(v as f64));
+            features.push(Feature { layer: name.clone(), id, geom: f.geom_type, props: ordered_props(f), parts, drawn: false });
         }
     }
     Ok(features)

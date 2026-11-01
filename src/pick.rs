@@ -40,6 +40,8 @@ pub struct Pick {
     pub source: Option<Arc<str>>,
     /// The style (or custom) layer that drew it, for [`crate::Map::query_rendered_features`].
     pub style_layer: Option<Arc<str>>,
+    /// The feature's id (or the source's `promoteId` property), the key for feature state.
+    pub id: Option<Value>,
     pub stats: Stats,
 }
 
@@ -76,6 +78,9 @@ impl Pick {
         }
         if let Some(src) = &self.source {
             m.insert("_source".into(), src.to_string().into());
+        }
+        if let Some(id) = &self.id {
+            m.insert("_id".into(), id.to_string().into());
         }
         if let Some(t) = self.tile {
             m.insert("_tile".into(), format!("{}/{}/{}", t.0, t.1, t.2).into());

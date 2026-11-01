@@ -210,6 +210,8 @@ pub struct Controller {
     anim: Option<Anim>,
     last_click: Option<(Instant, (f64, f64))>,
     click: Option<Click>,
+    /// Where the pointer last was over the map, in braille dots relative to the map area.
+    pointer: Option<(f64, f64)>,
 }
 
 impl Controller {
@@ -226,6 +228,7 @@ impl Controller {
             anim: None,
             last_click: None,
             click: None,
+            pointer: None,
         }
     }
 
@@ -241,6 +244,13 @@ impl Controller {
     /// Stop any running animation (new input interrupts it, as in MapLibre).
     pub fn stop(&mut self) {
         self.anim = None;
+    }
+
+    /// Where the pointer is over the map, in braille dots relative to the map area (2 per
+    /// column, 4 per row), or `None` when it's elsewhere. For hover effects with
+    /// [`crate::events::Events`].
+    pub fn pointer(&self) -> Option<(f64, f64)> {
+        self.pointer
     }
 
     /// The last single click, once.
@@ -398,6 +408,11 @@ impl Controller {
         let px = self.px_of(&m);
         let cell = self.cell_of(px);
         let inside = self.area.contains(Position::new(cell.0, cell.1));
+        // Remember the pointer for hover (exact with pixel reports, else the cell's middle).
+        self.pointer = inside.then(|| {
+            let d = self.px_to_dots(px);
+            (d.0 - self.area.x as f64 * 2.0, d.1 - self.area.y as f64 * 4.0)
+        });
         let shift = m.modifiers.contains(KeyModifiers::SHIFT);
         let now = Instant::now();
         match m.kind {

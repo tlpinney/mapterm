@@ -34,7 +34,7 @@ fn shield_text_tidies_refs() {
         if !network.is_empty() {
             props.push(("network".to_string(), Value::Str(network.into())));
         }
-        match e.eval(&Ctx { zoom: 12.0, geom: GeomType::Line, props: &props }) {
+        match e.eval(&Ctx { zoom: 12.0, geom: GeomType::Line, props: &props, state: &[] }) {
             Val::Str(s) => s,
             v => panic!("{v:?}"),
         }

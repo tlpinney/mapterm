@@ -197,11 +197,13 @@ impl Val {
     }
 }
 
-/// What an expression is evaluated against: one feature at one zoom.
+/// What an expression is evaluated against: one feature at one zoom, with its feature state
+/// (see [`crate::Map::set_feature_state`]).
 pub struct Ctx<'a> {
     pub zoom: f64,
     pub geom: GeomType,
     pub props: &'a [(String, Value)],
+    pub state: &'a [(String, Val)],
 }
 
 impl Ctx<'_> {
@@ -275,6 +277,8 @@ pub enum Expr {
     /// `["slice", input, start, end?]`: characters (or array items) from start to end.
     Slice(Vec<Expr>),
     Assert(Assert, Vec<Expr>),
+    /// `["feature-state", key]`: a value the app set on the feature.
+    FeatureState(String),
     /// A legacy `"{name}"` text template.
     Template(Vec<Part>),
 }
@@ -437,6 +441,10 @@ impl Expr {
                 _ => bail!("!has: expected a property name"),
             },
             "zoom" => Expr::Zoom,
+            "feature-state" => match a {
+                [Json::String(k)] => Expr::FeatureState(k.clone()),
+                _ => bail!("feature-state: only [\"feature-state\", \"key\"] is supported"),
+            },
             "geometry-type" => Expr::GeomType,
             "==" => cmp(Cmp::Eq)?,
             "!=" => cmp(Cmp::Ne)?,
@@ -538,7 +546,7 @@ impl Expr {
     pub fn is_constant(&self) -> bool {
         match self {
             Expr::Lit(_) => true,
-            Expr::Get(_) | Expr::Has(_) | Expr::Zoom | Expr::GeomType | Expr::Template(_) => false,
+            Expr::Get(_) | Expr::Has(_) | Expr::Zoom | Expr::GeomType | Expr::Template(_) | Expr::FeatureState(_) => false,
             Expr::Cmp(_, a, b) | Expr::In(a, b) => a.is_constant() && b.is_constant(),
             Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) | Expr::TypeOf(a) => a.is_constant(),
             Expr::InList(a, _) => a.is_constant(),
@@ -554,20 +562,30 @@ impl Expr {
 
     /// Whether the value can change with the zoom level.
     pub fn uses_zoom(&self) -> bool {
+        self.any(&|e| matches!(e, Expr::Zoom))
+    }
+
+    /// Whether the value reads feature state.
+    pub fn uses_state(&self) -> bool {
+        self.any(&|e| matches!(e, Expr::FeatureState(_)))
+    }
+
+    /// Whether this expression or any inside it matches.
+    fn any(&self, f: &dyn Fn(&Expr) -> bool) -> bool {
+        if f(self) {
+            return true;
+        }
         match self {
-            Expr::Zoom => true,
-            Expr::Lit(_) | Expr::Get(_) | Expr::Has(_) | Expr::GeomType | Expr::Template(_) => false,
-            Expr::Cmp(_, a, b) | Expr::In(a, b) => a.uses_zoom() || b.uses_zoom(),
-            Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) | Expr::TypeOf(a) | Expr::InList(a, _) => {
-                a.uses_zoom()
-            }
+            Expr::Lit(_) | Expr::Get(_) | Expr::Has(_) | Expr::Zoom | Expr::GeomType | Expr::Template(_) | Expr::FeatureState(_) => false,
+            Expr::Cmp(_, a, b) | Expr::In(a, b) => a.any(f) || b.any(f),
+            Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) | Expr::TypeOf(a) | Expr::InList(a, _) => a.any(f),
             Expr::All(v) | Expr::Any(v) | Expr::Coalesce(v) | Expr::Math(_, v) | Expr::Concat(v) | Expr::ToNum(v) | Expr::ToColor(v) | Expr::Assert(_, v) | Expr::IndexOf(v) | Expr::Slice(v) => {
-                v.iter().any(Expr::uses_zoom)
+                v.iter().any(|e| e.any(f))
             }
-            Expr::Match { input, arms, default } => input.uses_zoom() || default.uses_zoom() || arms.iter().any(|(_, e)| e.uses_zoom()),
-            Expr::Case { arms, default } => default.uses_zoom() || arms.iter().any(|(c, e)| c.uses_zoom() || e.uses_zoom()),
-            Expr::Interpolate { input, stops, .. } => input.uses_zoom() || stops.iter().any(|(_, e)| e.uses_zoom()),
-            Expr::Step { input, default, stops } => input.uses_zoom() || default.uses_zoom() || stops.iter().any(|(_, e)| e.uses_zoom()),
+            Expr::Match { input, arms, default } => input.any(f) || default.any(f) || arms.iter().any(|(_, e)| e.any(f)),
+            Expr::Case { arms, default } => default.any(f) || arms.iter().any(|(c, e)| c.any(f) || e.any(f)),
+            Expr::Interpolate { input, stops, .. } => input.any(f) || stops.iter().any(|(_, e)| e.any(f)),
+            Expr::Step { input, default, stops } => input.any(f) || default.any(f) || stops.iter().any(|(_, e)| e.any(f)),
         }
     }
 
@@ -576,6 +594,7 @@ impl Expr {
             Expr::Lit(v) => v.clone(),
             Expr::Get(k) => c.prop(k).map_or(Val::Null, Val::from_prop),
             Expr::Has(k) => Val::Bool(c.prop(k).is_some()),
+            Expr::FeatureState(k) => c.state.iter().find(|(key, _)| key == k).map_or(Val::Null, |(_, v)| v.clone()),
             Expr::Zoom => Val::Num(c.zoom),
             Expr::GeomType => Val::Str(
                 match c.geom {
@@ -778,7 +797,7 @@ mod tests {
     }
 
     fn eval(e: Json, z: f64, geom: GeomType, p: &[(String, Value)]) -> Val {
-        Expr::parse(&e).unwrap().eval(&Ctx { zoom: z, geom, props: p })
+        Expr::parse(&e).unwrap().eval(&Ctx { zoom: z, geom, props: p, state: &[] })
     }
 
     #[test]
@@ -858,10 +877,15 @@ mod tests {
     fn text_templates() {
         let p = props(&[("name", Value::Str("Georgetown".into())), ("ref", Value::Num(7.0))]);
         let e = Expr::parse_text(&json!("{name} ({ref}) {missing}")).unwrap();
-        assert_eq!(e.eval(&Ctx { zoom: 0.0, geom: GeomType::Point, props: &p }), Val::Str("Georgetown (7) ".into()));
+        assert_eq!(e.eval(&Ctx { zoom: 0.0, geom: GeomType::Point, props: &p, state: &[] }), Val::Str("Georgetown (7) ".into()));
         assert_eq!(Expr::parse_text(&json!("plain")).unwrap(), Expr::Lit(Val::Str("plain".into())));
         assert!(!Expr::parse(&json!(["get", "name"])).unwrap().is_constant());
         assert!(Expr::parse(&json!(["concat", "a", "b"])).unwrap().is_constant());
+        let st = vec![("hover".to_string(), Val::Bool(true))];
+        let fs = Expr::parse(&json!(["case", ["boolean", ["feature-state", "hover"], false], "on", "off"])).unwrap();
+        assert!(fs.uses_state() && !fs.is_constant());
+        assert_eq!(fs.eval(&Ctx { zoom: 0.0, geom: GeomType::Point, props: &p, state: &st }), Val::Str("on".into()));
+        assert_eq!(fs.eval(&Ctx { zoom: 0.0, geom: GeomType::Point, props: &p, state: &[] }), Val::Str("off".into()));
         assert!(Expr::parse(&json!(["interpolate", ["linear"], ["zoom"], 5, 1, 10, 2])).unwrap().uses_zoom());
         assert!(Expr::parse(&json!({"stops": [[5, "#000"], [10, "#fff"]]})).unwrap().uses_zoom());
         assert!(Expr::parse(&json!(["all", ["==", "class", "x"], [">=", ["zoom"], 14]])).unwrap().uses_zoom());

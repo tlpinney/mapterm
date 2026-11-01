@@ -50,6 +50,8 @@ pub enum GeomType {
 
 #[derive(Clone, Debug)]
 pub struct Feature {
+    /// The feature's id, when the tile gives one.
+    pub id: Option<u64>,
     pub geom_type: GeomType,
     pub props: HashMap<String, Value>,
     /// Parts (points, lines or rings) in tile coordinates, 0..extent.
@@ -139,8 +141,10 @@ fn feature(b: &[u8], keys: &[String], values: &[Value]) -> Result<Feature> {
     let mut tags = Vec::new();
     let mut geom_type = GeomType::Unknown;
     let mut cmds = Vec::new();
+    let mut id = None;
     while !r.done() {
         match r.key()? {
+            (1, 0) => id = Some(r.varint()?),
             (2, 2) => tags = packed_u32(r.bytes()?)?,
             (3, 0) => {
                 geom_type = match r.varint()? {
@@ -160,7 +164,7 @@ fn feature(b: &[u8], keys: &[String], values: &[Value]) -> Result<Feature> {
             props.insert(k.clone(), v.clone());
         }
     }
-    Ok(Feature { geom_type, props, geometry: geometry(&cmds) })
+    Ok(Feature { id, geom_type, props, geometry: geometry(&cmds) })
 }
 
 fn geometry(cmds: &[u32]) -> Vec<Vec<[i32; 2]>> {
@@ -221,6 +225,14 @@ mod tests {
     }
 
     #[test]
+    fn feature_ids() {
+        let t = decode(&tests_support::square_tile_with_id("water", 4096, Some(42))).unwrap();
+        assert_eq!(t.layers[0].features[0].id, Some(42));
+        let t = decode(&tests_support::square_tile("water", 4096)).unwrap();
+        assert_eq!(t.layers[0].features[0].id, None);
+    }
+
+    #[test]
     fn garbage_does_not_panic() {
         for seed in 0u32..200 {
             let bytes: Vec<u8> = (0..64).map(|i| (seed.wrapping_mul(2654435761).wrapping_add(i * 97) >> 7) as u8).collect();
@@ -252,6 +264,11 @@ pub(crate) mod tests_support {
 
     /// One tile with one layer holding one polygon feature that covers the whole tile.
     pub fn square_tile(layer: &str, extent: u32) -> Vec<u8> {
+        square_tile_with_id(layer, extent, None)
+    }
+
+    /// Like [`square_tile`], with a feature id.
+    pub fn square_tile_with_id(layer: &str, extent: u32, id: Option<u64>) -> Vec<u8> {
         let e = extent as i32;
         let cmds: Vec<u32> = vec![9, zz(0), zz(0), 26, zz(e), zz(0), zz(0), zz(e), zz(-e), zz(0), 15];
         let mut geom = Vec::new();
@@ -259,6 +276,10 @@ pub(crate) mod tests_support {
             varint(&mut geom, c as u64);
         }
         let mut feat = Vec::new();
+        if let Some(id) = id {
+            varint(&mut feat, 1 << 3);
+            varint(&mut feat, id);
+        }
         varint(&mut feat, 3 << 3); // type
         varint(&mut feat, 3); // polygon
         field_bytes(&mut feat, 4, &geom);

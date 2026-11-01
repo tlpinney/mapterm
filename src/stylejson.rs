@@ -92,7 +92,11 @@ impl Map {
             match s["type"].as_str() {
                 Some("vector") => {
                     let src = open_vector(s).await.with_context(|| format!("source \"{id}\""))?;
-                    map.add_source(id, MapSource::Vector(src))?;
+                    let mut src = MapSource::Vector(src);
+                    if let Some(p) = s["promoteId"].as_str() {
+                        src = src.with_promote_id(p);
+                    }
+                    map.add_source(id, src)?;
                 }
                 Some("geojson") => {
                     let data = match &s["data"] {
@@ -103,7 +107,11 @@ impl Map {
                         }
                         d => d.clone(),
                     };
-                    map.add_source(id, MapSource::geojson(&data).with_context(|| format!("source \"{id}\""))?)?;
+                    let mut src = MapSource::geojson(&data).with_context(|| format!("source \"{id}\""))?;
+                    if let Some(p) = s["promoteId"].as_str() {
+                        src = src.with_promote_id(p);
+                    }
+                    map.add_source(id, src)?;
                 }
                 Some("raster") => match open_raster(s).await {
                     Ok(r) => map.add_source(id, MapSource::raster(std::sync::Arc::new(r)))?,

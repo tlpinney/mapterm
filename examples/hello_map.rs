@@ -1,20 +1,20 @@
 //! A map in your terminal in about 50 lines: OpenFreeMap vector tiles drawn by a few style
-//! layers, a GeoJSON pin, and MapLibre-style pan and zoom (drag, scroll, double-click, arrows,
-//! +/-). Click a feature to see what it is. `q` quits.
+//! layers, a GeoJSON pin that lights up under the pointer, and MapLibre-style pan and zoom
+//! (drag, scroll, double-click, arrows, +/-). Click the pin or a place name. `q` quits.
 //!
 //!     cargo run --release --example hello_map
 
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode};
-use mapterm::{Camera, Controller, Map, MapSource, Source, StyleLayer};
+use mapterm::{Camera, Controller, Map, MapSource, Source, StyleLayer, events::{Events, MapEvent}};
 use serde_json::json;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut map = Map::new();
     map.add_source("omt", MapSource::vector(Source::open(mapterm::source::OPENFREEMAP).await?))?;
-    map.add_source("pin", MapSource::geojson(&json!({"type": "Feature", "properties": {"name": "Washington Monument"},
+    map.add_source("pin", MapSource::geojson(&json!({"type": "Feature", "id": 1, "properties": {"name": "Washington Monument"},
         "geometry": {"type": "Point", "coordinates": [-77.0353, 38.8895]}}))?)?;
     map.add_layer(StyleLayer::background("bg").color("#101418"))?;
     map.add_layer(StyleLayer::fill("park", "omt").source_layer("park").color("#1a3220"))?;
@@ -23,7 +23,9 @@ async fn main() -> anyhow::Result<()> {
         ["match", ["get", "class"], "motorway", "#eb6e3c", "trunk", "#e1a046", "primary", "#d2c36e", "#5a5a5a"])))?;
     map.add_layer(StyleLayer::symbol("places", "omt").source_layer("place").text(json!(["get", "name"]))
         .sort_key(json!(["get", "rank"])).color("#e1e1e1"))?;
-    map.add_layer(StyleLayer::symbol("pin", "pin").glyph("◆").text("{name}").color("cyan"))?;
+    map.add_layer(StyleLayer::symbol("pin", "pin").glyph("◆").text("{name}")
+        .color(json!(["case", ["boolean", ["feature-state", "hover"], false], "yellow", "cyan"])))?;
+    let mut events = Events::new(&["pin", "places"]).hover_state("hover");
 
     let mut ctl = Controller::new(Camera::new(-77.0353, 38.8895, 13.0), 0.0, 17.0);
     let mut status = String::new();
@@ -38,10 +40,13 @@ async fn main() -> anyhow::Result<()> {
             f.render_widget(map.view(&ctl.cam), area);
             f.render_widget(ratatui::text::Line::from(status.as_str()), area);
         })?;
+        events.pointer(&mut map, &ctl.cam, area, ctl.pointer()); // hover: the pin turns yellow
         if let Some(click) = ctl.take_click() {
-            let dot = ((click.col - area.x) as f64 * 2.0 + 1.0, (click.row - area.y) as f64 * 4.0 + 2.0);
-            let hits = map.query_rendered_features(&ctl.cam, area, dot, None);
-            status = hits.first().map(|p| format!("{}: {}", p.style_layer.as_deref().unwrap_or("?"), p.title())).unwrap_or_default();
+            for e in events.click(&map, &ctl.cam, area, &click) {
+                if let MapEvent::Click { layer, features, .. } = e {
+                    status = format!("{layer}: {}", features[0].title());
+                }
+            }
         }
         if event::poll(Duration::from_millis(if ctl.animating() { 16 } else { 250 }))? {
             match event::read()? {
