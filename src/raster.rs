@@ -236,7 +236,7 @@ pub fn yesterday_utc() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// Find a provider's key: a command's output (e.g. `pass show vantor/api-key`) if given,
+/// Find a provider's key: a command's output (e.g. a password manager's CLI) if given,
 /// else the first of `env` that is set.
 pub fn find_key(key_cmd: Option<&str>, env: &[&str]) -> Result<Option<String>> {
     if let Some(cmd) = key_cmd {
@@ -303,7 +303,7 @@ impl RasterSource {
     pub fn from_preset(p: &Preset, key: Option<String>) -> Result<Self> {
         if !p.key_env.is_empty() && key.is_none() {
             bail!(
-                "{} needs a key: set {} or pass --raster-key-cmd 'pass show <entry>'",
+                "{} needs a key: set {} or pass --raster-key-cmd with a command that prints it",
                 p.name,
                 p.key_env.join(" or ")
             );

@@ -48,7 +48,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 real images with kitty graphics (Ghostty, kitty, WezTerm, herdr), cell colors
                 elsewhere (MAPTERM_GRAPHICS=kitty|cells overrides)
   --raster-list           show the provider names and the keys they need
-  --raster-key-cmd CMD    print the API key with a command, e.g. 'pass show vantor/api-key'
+  --raster-key-cmd CMD    print the API key with a command, e.g. your password manager's
+                          CLI: 'security find-generic-password -s vantor -w' (macOS)
                           (otherwise the provider's variable, or MAPTERM_RASTER_KEY for URLs)
   --raster-header 'N: V'  extra request header; write the key as {key}, e.g.
                           'Authorization: Bearer {key}', so it stays out of ps and history
@@ -145,7 +146,7 @@ fn args() -> Result<Args> {
                     let key = if p.key_env.is_empty() { "no key".to_string() } else { format!("key: {}", p.key_env.join(" or ")) };
                     println!("  {:<11} {}\n              {key}", p.name, p.about);
                 }
-                println!("\nKeys can also come from --raster-key-cmd, e.g. 'pass show vantor/api-key'.");
+                println!("\nKeys can also come from --raster-key-cmd, a command that prints the key (e.g. a password manager's CLI).");
                 std::process::exit(0);
             }
             "--raster-attribution" => a.raster_attribution = Some(it.next().context("--raster-attribution TEXT")?),

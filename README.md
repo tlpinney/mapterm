@@ -121,10 +121,17 @@ imagery that works offline.
 | `maptiler` | MapTiler Satellite | `MAPTILER_KEY` |
 
 API keys never go on the command line: they come from the provider's
-environment variable or from a command, e.g.
-`mapterm --raster vantor --raster-key-cmd 'pass show vantor/api-key'`. They are
-only added to requests (Vantor's as the `maxar-api-key` header) and are blanked
-out of errors. Keyed providers don't cache tiles on disk unless you pass
+environment variable or from a command that prints the key, such as your password
+manager's CLI:
+
+```sh
+mapterm --raster vantor --raster-key-cmd 'security find-generic-password -s vantor -w'  # macOS Keychain
+mapterm --raster vantor --raster-key-cmd 'op read op://Private/Vantor/credential'      # 1Password
+mapterm --raster vantor --raster-key-cmd 'secret-tool lookup service vantor'           # Linux keyring
+```
+
+Keys are only added to requests (Vantor's as the `maxar-api-key` header) and are
+blanked out of errors. Keyed providers don't cache tiles on disk unless you pass
 `--raster-cache`, since commercial licenses often limit storing them. For any
 other service, use its URL with `{key}` where the key goes (filled from
 `MAPTERM_RASTER_KEY` or `--raster-key-cmd`), or for header-based keys
