@@ -383,6 +383,10 @@ pub struct MapWidget<'a> {
     pub min_zoom: u8,
     pub max_zoom: u8,
     pub overlays: &'a [Overlay],
+    /// Area fills (water, parks, buildings); turn off over a raster layer to keep it visible.
+    pub fills: bool,
+    /// Roads, rivers, boundaries.
+    pub lines: bool,
     pub labels: bool,
 }
 
@@ -425,11 +429,11 @@ impl Widget for MapWidget<'_> {
             let it = &t.items[ii];
             let to_dot = |p: &[f32; 2]| vp.dot((*tx as f64 + p[0] as f64) / n, (*ty as f64 + p[1] as f64) / n);
             match &it.paint {
-                Paint::Fill(c) => {
+                Paint::Fill(c) if self.fills => {
                     let rings: Vec<Vec<(f64, f64)>> = it.parts.iter().map(|r| r.iter().map(to_dot).collect()).collect();
                     cv.fill(&rings, *c);
                 }
-                Paint::Line(c) => {
+                Paint::Line(c) if self.lines => {
                     for part in it.parts.iter() {
                         let pts: Vec<(f64, f64)> = part.iter().map(to_dot).collect();
                         for s in pts.windows(2) {
@@ -452,7 +456,7 @@ impl Widget for MapWidget<'_> {
                         labels.push((*priority, text.clone(), st, *p));
                     }
                 }
-                Paint::Label { .. } => {}
+                _ => {}
             }
         }
 

@@ -28,19 +28,24 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
+usage: mapterm [SOURCE] [--raster URL [--tms]] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL
                 (default: OpenFreeMap planet)
   --at          start position (default: the source's center)
   -z            start zoom
+  --raster      a PNG/JPEG tile layer drawn under the vector map, e.g.
+                https://tile.openstreetmap.org/{z}/{x}/{y}.png ({-y} or --tms for TMS rows);
+                real images with kitty graphics (Ghostty, kitty, WezTerm, herdr), cell colors
+                elsewhere (MAPTERM_GRAPHICS=kitty|cells overrides)
+  --tms         count raster rows from the bottom (TMS) even with a plain {y}
   --light       light theme
   --snapshot    render one frame to stdout as text and exit
   --pick        with --snapshot: print the features under that cell as JSON lines instead
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · i inspect · n labels · t theme · q quit
+      +/- zoom · sideways swipe pans · i inspect · v vector overlay · n labels · t theme · q quit
 
 inspect mode (i): hover shows what's under the pointer; click lists every feature there
       (drawn or not) with its properties, size and location; click an entry or tab/shift+tab
@@ -57,6 +62,8 @@ struct Args {
     light: bool,
     snapshot: Option<(u16, u16)>,
     pick: Option<(u16, u16)>,
+    raster: Option<String>,
+    tms: bool,
     /// Experimental smooth scrolling, from MAPTERM_SMOOTH only (no flag): `1` pans the wheel
     /// smoothly, `shift` makes dragging pixel-exact (smooth protocol v3).
     smooth: bool,
@@ -70,7 +77,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, smooth, shift };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -81,6 +88,8 @@ fn args() -> Result<Args> {
             }
             "-z" | "--zoom" => a.zoom = Some(it.next().context("-z ZOOM")?.parse()?),
             "--light" => a.light = true,
+            "--raster" => a.raster = Some(it.next().context("--raster URL")?),
+            "--tms" => a.tms = true,
             "--snapshot" => {
                 let v = it.next().context("--snapshot COLSxROWS")?;
                 let (c, r) = v.split_once('x').context("--snapshot COLSxROWS")?;
@@ -103,6 +112,23 @@ fn args() -> Result<Args> {
 }
 
 type Done = (TileId, Result<Prepared>);
+type RasterDone = (TileId, Result<Option<mapterm::raster::RasterTile>>);
+
+fn fetch_raster(src: &Arc<mapterm::raster::RasterSource>, sem: &Arc<Semaphore>, id: TileId, tx: mpsc::UnboundedSender<RasterDone>) {
+    let (src, sem) = (src.clone(), sem.clone());
+    tokio::spawn(async move {
+        let _permit = sem.acquire_owned().await;
+        let res = match src.tile(id.0, id.1, id.2).await {
+            Ok(Some(bytes)) => tokio::task::spawn_blocking(move || mapterm::raster::decode(&bytes).map(Some))
+                .await
+                .map_err(Into::into)
+                .and_then(|r| r),
+            Ok(None) => Ok(None),
+            Err(e) => Err(e),
+        };
+        let _ = tx.send((id, res));
+    });
+}
 
 /// Copy text to the system clipboard with OSC 52 (Ghostty and most modern terminals; herdr
 /// relays it).
@@ -263,6 +289,16 @@ async fn main() -> Result<()> {
     let sem = Arc::new(Semaphore::new(6));
     let (tx, mut rx) = mpsc::unbounded_channel::<Done>();
     let mut store = TileStore::default();
+    // Optional raster layer under the vector map.
+    let raster = match &a.raster {
+        Some(u) => Some(Arc::new(mapterm::raster::RasterSource::new(u, a.tms, 19)?)),
+        None => None,
+    };
+    let mut rstore = mapterm::raster::RasterStore::default();
+    let mut rpending: HashSet<TileId> = HashSet::new();
+    let (rtx, mut rrx) = mpsc::unbounded_channel::<RasterDone>();
+    // Tile servers like OSM's ask for at most two connections.
+    let rsem = Arc::new(Semaphore::new(2));
 
     if let Some((w, h)) = a.snapshot {
         let area = Rect::new(0, 0, w, h);
@@ -285,7 +321,7 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         let mut buf = Buffer::empty(area);
-        MapWidget { store: &store, camera: &cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &[], labels: true }
+        MapWidget { store: &store, camera: &cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &[], fills: true, lines: true, labels: true }
             .render(area, &mut buf);
         for y in 0..h {
             let line: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
@@ -308,6 +344,12 @@ async fn main() -> Result<()> {
     let mut pending: HashSet<TileId> = HashSet::new();
     let mut errors = 0usize;
     let mut labels = true;
+    // Vector overlay: 0 = everything (no fills over a raster), 1 = labels only, 2 = off.
+    let mut vector: u8 = 0;
+    // Raster drawing: real images with kitty graphics, else cell background colors.
+    let kitty = raster.is_some() && mapterm::kitty::supported();
+    let mut sent: HashSet<u32> = HashSet::new();
+    let mut cpx = cell_px().unwrap_or((9.0, 20.0));
     let mut smooth_on = a.smooth;
     // `s` only toggles smooth scrolling when MAPTERM_SMOOTH opted in to the experiment.
     let smooth_available = a.smooth;
@@ -343,7 +385,9 @@ async fn main() -> Result<()> {
     let result: Result<()> = async {
         loop {
             ctl.tick(Instant::now());
-            if smooth_on {
+            // One synchronized update per frame when escape sequences follow the cells.
+            let sync = smooth_on || raster.is_some();
+            if sync {
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
             let t0 = Instant::now();
@@ -378,14 +422,34 @@ async fn main() -> Result<()> {
             if let (true, Some((lon, lat))) = (inspect && !picks.is_empty(), click_at) {
                 overlays.push(Overlay::Marker { lon, lat, glyph: "+".into(), style: TStyle::new().fg(Color::Rgb(255, 215, 0)), label: None, priority: 99 });
             }
+            // Raster zoom: about 2 screen pixels per source pixel as images (how browsers show
+            // 256 px tiles on Retina screens, and half the tiles of 1:1), one cell per
+            // source pixel as cell colors.
+            let rz = raster.as_ref().map(|r| {
+                let dots_per_px = if kitty { 2.0 / (cpx.0 / 2.0) } else { 2.0 };
+                mapterm::raster::raster_zoom(&draw_cam, 256, dots_per_px, r.max_zoom)
+            });
             term.draw(|f| {
                 let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
                 let panel_w = if inspect && !picks.is_empty() { 52.min(main.width / 2) } else { 0 };
                 let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
                 map_area = m;
                 panel_area = panel;
+                if let (false, Some(rz)) = (kitty, rz) {
+                    let blocks = mapterm::raster::layout(&rstore, &draw_cam, m, rz);
+                    f.render_widget(mapterm::raster::RasterCells { blocks: &blocks }, m);
+                }
                 f.render_widget(
-                    MapWidget { store: &store, camera: &draw_cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &overlays, labels },
+                    MapWidget {
+                        store: &store,
+                        camera: &draw_cam,
+                        min_zoom: src.min_zoom,
+                        max_zoom: src.max_zoom,
+                        overlays: &overlays,
+                        fills: raster.is_none() && vector == 0,
+                        lines: vector == 0,
+                        labels: labels && vector < 2,
+                    },
                     m,
                 );
                 list_rows = if panel_w > 0 { draw_inspector(f, panel, &picks, sel) } else { Vec::new() };
@@ -415,8 +479,8 @@ async fn main() -> Result<()> {
                 {
                     spans.push(Span::styled(format!("{n} "), TStyle::new().fg(Color::Green)));
                 }
-                if !pending.is_empty() {
-                    spans.push(Span::styled(format!("loading {} ", pending.len()), TStyle::new().fg(Color::Yellow)));
+                if !pending.is_empty() || !rpending.is_empty() {
+                    spans.push(Span::styled(format!("loading {} ", pending.len() + rpending.len()), TStyle::new().fg(Color::Yellow)));
                 }
                 if errors > 0 {
                     spans.push(Span::styled(format!("{errors} failed "), TStyle::new().fg(Color::Red)));
@@ -430,17 +494,41 @@ async fn main() -> Result<()> {
                     };
                     spans.push(Span::styled(tag, TStyle::new().fg(Color::Cyan)));
                 }
+                if let Some(r) = &raster {
+                    let mode = ["", "· labels ", "· raster only "][vector as usize];
+                    let how = if kitty { "" } else { "(cells) " };
+                    spans.push(Span::styled(format!("{} {how}{mode}", r.name), TStyle::new().fg(Color::LightBlue)));
+                }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
                 spans.push(Span::styled(format!("· {} · © OpenStreetMap · q quit", src.name), dim));
                 f.render_widget(Paragraph::new(Line::from(spans)), s);
             })?;
             ctl.set_area(map_area);
             frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
-            if smooth_on {
-                // Declare after drawing, in the same synchronized update as the cells.
+            if sync {
                 let mut out = std::io::stdout();
-                let decl = if shift_mode { smooth::declare_shift(0, map_area, ox, oy) } else { smooth::declare(0, map_area, &cam) };
-                out.write_all(decl.as_bytes())?;
+                if smooth_on {
+                    // Declare after drawing, in the same synchronized update as the cells.
+                    let decl = if shift_mode { smooth::declare_shift(0, map_area, ox, oy) } else { smooth::declare(0, map_area, &cam) };
+                    out.write_all(decl.as_bytes())?;
+                }
+                if let (true, Some(rz)) = (kitty, rz) {
+                    // Re-place the raster blocks under the text: images are sent once, then
+                    // each frame only moves placements.
+                    let mut cmds = String::from(mapterm::kitty::CLEAR_PLACEMENTS);
+                    for id in rstore.take_evicted() {
+                        if sent.remove(&id) {
+                            cmds.push_str(&mapterm::kitty::free(id));
+                        }
+                    }
+                    for (i, b) in mapterm::raster::layout(&rstore, &draw_cam, map_area, rz).iter().enumerate() {
+                        if sent.insert(b.tile.id) {
+                            cmds.push_str(&mapterm::kitty::transmit(b.tile.id, &b.tile.png));
+                        }
+                        cmds.push_str(&mapterm::kitty::place(b.tile.id, i as u32 + 1, b.cells.x, b.cells.y, b.src, b.cells.width, b.cells.height));
+                    }
+                    out.write_all(cmds.as_bytes())?;
+                }
                 crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;
             }
 
@@ -452,9 +540,34 @@ async fn main() -> Result<()> {
                 }
             }
 
+            if let (Some(r), Some(rz)) = (&raster, rz) {
+                for id in mapterm::raster::tiles_for(&draw_cam, map_area, rz) {
+                    if !rstore.contains(&id) && rpending.insert(id) {
+                        fetch_raster(r, &rsem, id, rtx.clone());
+                    }
+                }
+            }
+
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
             let idle = if ctl.animating() { Duration::from_millis(16) } else { Duration::from_millis(500) };
             tokio::select! {
+                Some(first) = rrx.recv() => {
+                    let mut batch = vec![first];
+                    while let Ok(d) = rrx.try_recv() {
+                        batch.push(d);
+                    }
+                    for (id, r) in batch {
+                        rpending.remove(&id);
+                        match r {
+                            Ok(t) => rstore.insert(id, t),
+                            Err(_) => {
+                                // Remember the failure so the tile isn't fetched again and again.
+                                errors += 1;
+                                rstore.insert(id, None);
+                            }
+                        }
+                    }
+                }
                 Some(done) = rx.recv() => {
                     let mut batch = vec![done];
                     while let Ok(d) = rx.try_recv() {
@@ -522,6 +635,7 @@ async fn main() -> Result<()> {
                                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
                                     KeyCode::Char('n') => labels = !labels,
+                                    KeyCode::Char('v') => vector = (vector + 1) % 3,
                                     KeyCode::Char('s') if smooth_available => {
                                         smooth_on = !smooth_on;
                                         apply_smooth(&mut ctl, smooth_on)?;
@@ -543,7 +657,12 @@ async fn main() -> Result<()> {
                                     _ => {}
                                 }
                             }
-                            Event::Resize(..) if ctl.pixel_mouse.is_some() => ctl.pixel_mouse = cell_px(),
+                            Event::Resize(..) => {
+                                cpx = cell_px().unwrap_or(cpx);
+                                if ctl.pixel_mouse.is_some() {
+                                    ctl.pixel_mouse = cell_px();
+                                }
+                            }
                             Event::Mouse(m) => {
                                 // The cell under the pointer (reports are in pixels in pixel-mouse mode).
                                 let cell = match ctl.pixel_mouse {
@@ -611,6 +730,9 @@ async fn main() -> Result<()> {
     }
     let _ = set_pixel_mouse(false);
     let _ = set_pointer("default");
+    if kitty {
+        let _ = std::io::stdout().write_all(mapterm::kitty::FREE_ALL.as_bytes());
+    }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result

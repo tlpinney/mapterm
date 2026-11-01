@@ -24,7 +24,28 @@ They follow the MapLibre GL / Mapbox GL defaults:
 - **Double-click:** zoom in; **shift+double-click:** zoom out
 - **Shift+drag:** box zoom
 - **Arrows** (or `hjkl`) pan, **`+`/`-`** zoom to the next level, both eased
-- Terminal extras: sideways swipes pan; `i` inspect, `n` labels, `t` light/dark theme, `q` quit
+- Terminal extras: sideways swipes pan; `i` inspect, `v` vector overlay, `n` labels, `t` light/dark theme, `q` quit
+
+## Raster layers
+
+`--raster URL` puts a PNG/JPEG tile layer under the vector map:
+
+```sh
+mapterm --raster 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' --at 38.8895,-77.0353 -z 15
+```
+
+- URLs use `{z}`, `{x}` and `{y}`; for TMS services (rows counted from the
+  bottom) use `{-y}` or add `--tms`.
+- On terminals with the kitty graphics protocol (Ghostty, kitty, WezTerm, and
+  through herdr) tiles are real images underneath the text, so vector labels,
+  lines, markers and inspect draw on top. Each tile is sent once; panning and
+  zooming only move it. Elsewhere the layer becomes cell background colors.
+  `MAPTERM_GRAPHICS=kitty` or `cells` overrides the guess.
+- **`v`** cycles the vector overlay: lines and labels, labels only, off. Area
+  fills are always off over a raster layer.
+- Tiles are cached on disk for 30 days and fetched at most two at a time.
+  Respect each tile server's usage policy: OpenStreetMap's own tile servers
+  allow only light use, with attribution.
 
 ## Inspect
 

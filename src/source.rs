@@ -52,7 +52,7 @@ fn decompress(b: Vec<u8>, compression: u8) -> Result<Vec<u8>> {
     }
 }
 
-async fn get(http: &reqwest::Client, url: &str, range: Option<(u64, u64)>) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn get(http: &reqwest::Client, url: &str, range: Option<(u64, u64)>) -> Result<Option<Vec<u8>>> {
     let mut req = http.get(url);
     if let Some((off, len)) = range {
         req = req.header("Range", format!("bytes={}-{}", off, off + len - 1));
@@ -255,18 +255,18 @@ impl Source {
     }
 }
 
-fn cache_root() -> PathBuf {
+pub(crate) fn cache_root() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     home.join(".cache").join("mapterm")
 }
 
-fn hash(s: &str) -> String {
+pub(crate) fn hash(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
-fn read_fresh(p: &Path) -> Option<Vec<u8>> {
+pub(crate) fn read_fresh(p: &Path) -> Option<Vec<u8>> {
     let age = SystemTime::now().duration_since(std::fs::metadata(p).ok()?.modified().ok()?).ok()?;
     (age < DISK_TTL).then(|| std::fs::read(p).ok()).flatten()
 }
