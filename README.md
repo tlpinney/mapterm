@@ -2,6 +2,13 @@
 
 # mapterm
 
+[![CI](https://github.com/tlpinney/mapterm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tlpinney/mapterm/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/mapterm.svg)](https://crates.io/crates/mapterm)
+[![docs.rs](https://img.shields.io/docsrs/mapterm)](https://docs.rs/mapterm)
+[![MSRV 1.89](https://img.shields.io/crates/msrv/mapterm)](Cargo.toml)
+[![License: MIT](https://img.shields.io/crates/l/mapterm.svg)](LICENSE)
+[![mapterm.com](https://img.shields.io/badge/site-mapterm.com-blue)](https://mapterm.com)
+
 A map in your terminal, with the pan, zoom and styling of a web map, that also works
 over SSH.
 
