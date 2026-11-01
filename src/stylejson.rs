@@ -52,6 +52,24 @@ pub async fn read_style(spec: &str) -> Result<Json> {
     serde_json::from_slice(&bytes).with_context(|| format!("{loc}: not a JSON style"))
 }
 
+fn is_remote(loc: &str) -> bool {
+    loc.starts_with("http://") || loc.starts_with("https://")
+}
+
+/// A style from the web may only point at the web: its sources can't read local files
+/// (`pmtiles:///path`, a bare path), which only the person running mapterm should name.
+pub fn remote_sources_only(doc: &Json) -> Result<()> {
+    for (id, s) in doc["sources"].as_object().into_iter().flatten() {
+        let urls = [&s["url"], &s["data"]].into_iter().chain(s["tiles"].as_array().into_iter().flatten());
+        for u in urls.filter_map(Json::as_str) {
+            if !is_remote(u.strip_prefix("pmtiles://").unwrap_or(u)) {
+                bail!("source \"{id}\": a style from a URL can't use the local file {u:?}");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The layers of a style document, plus warnings about what mapterm can't draw.
 pub fn style_layers(doc: &Json) -> Result<(Vec<StyleLayer>, Vec<String>)> {
     let Some(layers) = doc["layers"].as_array() else { bail!("style has no \"layers\" array") };
@@ -77,7 +95,11 @@ impl Map {
             };
             return Map::terminal(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles, dark);
         }
-        Map::from_style_json(&read_style(spec).await?).await
+        let doc = read_style(spec).await?;
+        if is_remote(&style_location(spec)) {
+            remote_sources_only(&doc)?;
+        }
+        Map::from_style_json(&doc).await
     }
 
     /// A map drawing `src` with the built-in terminal style for its schema.

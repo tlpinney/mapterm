@@ -114,3 +114,20 @@ fn raster_bombs_are_refused() {
     let err = mapterm::raster::decode(&png).err().expect("refused");
     assert!(format!("{err:#}").to_lowercase().contains("limit"), "{err:#}");
 }
+
+#[test]
+fn remote_styles_cannot_name_local_files() {
+    use mapterm::stylejson::remote_sources_only;
+    for url in ["pmtiles:///etc/secret.pmtiles", "/home/me/private.pmtiles", "file:///x.pmtiles"] {
+        let doc = json!({"sources": {"s": {"type": "vector", "url": url}}});
+        assert!(remote_sources_only(&doc).is_err(), "{url}");
+    }
+    let doc = json!({"sources": {"g": {"type": "geojson", "data": "secret.geojson"}}});
+    assert!(remote_sources_only(&doc).is_err());
+    let doc = json!({"sources": {
+        "v": {"type": "vector", "url": "pmtiles://https://example.com/a.pmtiles"},
+        "r": {"type": "raster", "tiles": ["https://example.com/{z}/{x}/{y}.png"]},
+        "g": {"type": "geojson", "data": {"type": "FeatureCollection", "features": []}},
+    }});
+    remote_sources_only(&doc).unwrap();
+}

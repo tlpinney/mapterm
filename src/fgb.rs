@@ -321,4 +321,37 @@ mod tests {
         assert_eq!(features.len(), 179);
         assert!(to_geojson(b"not fgb").is_err());
     }
+
+    /// GeometryCollections nested `depth` deep around a Point, sharing one vtable.
+    fn nested_collections(depth: usize) -> Vec<u8> {
+        let mut b = Vec::new();
+        // vtable: 20 bytes, 12-byte tables; field 6 (type) at +4, field 7 (parts) at +8.
+        for v in [20u16, 12, 0, 0, 0, 0, 0, 0, 4, 8] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        for k in 0..=depth {
+            let pos = b.len();
+            b.extend_from_slice(&(pos as i32).to_le_bytes());
+            b.extend_from_slice(&[if k == depth { 1 } else { 7 }, 0, 0, 0]);
+            // parts -> a one-element vector right after the table, pointing at the next table.
+            b.extend_from_slice(&4u32.to_le_bytes());
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&4u32.to_le_bytes());
+        }
+        b
+    }
+
+    #[test]
+    fn nested_geometry_collections_have_a_limit() {
+        let ok = nested_collections(3);
+        let g = geometry(&Table { buf: &ok, pos: 20 }, 0).unwrap();
+        assert_eq!(g["geometries"][0]["geometries"][0]["geometries"][0]["type"], "Point", "{g}");
+        let deep = nested_collections(100_000);
+        let r = std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || geometry(&Table { buf: &deep, pos: 20 }, 0).is_err())
+            .unwrap()
+            .join();
+        assert!(matches!(r, Ok(true)), "deep nesting is an error, not a stack overflow");
+    }
 }

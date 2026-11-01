@@ -19,6 +19,8 @@ All notable changes to mapterm are listed here. The format follows
   image declaring huge dimensions can't take hundreds of megabytes.
 - The docs show header-based API keys as `--raster-header 'Name: {key}'`, keeping the key
   itself out of `ps` and shell history.
+- A style loaded from a URL can only use web sources: a `pmtiles:///path`, file path or
+  local GeoJSON in it is an error, so a remote style can't make mapterm read local files.
 
 ### Releases
 
