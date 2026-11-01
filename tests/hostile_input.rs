@@ -85,3 +85,32 @@ fn source_zoom_ranges_from_headers_are_tamed() {
     assert_eq!(cam.tile_zoom(100, 100), 30);
     assert_eq!(cam.tile_zoom(0, 14), 14);
 }
+
+#[test]
+fn raster_bombs_are_refused() {
+    // A tiny PNG declaring 40000 x 40000 pixels: the header alone is enough to refuse it.
+    fn chunk(out: &mut Vec<u8>, ty: &[u8], data: &[u8]) {
+        let crc = |b: &[u8]| {
+            let mut c = !0u32;
+            for &x in b {
+                c ^= x as u32;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                }
+            }
+            !c
+        };
+        let mut c = ty.to_vec();
+        c.extend_from_slice(data);
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(&c);
+        out.extend_from_slice(&crc(&c).to_be_bytes());
+    }
+    let mut ihdr = 40_000u32.to_be_bytes().repeat(2);
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut png, b"IHDR", &ihdr);
+    chunk(&mut png, b"IEND", &[]);
+    let err = mapterm::raster::decode(&png).err().expect("refused");
+    assert!(format!("{err:#}").to_lowercase().contains("limit"), "{err:#}");
+}

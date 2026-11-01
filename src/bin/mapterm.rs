@@ -50,7 +50,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --raster-list           show the provider names and the keys they need
   --raster-key-cmd CMD    print the API key with a command, e.g. 'pass show vantor/api-key'
                           (otherwise the provider's variable, or MAPTERM_RASTER_KEY for URLs)
-  --raster-header 'N: V'  extra request header; {key} in the value is the API key
+  --raster-header 'N: V'  extra request header; write the key as {key}, e.g.
+                          'Authorization: Bearer {key}', so it stays out of ps and history
   --raster-param N=V      fill another {N} in the URL, e.g. mosaic=NAME for Planet
   --date YYYY-MM-DD       the day to show for dated layers (gibs; default yesterday, UTC)
   --raster-list-mosaics   list the Planet mosaics your key can use, then exit

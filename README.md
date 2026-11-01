@@ -110,8 +110,10 @@ only added to requests (Vantor's as the `maxar-api-key` header) and are blanked
 out of errors. Keyed providers don't cache tiles on disk unless you pass
 `--raster-cache`, since commercial licenses often limit storing them. For any
 other service, use its URL with `{key}` where the key goes (filled from
-`MAPTERM_RASTER_KEY` or `--raster-key-cmd`) and `--raster-header 'Name: value'`
-for header-based keys.
+`MAPTERM_RASTER_KEY` or `--raster-key-cmd`), or for header-based keys
+`--raster-header 'Name: {key}'` (e.g. `'Authorization: Bearer {key}'`). Write `{key}`
+rather than the key itself: anything on the command line shows up in `ps` and in your
+shell history.
 
 Planet serves each customer's named mosaics: list the ones your key can use
 with `mapterm --raster-list-mosaics`, then pick one with

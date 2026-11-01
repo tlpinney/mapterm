@@ -490,9 +490,22 @@ impl RasterTile {
     }
 }
 
+/// The widest or tallest raster tile mapterm decodes, in pixels.
+pub const MAX_TILE_PX: u32 = 4096;
+/// The most memory one raster tile may take while decoding (a 4096 px RGBA tile is 64 MiB).
+const MAX_TILE_ALLOC: u64 = 80 << 20;
+
 /// Decode PNG or JPEG bytes (CPU work: call from a blocking task).
 pub fn decode(bytes: &[u8]) -> Result<RasterTile> {
-    let img = image::load_from_memory(bytes).context("decoding raster tile")?;
+    // Tiles are 256 or 512 pixels; the limits stop a small compressed image that declares
+    // huge dimensions from taking hundreds of megabytes per tile.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_TILE_PX);
+    limits.max_image_height = Some(MAX_TILE_PX);
+    limits.max_alloc = Some(MAX_TILE_ALLOC);
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().context("decoding raster tile")?;
+    reader.limits(limits);
+    let img = reader.decode().context("decoding raster tile")?;
     let rgba = img.to_rgba8();
     let png = if bytes.starts_with(b"\x89PNG") {
         bytes.to_vec()

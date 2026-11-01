@@ -15,6 +15,10 @@ All notable changes to mapterm are listed here. The format follows
   stack.
 - A source with a bad zoom range (min above max, or past zoom 30) in a PMTiles header,
   TileJSON or style no longer panics.
+- Raster tiles larger than 4096 pixels a side are refused before decoding, so a small
+  image declaring huge dimensions can't take hundreds of megabytes.
+- The docs show header-based API keys as `--raster-header 'Name: {key}'`, keeping the key
+  itself out of `ps` and shell history.
 
 ### Releases
 
