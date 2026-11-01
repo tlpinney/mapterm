@@ -28,19 +28,24 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: mapterm [SOURCE] [--raster URL [--tms]] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
+usage: mapterm [SOURCE] [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL
                 (default: OpenFreeMap planet)
   --at          start position (default: the source's center)
   -z            start zoom
-  --raster      a PNG/JPEG tile layer drawn under the vector map, e.g.
-                https://tile.openstreetmap.org/{z}/{x}/{y}.png ({-y} or --tms for TMS rows);
+  --raster      an image tile layer under the vector map: a provider name (--raster-list),
+                or a URL with {z}/{x}/{y} ({-y} or --tms for TMS rows, {key} for an API key);
                 real images with kitty graphics (Ghostty, kitty, WezTerm, herdr), cell colors
                 elsewhere (MAPTERM_GRAPHICS=kitty|cells overrides)
-  --tms         count raster rows from the bottom (TMS) even with a plain {y}
-  --raster-attribution TEXT
-                credit for the raster layer (Esri, USGS, OSM and EOX are known already)
+  --raster-list           show the provider names and the keys they need
+  --raster-key-cmd CMD    print the API key with a command, e.g. 'pass show vantor/api-key'
+                          (otherwise the provider's variable, or MAPTERM_RASTER_KEY for URLs)
+  --raster-header 'N: V'  extra request header; {key} in the value is the API key
+  --raster-cache / --raster-no-cache
+                          keep tiles on disk or not (default: on, off for keyed providers)
+  --raster-attribution T  credit for the layer (known providers are filled in)
+  --tms                   count raster rows from the bottom (TMS) even with a plain {y}
   --light       light theme
   --snapshot    render one frame to stdout as text and exit
   --pick        with --snapshot: print the features under that cell as JSON lines instead
@@ -67,6 +72,9 @@ struct Args {
     raster: Option<String>,
     tms: bool,
     raster_attribution: Option<String>,
+    raster_key_cmd: Option<String>,
+    raster_headers: Vec<String>,
+    raster_cache: Option<bool>,
     /// Experimental smooth scrolling, from MAPTERM_SMOOTH only (no flag): `1` pans the wheel
     /// smoothly, `shift` makes dragging pixel-exact (smooth protocol v3).
     smooth: bool,
@@ -80,7 +88,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, raster_attribution: None, smooth, shift };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -93,6 +101,19 @@ fn args() -> Result<Args> {
             "--light" => a.light = true,
             "--raster" => a.raster = Some(it.next().context("--raster URL")?),
             "--tms" => a.tms = true,
+            "--raster-key-cmd" => a.raster_key_cmd = Some(it.next().context("--raster-key-cmd CMD")?),
+            "--raster-header" => a.raster_headers.push(it.next().context("--raster-header 'Name: value'")?),
+            "--raster-cache" => a.raster_cache = Some(true),
+            "--raster-no-cache" => a.raster_cache = Some(false),
+            "--raster-list" => {
+                println!("raster providers (--raster NAME):\n");
+                for p in mapterm::raster::PRESETS {
+                    let key = if p.key_env.is_empty() { "no key".to_string() } else { format!("key: {}", p.key_env.join(" or ")) };
+                    println!("  {:<9} {}\n            {key}", p.name, p.about);
+                }
+                println!("\nKeys can also come from --raster-key-cmd, e.g. 'pass show vantor/api-key'.");
+                std::process::exit(0);
+            }
             "--raster-attribution" => a.raster_attribution = Some(it.next().context("--raster-attribution TEXT")?),
             "--snapshot" => {
                 let v = it.next().context("--snapshot COLSxROWS")?;
@@ -295,8 +316,37 @@ async fn main() -> Result<()> {
     let mut store = TileStore::default();
     // Optional raster layer under the vector map.
     let raster = match &a.raster {
-        Some(u) => {
-            let mut r = mapterm::raster::RasterSource::new(u, a.tms, 19)?;
+        Some(spec) => {
+            let mut r = match mapterm::raster::preset(spec) {
+                Some(p) => {
+                    let key = mapterm::raster::find_key(a.raster_key_cmd.as_deref(), p.key_env)?;
+                    mapterm::raster::RasterSource::from_preset(p, key)?
+                }
+                None => {
+                    let mut r = mapterm::raster::RasterSource::new(spec, a.tms, 19).with_context(|| {
+                        format!("--raster {spec}: not a provider name (see --raster-list) or a tile URL")
+                    })?;
+                    for h in &a.raster_headers {
+                        r.add_header(h)?;
+                    }
+                    if r.wants_key() {
+                        let key = mapterm::raster::find_key(a.raster_key_cmd.as_deref(), &["MAPTERM_RASTER_KEY"])?;
+                        if key.is_none() {
+                            bail!("the raster URL uses {{key}}: set MAPTERM_RASTER_KEY or pass --raster-key-cmd");
+                        }
+                        r.set_key(key);
+                    }
+                    r
+                }
+            };
+            if mapterm::raster::preset(spec).is_some() {
+                for h in &a.raster_headers {
+                    r.add_header(h)?;
+                }
+            }
+            if let Some(c) = a.raster_cache {
+                r.cache = c;
+            }
             if let Some(t) = &a.raster_attribution {
                 r.attribution = t.clone();
             }
@@ -437,7 +487,7 @@ async fn main() -> Result<()> {
             // source pixel as cell colors.
             let rz = raster.as_ref().map(|r| {
                 let dots_per_px = if kitty { 2.0 / (cpx.0 / 2.0) } else { 2.0 };
-                mapterm::raster::raster_zoom(&draw_cam, 256, dots_per_px, r.max_zoom)
+                mapterm::raster::raster_zoom(&draw_cam, r.tile_px, dots_per_px, r.max_zoom)
             });
             term.draw(|f| {
                 let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());

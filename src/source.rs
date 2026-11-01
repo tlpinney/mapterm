@@ -53,7 +53,20 @@ fn decompress(b: Vec<u8>, compression: u8) -> Result<Vec<u8>> {
 }
 
 pub(crate) async fn get(http: &reqwest::Client, url: &str, range: Option<(u64, u64)>) -> Result<Option<Vec<u8>>> {
+    get_with(http, url, range, &[]).await
+}
+
+/// [`get`] with extra request headers (e.g. an API key).
+pub(crate) async fn get_with(
+    http: &reqwest::Client,
+    url: &str,
+    range: Option<(u64, u64)>,
+    headers: &[(String, String)],
+) -> Result<Option<Vec<u8>>> {
     let mut req = http.get(url);
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
     if let Some((off, len)) = range {
         req = req.header("Range", format!("bytes={}-{}", off, off + len - 1));
     }

@@ -21,7 +21,7 @@ use ratatui::{
 
 use crate::{
     render::{Camera, to_world},
-    source::{cache_root, get, hash, http_client, read_fresh},
+    source::{cache_root, get_with, hash, http_client, read_fresh},
     store::TileId,
 };
 
@@ -30,10 +30,136 @@ pub struct RasterSource {
     tms: bool,
     http: reqwest::Client,
     cache_dir: std::path::PathBuf,
+    /// Request headers; `{key}` in a value is replaced by the key.
+    headers: Vec<(String, String)>,
+    /// API key for `{key}` in the URL or headers. Never shown: it is blanked out of errors.
+    key: Option<String>,
+    /// Keep tiles on disk (30 days). Off by default for keyed commercial providers, whose
+    /// licenses often limit storing tiles.
+    pub cache: bool,
+    /// Tile width and height in pixels (512 for Retina "@2x" tiles).
+    pub tile_px: u32,
     pub max_zoom: u8,
     pub name: String,
     /// Credit to show for the imagery (known providers are filled in automatically).
     pub attribution: String,
+}
+
+/// A named raster provider: `--raster vantor` instead of a URL.
+#[derive(Clone, Copy, Debug)]
+pub struct Preset {
+    pub name: &'static str,
+    pub about: &'static str,
+    pub template: &'static str,
+    /// Request headers, with `{key}` where the key goes.
+    pub headers: &'static [(&'static str, &'static str)],
+    /// Environment variables checked for the key, in order (none: no key needed).
+    pub key_env: &'static [&'static str],
+    pub attribution: &'static str,
+    pub tile_px: u32,
+    pub max_zoom: u8,
+    pub cache: bool,
+}
+
+pub const PRESETS: &[Preset] = &[
+    Preset {
+        name: "osm",
+        about: "OpenStreetMap standard map (light use only, per OSM's tile policy)",
+        template: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+        headers: &[],
+        key_env: &[],
+        attribution: "© OpenStreetMap contributors",
+        tile_px: 256,
+        max_zoom: 19,
+        cache: true,
+    },
+    Preset {
+        name: "esri",
+        about: "Esri World Imagery, global satellite (Esri's terms apply)",
+        template: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        headers: &[],
+        key_env: &[],
+        attribution: "Esri, Maxar, Earthstar Geographics",
+        tile_px: 256,
+        max_zoom: 19,
+        cache: true,
+    },
+    Preset {
+        name: "usgs",
+        about: "USGS National Map imagery, United States only (public domain)",
+        template: "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}",
+        headers: &[],
+        key_env: &[],
+        attribution: "USGS The National Map",
+        tile_px: 256,
+        max_zoom: 16,
+        cache: true,
+    },
+    Preset {
+        name: "eox",
+        about: "Sentinel-2 cloudless 2024 by EOX, global at ~10 m (CC BY-NC-SA 4.0)",
+        template: "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpg",
+        headers: &[],
+        key_env: &[],
+        attribution: "Sentinel-2 cloudless 2024 by EOX (modified Copernicus Sentinel data)",
+        tile_px: 256,
+        max_zoom: 14,
+        cache: true,
+    },
+    Preset {
+        name: "vantor",
+        about: "Vantor (Maxar) Vivid basemap via the Vantor Hub API, needs an API key",
+        template: "https://api.maxar.com/basemaps/v1/ogc/gwc/service/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=Maxar:Imagery&tileMatrixSet=EPSG:3857&tileMatrix=EPSG:3857:{z}&tileRow={y}&tileCol={x}&format=image/jpeg",
+        headers: &[("maxar-api-key", "{key}")],
+        key_env: &["VANTOR_API_KEY", "MAXAR_API_KEY"],
+        attribution: "Vantor (Maxar) Vivid",
+        tile_px: 256,
+        max_zoom: 21,
+        cache: false,
+    },
+    Preset {
+        name: "mapbox",
+        about: "Mapbox Satellite (512 px Retina tiles), needs an access token",
+        template: "https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}@2x.jpg90?access_token={key}",
+        headers: &[],
+        key_env: &["MAPBOX_ACCESS_TOKEN"],
+        attribution: "© Mapbox © Maxar",
+        tile_px: 512,
+        max_zoom: 22,
+        cache: false,
+    },
+    Preset {
+        name: "maptiler",
+        about: "MapTiler Satellite, needs an API key",
+        template: "https://api.maptiler.com/tiles/satellite-v2/{z}/{x}/{y}.jpg?key={key}",
+        headers: &[],
+        key_env: &["MAPTILER_KEY"],
+        attribution: "© MapTiler © OpenStreetMap contributors",
+        tile_px: 512,
+        max_zoom: 20,
+        cache: false,
+    },
+];
+
+pub fn preset(name: &str) -> Option<&'static Preset> {
+    PRESETS.iter().find(|p| p.name.eq_ignore_ascii_case(name) || (name.eq_ignore_ascii_case("maxar") && p.name == "vantor"))
+}
+
+/// Find a provider's key: a command's output (e.g. `pass show vantor/api-key`) if given,
+/// else the first of `env` that is set.
+pub fn find_key(key_cmd: Option<&str>, env: &[&str]) -> Result<Option<String>> {
+    if let Some(cmd) = key_cmd {
+        let out = std::process::Command::new("sh").args(["-c", cmd]).output().context("running the key command")?;
+        if !out.status.success() {
+            bail!("the key command failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        let key = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or("").trim().to_string();
+        if key.is_empty() {
+            bail!("the key command printed nothing");
+        }
+        return Ok(Some(key));
+    }
+    Ok(env.iter().find_map(|v| std::env::var(v).ok().map(|k| k.trim().to_string()).filter(|k| !k.is_empty())))
 }
 
 /// The credit that well-known tile providers ask for, from the tile URL's host.
@@ -66,11 +192,67 @@ impl RasterSource {
             template: template.to_string(),
             tms,
             http: http_client(),
+            // Keyed by the template, which holds `{key}` rather than the key itself.
             cache_dir: cache_root().join("raster").join(hash(template)),
+            headers: Vec::new(),
+            key: None,
+            cache: true,
+            tile_px: 256,
             max_zoom,
             name: template.split('/').nth(2).unwrap_or(template).to_string(),
             attribution: known_attribution(template).unwrap_or_default().to_string(),
         })
+    }
+
+    /// A source for a named provider. Fails with a hint if it needs a key and none was given.
+    pub fn from_preset(p: &Preset, key: Option<String>) -> Result<Self> {
+        if !p.key_env.is_empty() && key.is_none() {
+            bail!(
+                "{} needs a key: set {} or pass --raster-key-cmd 'pass show <entry>'",
+                p.name,
+                p.key_env.join(" or ")
+            );
+        }
+        let mut s = Self::new(p.template, false, p.max_zoom)?;
+        s.headers = p.headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        s.key = key;
+        s.cache = p.cache;
+        s.tile_px = p.tile_px;
+        s.name = p.name.to_string();
+        s.attribution = p.attribution.to_string();
+        Ok(s)
+    }
+
+    /// Add a request header (`Name: value`; `{key}` in the value is replaced by the key).
+    pub fn add_header(&mut self, line: &str) -> Result<()> {
+        let (k, v) = line.split_once(':').context("headers look like `Name: value`")?;
+        self.headers.push((k.trim().to_string(), v.trim().to_string()));
+        Ok(())
+    }
+
+    pub fn set_key(&mut self, key: Option<String>) {
+        self.key = key;
+    }
+
+    /// Whether the URL or a header uses `{key}`.
+    pub fn wants_key(&self) -> bool {
+        self.template.contains("{key}") || self.headers.iter().any(|(_, v)| v.contains("{key}"))
+    }
+
+    fn fill_key(&self, s: &str) -> String {
+        match &self.key {
+            Some(k) => s.replace("{key}", k),
+            None => s.to_string(),
+        }
+    }
+
+    /// Error text with the key blanked out (reqwest errors include the URL).
+    fn redact(&self, e: anyhow::Error) -> anyhow::Error {
+        let mut msg = format!("{e:#}");
+        if let Some(k) = self.key.as_ref().filter(|k| k.len() >= 4) {
+            msg = msg.replace(k.as_str(), "***");
+        }
+        anyhow::anyhow!(msg)
     }
 
     fn url(&self, z: u8, x: u32, y: u32) -> String {
@@ -86,14 +268,20 @@ impl RasterSource {
     /// The tile's image bytes (PNG or JPEG), from the 30-day disk cache or the network.
     pub async fn tile(&self, z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>> {
         let path = self.cache_dir.join(format!("{z}/{x}/{y}.img"));
-        if let Some(b) = read_fresh(&path) {
+        if self.cache
+            && let Some(b) = read_fresh(&path)
+        {
             return Ok(if b.is_empty() { None } else { Some(b) });
         }
-        let bytes = get(&self.http, &self.url(z, x, y), None).await?;
-        if let Some(d) = path.parent() {
-            let _ = std::fs::create_dir_all(d);
+        let url = self.fill_key(&self.url(z, x, y));
+        let headers: Vec<(String, String)> = self.headers.iter().map(|(k, v)| (k.clone(), self.fill_key(v))).collect();
+        let bytes = get_with(&self.http, &url, None, &headers).await.map_err(|e| self.redact(e))?;
+        if self.cache {
+            if let Some(d) = path.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(&path, bytes.as_deref().unwrap_or(&[]));
         }
-        let _ = std::fs::write(&path, bytes.as_deref().unwrap_or(&[]));
         Ok(bytes)
     }
 }
@@ -338,6 +526,27 @@ mod tests {
         let esri = RasterSource::new("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", false, 19).unwrap();
         assert_eq!(esri.url(15, 9372, 12536), "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/15/12536/9372");
         assert_eq!(esri.attribution, "Esri, Maxar, Earthstar Geographics");
+    }
+
+    #[test]
+    fn presets_and_keys() {
+        let v = preset("vantor").unwrap();
+        assert!(preset("MAXAR").is_some_and(|p| p.name == "vantor"));
+        assert!(RasterSource::from_preset(v, None).is_err(), "vantor needs a key");
+        let s = RasterSource::from_preset(v, Some("secret-key-123".into())).unwrap();
+        assert!(!s.cache && s.wants_key());
+        // The key goes in the header, not the URL.
+        let url = s.fill_key(&s.url(15, 9372, 12536));
+        assert!(url.contains("tileMatrix=EPSG:3857:15&tileRow=12536&tileCol=9372") && !url.contains("secret"));
+        assert_eq!(s.headers[0].0, "maxar-api-key");
+        assert_eq!(s.fill_key(&s.headers[0].1), "secret-key-123");
+        // Errors never show it.
+        let e = s.redact(anyhow::anyhow!("https://x/?access_token=secret-key-123: HTTP 401"));
+        assert!(!e.to_string().contains("secret") && e.to_string().contains("***"));
+        // Free presets need nothing.
+        let osm = RasterSource::from_preset(preset("osm").unwrap(), None).unwrap();
+        assert!(osm.cache && !osm.wants_key());
+        assert_eq!(RasterSource::from_preset(preset("mapbox").unwrap(), Some("t".into())).unwrap().tile_px, 512);
     }
 
     #[test]

@@ -28,17 +28,36 @@ They follow the MapLibre GL / Mapbox GL defaults:
 
 ## Raster layers
 
-`--raster URL` puts a PNG/JPEG tile layer under the vector map:
+`--raster` puts an image tile layer under the vector map, by provider name or URL:
 
 ```sh
-mapterm --raster 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' --at 38.8895,-77.0353 -z 15
+mapterm --raster esri --at 38.8895,-77.0353 -z 15        # satellite
+mapterm --raster 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+mapterm --raster-list                                      # providers and the keys they need
 ```
+
+| Name | Imagery | Key |
+|---|---|---|
+| `osm` | OpenStreetMap standard map (light use only) | none |
+| `esri` | Esri World Imagery, global satellite | none |
+| `usgs` | USGS National Map imagery, US only, public domain | none |
+| `eox` | Sentinel-2 cloudless 2024, global, ~10 m (CC BY-NC-SA) | none |
+| `vantor` | Vantor (Maxar) Vivid basemap | `VANTOR_API_KEY` |
+| `mapbox` | Mapbox Satellite, Retina tiles | `MAPBOX_ACCESS_TOKEN` |
+| `maptiler` | MapTiler Satellite | `MAPTILER_KEY` |
+
+API keys never go on the command line: they come from the provider's
+environment variable or from a command, e.g.
+`mapterm --raster vantor --raster-key-cmd 'pass show vantor/api-key'`. They are
+only added to requests (Vantor's as the `maxar-api-key` header) and are blanked
+out of errors. Keyed providers don't cache tiles on disk unless you pass
+`--raster-cache`, since commercial licenses often limit storing them. For any
+other service, use its URL with `{key}` where the key goes (filled from
+`MAPTERM_RASTER_KEY` or `--raster-key-cmd`) and `--raster-header 'Name: value'`
+for header-based keys.
 
 - URLs use `{z}`, `{x}` and `{y}` in any order; for TMS services (rows counted
   from the bottom) use `{-y}` or add `--tms`.
-- Satellite imagery, e.g. Esri World Imagery (`…/World_Imagery/MapServer/tile/{z}/{y}/{x}`
-  on server.arcgisonline.com) or USGS imagery for the US
-  (`…/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}` on basemap.nationalmap.gov).
 - The status bar credits the imagery: Esri, USGS, OpenStreetMap and EOX are
   known; give anything else with `--raster-attribution TEXT`.
 - On terminals with the kitty graphics protocol (Ghostty, kitty, WezTerm, and
