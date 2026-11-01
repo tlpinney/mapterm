@@ -1,0 +1,48 @@
+# Changelog
+
+All notable changes to mapterm are listed here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[Semantic Versioning](https://semver.org/) (pre-1.0: a minor version may break the API).
+
+## [0.1.0-alpha.1] - unreleased
+
+The first alpha, for private testing. Not published to crates.io; install from git:
+
+```sh
+cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
+```
+
+### The viewer (`mapterm`)
+
+- OpenStreetMap vector tiles in the terminal: braille lines, cell-color fills, labels that
+  don't overlap, and MapLibre-style pan and zoom (wheel at the cursor, drag with inertia,
+  double-click and box zoom, eased keys).
+- Sources: PMTiles (local or over HTTP range requests), XYZ URLs and TileJSON; OpenFreeMap
+  by default, no key needed.
+- A built-in terminal style for the OpenMapTiles and Protomaps schemas (dark and light),
+  or any MapLibre style with `--style` (OpenFreeMap's liberty, positron, bright, dark,
+  fiord, a URL or a file); `m` switches styles, `t` the theme.
+- Imagery under the map with `--raster` (OSM, Esri, USGS, EOX, NASA GIBS, and keyed
+  providers such as Vantor, Planet, Mapbox and MapTiler), as kitty graphics or cell colors.
+- Your data over the map with `--geojson`: GeoJSON, CSV with lat/lon or WKT columns, GPX,
+  KML and FlatGeobuf, by file or URL; large point sets cluster.
+- Place search with `/` (Photon or Nominatim), with a flyTo-style flight.
+- Inspect mode (`i`): every feature under a spot, drawn or not, with its properties,
+  size and location; `y` copies it as JSON.
+- `--snapshot` prints a frame as text, ANSI color or HTML; `--pick` prints features as JSON.
+- Experimental pixel-smooth scrolling on the Ghostty smooth-scroll fork (`MAPTERM_SMOOTH`).
+
+### The library
+
+- `Map`: named sources (vector tiles, GeoJSON, raster) and ordered style layers
+  (background, fill, line, circle, symbol, raster) with MapLibre expressions and filters,
+  plus custom layers; drawn as a ratatui widget.
+- MapLibre style JSON loading, and the style properties a terminal can show: colors and
+  opacity, line widths and dashes, text fields and fonts, anchors and offsets, labels
+  repeated along roads, sort keys, icons as one-cell symbols.
+- `query_rendered_features` and `query_features` (drawn or not), layer events and hover
+  state (`events::Events`, feature state), `Controller` with `fly_to` and `fit_bounds`.
+- GeoJSON sources with a spatial index and point clustering; tiles loaded in the
+  background with retries; kitty image memory kept within a budget; source attribution.
+
+[0.1.0-alpha.1]: https://github.com/tlpinney/mapterm/releases/tag/v0.1.0-alpha.1
