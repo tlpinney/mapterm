@@ -27,7 +27,9 @@ All notable changes to mapterm are listed here. The format follows
 - Signed binaries: each version tag builds `mapterm` for macOS (Apple silicon) and Linux
   (x86-64) in CI, attached to the GitHub release with `SHA256SUMS`, which the maintainer
   signs with an SSH key (`SHA256SUMS.sig`, namespace `mapterm-release`; trusted keys in
-  `signing/allowed_signers`). The release notes say how to verify.
+  `signing/allowed_signers`). The release notes say how to verify, taking the key from
+  the signing keys on the maintainer's GitHub account rather than from the repository.
+- Commits and tags are signed with the same key (shown as Verified on GitHub).
 - Installing with Cargo from the private repository needs
   `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so Cargo uses git's credentials:
 

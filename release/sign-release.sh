@@ -31,6 +31,11 @@ echo "Signing SHA256SUMS for $tag with $key"
 ssh-keygen -Y sign -f "$key" -n "$namespace" "$tmp/SHA256SUMS"
 ssh-keygen -Y verify -f "$root/signing/allowed_signers" -I "$signer" -n "$namespace" \
   -s "$tmp/SHA256SUMS.sig" < "$tmp/SHA256SUMS"
+# The release notes tell people to trust the signing keys on the GitHub account, so check
+# the signature against those too before publishing.
+gh api "users/$signer/ssh_signing_keys" --jq ".[].key | \"$signer namespaces=\\\"$namespace\\\" \" + ." > "$tmp/github_signers"
+ssh-keygen -Y verify -f "$tmp/github_signers" -I "$signer" -n "$namespace" \
+  -s "$tmp/SHA256SUMS.sig" < "$tmp/SHA256SUMS"
 
 gh release upload "$tag" "$tmp/SHA256SUMS.sig" --repo "$repo" --clobber
 gh release edit "$tag" --repo "$repo" --draft=false

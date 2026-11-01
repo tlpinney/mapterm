@@ -25,11 +25,14 @@ cat <<NOTES
 | Linux, x86-64 (glibc) | \`mapterm-$version-x86_64-unknown-linux-gnu.tar.gz\` |
 
 \`SHA256SUMS\` lists every archive's checksum, and \`SHA256SUMS.sig\` is the maintainer's SSH
-signature of it. To download and check (the repository is private, so use \`gh\`):
+signature of it. The trusted key comes from the signing keys on the maintainer's GitHub
+account, not from this repository (fingerprint
+\`SHA256:LiOY0+3e/eOQFeUsG7iMovOBJui3yCAXXHlWz48c4uk\`). To download and check (the
+repository is private, so use \`gh\`):
 
 \`\`\`sh
 gh release download $tag --repo tlpinney/mapterm
-gh api repos/tlpinney/mapterm/contents/signing/allowed_signers --jq .content | base64 -d > allowed_signers
+gh api users/tlpinney/ssh_signing_keys --jq '.[].key | "tlpinney namespaces=\\"mapterm-release\\" " + .' > allowed_signers
 ssh-keygen -Y verify -f allowed_signers -I tlpinney -n mapterm-release -s SHA256SUMS.sig < SHA256SUMS
 shasum -a 256 -c SHA256SUMS --ignore-missing
 tar xzf mapterm-$version-*.tar.gz
