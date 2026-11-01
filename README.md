@@ -5,6 +5,8 @@
 A map in your terminal, with the pan, zoom and styling of a web map, that also works
 over SSH.
 
+Get it with `cargo install mapterm` ([other ways](#install)).
+
 <img src="https://raw.githubusercontent.com/tlpinney/mapterm/main/assets/hero.webp" alt="mapterm in a terminal, gliding down the Potomac past Georgetown: roads, parks and labels drawn in braille characters">
 
 <details>
