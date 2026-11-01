@@ -4,6 +4,20 @@ All notable changes to mapterm are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor version may break the API).
 
+## [0.1.0] - 2026-11-01
+
+The first stable-numbered release, so plain Cargo commands find it (they skip
+pre-releases):
+
+```sh
+cargo install mapterm   # the viewer
+cargo add mapterm       # the library
+```
+
+Pre-1.0, a minor version (0.2.0) may still change the API. No code changes since
+0.1.0-alpha.3; this is also the first version published by the release workflow with
+crates.io trusted publishing.
+
 ## [0.1.0-alpha.3] - 2026-11-01
 
 The first release on crates.io:
@@ -102,6 +116,7 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
+[0.1.0]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.3...v0.1.0
 [0.1.0-alpha.3]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/tlpinney/mapterm/releases/tag/v0.1.0-alpha.1
