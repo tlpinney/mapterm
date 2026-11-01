@@ -7,11 +7,14 @@
 //!   host overlays (markers, polylines).
 //! - [`interact::Controller`] MapLibre-style interaction: wheel zoom, drag with inertia,
 //!   double-click and box zoom, eased keyboard moves, and click reporting for inspection.
+//! - [`pick::pick`] finds the features under a spot (drawn or not) with their properties and
+//!   measurements, for inspection and analysis.
 //! - [`smooth`] opt-in pixel smooth vertical panning for the Ghostty smooth-scroll fork.
 
 pub mod interact;
 pub mod mvt;
 pub mod pbf;
+pub mod pick;
 pub mod pmtiles;
 pub mod render;
 pub mod smooth;
@@ -20,6 +23,7 @@ pub mod store;
 pub mod style;
 
 pub use interact::{Click, Controller};
+pub use pick::{Pick, pick};
 pub use render::{Camera, MapWidget, Overlay, Viewport};
 pub use source::Source;
 pub use store::{TileId, TileStore, prepare};

@@ -24,7 +24,26 @@ They follow the MapLibre GL / Mapbox GL defaults:
 - **Double-click:** zoom in; **shift+double-click:** zoom out
 - **Shift+drag:** box zoom
 - **Arrows** (or `hjkl`) pan, **`+`/`-`** zoom to the next level, both eased
-- Terminal extras: sideways swipes pan; `n` labels, `t` light/dark theme, `q` quit
+- Terminal extras: sideways swipes pan; `i` inspect, `n` labels, `t` light/dark theme, `q` quit
+
+## Inspect
+
+Press **`i`** to switch to inspect mode, and `i` (or `Esc`) again to leave it.
+
+- **Hover** shows the top feature under the pointer in the status bar.
+- **Click** lists every feature at that spot, drawn or not (roads, street names,
+  buildings, parks, landcover, points of interest...), most specific first,
+  and highlights the selected one on the map.
+- The panel shows the feature's layer, geometry type, center, length or area,
+  vertex count, source tile, and all its properties.
+- **Click an entry** or press **Tab / Shift+Tab** to switch between them;
+  **`y`** copies the selected feature as JSON to the clipboard (OSC 52).
+
+For scripts, `--pick` prints the same information as JSON lines:
+
+```sh
+mapterm --at 38.8895,-77.0353 -z 16 --snapshot 100x40 --pick 50,20
+```
 
 ## What it reads
 
@@ -51,8 +70,10 @@ The crate's library has the pieces mapterm is built from:
 - `MapWidget` is the ratatui widget, with `Overlay` markers and lines on top
 - `Controller` turns crossterm mouse and key events into camera moves, and
   reports single clicks (`take_click`) so you can act on the spot under them
+- `pick` returns the features under a spot with their properties and
+  measurements, for your own inspection or analysis views
 
-`src/bin/mapterm.rs` is a complete example: about 300 lines that fetch the
+`src/bin/mapterm.rs` is a complete example: about 500 lines that fetch the
 tiles the view needs, feed input to the controller, and draw the widget.
 
 ## Experimental: smooth scrolling

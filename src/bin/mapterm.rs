@@ -21,14 +21,14 @@ use std::io::Write;
 
 use mapterm::{
     Controller,
-    Camera, MapWidget, Source, Style, Theme, TileId, TileStore, Viewport, prepare, smooth, source::OPENFREEMAP,
+    Camera, MapWidget, Overlay, Source, Style, Theme, TileId, TileStore, Viewport, prepare, smooth, source::OPENFREEMAP,
     store::Prepared,
 };
 use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS]
+usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL
                 (default: OpenFreeMap planet)
@@ -36,10 +36,15 @@ usage: mapterm [SOURCE] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS
   -z            start zoom
   --light       light theme
   --snapshot    render one frame to stdout as text and exit
+  --pick        with --snapshot: print the features under that cell as JSON lines instead
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · n labels · t theme · q quit
+      +/- zoom · sideways swipe pans · i inspect · n labels · t theme · q quit
+
+inspect mode (i): hover shows what's under the pointer; click lists every feature there
+      (drawn or not) with its properties, size and location; click an entry or tab/shift+tab
+      to switch; y copies it as JSON; esc closes, i leaves inspect mode
 
 experimental: MAPTERM_SMOOTH=shift (pixel-smooth dragging) or MAPTERM_SMOOTH=1 (smooth
       up/down panning) on the Ghostty Smooth terminal fork; `s` then toggles it.
@@ -51,6 +56,7 @@ struct Args {
     zoom: Option<f64>,
     light: bool,
     snapshot: Option<(u16, u16)>,
+    pick: Option<(u16, u16)>,
     /// Experimental smooth scrolling, from MAPTERM_SMOOTH only (no flag): `1` pans the wheel
     /// smoothly, `shift` makes dragging pixel-exact (smooth protocol v3).
     smooth: bool,
@@ -64,7 +70,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, smooth, shift };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -80,6 +86,11 @@ fn args() -> Result<Args> {
                 let (c, r) = v.split_once('x').context("--snapshot COLSxROWS")?;
                 a.snapshot = Some((c.parse()?, r.parse()?));
             }
+            "--pick" => {
+                let v = it.next().context("--pick COL,ROW")?;
+                let (c, r) = v.split_once(',').context("--pick COL,ROW")?;
+                a.pick = Some((c.trim().parse()?, r.trim().parse()?));
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -92,6 +103,115 @@ fn args() -> Result<Args> {
 }
 
 type Done = (TileId, Result<Prepared>);
+
+/// Copy text to the system clipboard with OSC 52 (Ghostty and most modern terminals; herdr
+/// relays it).
+fn osc52_copy(text: &str) -> std::io::Result<()> {
+    const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let bytes = text.as_bytes();
+    let mut enc = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for i in 0..4 {
+            enc.push(if i <= chunk.len() { B64[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
+    let mut out = std::io::stdout();
+    write!(out, "\x1b]52;c;{enc}\x07")?;
+    out.flush()
+}
+
+/// Translated names (name:de, name_fr, ...) are collapsed in the panel; the JSON keeps them.
+fn is_translation(key: &str) -> bool {
+    (key.starts_with("name:") || key.starts_with("name_")) && key != "name_en" && key != "name:en"
+}
+
+fn fmt_area(km2: f64) -> String {
+    if km2 < 0.01 { format!("{:.0} m²", km2 * 1e6) } else { format!("{km2:.3} km²") }
+}
+
+fn fmt_len(km: f64) -> String {
+    if km < 1.0 { format!("{:.0} m", km * 1000.0) } else { format!("{km:.2} km") }
+}
+
+/// The inspector panel: the features under the clicked spot, then the selected one's details.
+/// Returns the screen rows of the list entries, so clicks can select them.
+fn draw_inspector(f: &mut ratatui::Frame, area: Rect, picks: &[mapterm::Pick], sel: usize) -> Vec<(u16, usize)> {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let title = format!(" inspect · {} of {} ", sel + 1, picks.len());
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(title);
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let w = inner.width.saturating_sub(1) as usize;
+    let cut = |s: &str, n: usize| if s.chars().count() > n { format!("{}…", s.chars().take(n.saturating_sub(1)).collect::<String>()) } else { s.to_string() };
+
+    // List of features under the spot.
+    const MAX_LIST: usize = 8;
+    let mut rows = Vec::new();
+    let mut list: Vec<Line> = Vec::new();
+    for (i, p) in picks.iter().enumerate().take(MAX_LIST) {
+        let marker = match p.geom {
+            mapterm::mvt::GeomType::Point => "•",
+            mapterm::mvt::GeomType::Line => "─",
+            _ => "▧",
+        };
+        let kind = p.kind();
+        let name = cut(&p.title(), w.saturating_sub(kind.chars().count() + 4).max(8));
+        let mut st = TStyle::new();
+        if i == sel {
+            st = st.add_modifier(Modifier::REVERSED);
+        }
+        list.push(Line::from(vec![Span::styled(format!(" {marker} {name}"), st), Span::styled(format!("  {kind}"), dim)]));
+        rows.push((inner.y + i as u16, i));
+    }
+    if picks.len() > MAX_LIST {
+        list.push(Line::from(Span::styled(format!("   … {} more (tab)", picks.len() - MAX_LIST), dim)));
+    }
+    let list_h = list.len() as u16;
+    f.render_widget(Paragraph::new(list), Rect { height: list_h.min(inner.height), ..inner });
+
+    // Details of the selected feature.
+    let Some(p) = picks.get(sel) else { return rows };
+    let key = |k: &str| Span::styled(format!(" {k:<11}"), dim);
+    let mut d: Vec<Line> = vec![Line::default(), Line::from(Span::styled(format!(" {}", p.title()), TStyle::new().add_modifier(Modifier::BOLD)))];
+    d.push(Line::from(vec![key("layer"), Span::raw(p.layer.to_string())]));
+    let geom = mapterm::pick::geom_name(p.geom);
+    d.push(Line::from(vec![key("geometry"), Span::raw(if p.drawn { geom.to_string() } else { format!("{geom} (not drawn)") })]));
+    d.push(Line::from(vec![key("center"), Span::raw(format!("{:.5}, {:.5}", p.stats.center.1, p.stats.center.0))]));
+    if let Some(l) = p.stats.length_km {
+        d.push(Line::from(vec![key("length"), Span::raw(fmt_len(l))]));
+    }
+    if let Some(a) = p.stats.area_km2 {
+        d.push(Line::from(vec![key("area"), Span::raw(fmt_area(a))]));
+    }
+    d.push(Line::from(vec![key("vertices"), Span::raw(p.stats.vertices.to_string())]));
+    d.push(Line::from(vec![key("tile"), Span::raw(format!("{}/{}/{}", p.tile.0, p.tile.1, p.tile.2))]));
+    d.push(Line::default());
+    d.push(Line::from(Span::styled(" properties", TStyle::new().add_modifier(Modifier::BOLD))));
+    let mut translations = 0;
+    for (k, v) in &p.props {
+        if is_translation(k) {
+            translations += 1;
+            continue;
+        }
+        d.push(Line::from(vec![key(&cut(k, 11)), Span::raw(v.to_string())]));
+    }
+    if translations > 0 {
+        d.push(Line::from(Span::styled(format!(" + {translations} translated names (in the JSON)"), dim)));
+    }
+    if p.props.is_empty() {
+        d.push(Line::from(Span::styled(" (none)", dim)));
+    }
+    d.push(Line::default());
+    d.push(Line::from(Span::styled(" tab next · y copy JSON · esc close", dim)));
+    let rest = Rect { y: inner.y + list_h, height: inner.height.saturating_sub(list_h), ..inner };
+    f.render_widget(Paragraph::new(d).wrap(Wrap { trim: false }), rest);
+    rows
+}
 
 /// Cell size in pixels, when the terminal reports its pixel size (needed for SGR-pixels mouse).
 fn cell_px() -> Option<(f64, f64)> {
@@ -150,6 +270,12 @@ async fn main() -> Result<()> {
                 Err(e) => eprintln!("tile {id:?}: {e:#}"),
             }
         }
+        if let Some((c, r)) = a.pick {
+            for p in mapterm::pick(&store, &cam, src.min_zoom, src.max_zoom, area, c, r) {
+                println!("{}", p.to_json());
+            }
+            return Ok(());
+        }
         let mut buf = Buffer::empty(area);
         MapWidget { store: &store, camera: &cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &[], labels: true }
             .render(area, &mut buf);
@@ -191,7 +317,16 @@ async fn main() -> Result<()> {
     if smooth_on {
         apply_smooth(&mut ctl, true)?;
     }
-    let mut clicked: Option<mapterm::Click> = None;
+    // Inspect mode: features under the clicked spot, the selected one, and a hover preview.
+    let mut inspect = false;
+    let mut picks: Vec<mapterm::Pick> = Vec::new();
+    let mut sel = 0usize;
+    let mut click_at: Option<(f64, f64)> = None;
+    let mut hover: Option<((u16, u16), String)> = None;
+    let mut list_rows: Vec<(u16, usize)> = Vec::new();
+    let mut panel_area = Rect::default();
+    let mut note: Option<(Instant, String)> = None;
+    let mut last_cam = cam;
     let mut map_area = Rect::default();
     let mut frame_ms = 0.0f64;
     let result: Result<()> = async {
@@ -205,13 +340,35 @@ async fn main() -> Result<()> {
             // With shift, render on the cell grid and let the terminal draw the sub-cell rest.
             let (draw_cam, ox, oy) = if smooth_on && shift_mode { smooth::snap(&cam) } else { (cam, 0, 0) };
             let box_rect = ctl.box_rect();
+            last_cam = draw_cam;
+            // Highlight the selected feature and the clicked spot.
+            let mut overlays = Vec::new();
+            if let Some(p) = picks.get(sel) {
+                let hl = Color::Rgb(255, 215, 0);
+                if p.geom == mapterm::mvt::GeomType::Point {
+                    for &(lon, lat) in p.lonlat.iter().flatten() {
+                        overlays.push(Overlay::Marker { lon, lat, glyph: "◎".into(), style: TStyle::new().fg(hl), label: None, priority: 100 });
+                    }
+                } else {
+                    for part in &p.lonlat {
+                        overlays.push(Overlay::Line { pts: part.clone(), color: hl });
+                    }
+                }
+            }
+            if let (true, Some((lon, lat))) = (inspect && !picks.is_empty(), click_at) {
+                overlays.push(Overlay::Marker { lon, lat, glyph: "+".into(), style: TStyle::new().fg(Color::Rgb(255, 215, 0)), label: None, priority: 99 });
+            }
             term.draw(|f| {
-                let [m, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+                let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+                let panel_w = if inspect && !picks.is_empty() { 52.min(main.width / 2) } else { 0 };
+                let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
                 map_area = m;
+                panel_area = panel;
                 f.render_widget(
-                    MapWidget { store: &store, camera: &draw_cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &[], labels },
+                    MapWidget { store: &store, camera: &draw_cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &overlays, labels },
                     m,
                 );
+                list_rows = if panel_w > 0 { draw_inspector(f, panel, &picks, sel) } else { Vec::new() };
                 if let Some(r) = box_rect {
                     f.render_widget(Block::bordered().border_style(TStyle::new().fg(Color::Yellow)), r);
                 }
@@ -225,8 +382,18 @@ async fn main() -> Result<()> {
                     cam.lon,
                     if km < 1.0 { format!("{:.0} m", km * 1000.0) } else { format!("{km:.1} km") }
                 ))];
-                if let Some(k) = clicked {
-                    spans.push(Span::styled(format!("clicked {:.5},{:.5} ", k.lat, k.lon), TStyle::new().fg(Color::Cyan)));
+                if inspect {
+                    spans.push(Span::styled("inspect ", TStyle::new().fg(Color::Black).bg(Color::Rgb(255, 215, 0))));
+                    spans.push(Span::raw(" "));
+                    match &hover {
+                        Some((_, h)) => spans.push(Span::styled(format!("{h} "), TStyle::new().fg(Color::Rgb(255, 215, 0)))),
+                        None => spans.push(Span::styled("click a spot to inspect · i to leave ", dim)),
+                    }
+                }
+                if let Some((t, n)) = &note
+                    && t.elapsed() < Duration::from_secs(3)
+                {
+                    spans.push(Span::styled(format!("{n} "), TStyle::new().fg(Color::Green)));
                 }
                 if !pending.is_empty() {
                     spans.push(Span::styled(format!("loading {} ", pending.len()), TStyle::new().fg(Color::Yellow)));
@@ -295,6 +462,31 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
                                 match k.code {
+                                    KeyCode::Esc if !picks.is_empty() => {
+                                        picks.clear();
+                                        click_at = None;
+                                    }
+                                    KeyCode::Esc if inspect => {
+                                        inspect = false;
+                                        hover = None;
+                                    }
+                                    KeyCode::Char('i') => {
+                                        inspect = !inspect;
+                                        if !inspect {
+                                            picks.clear();
+                                            click_at = None;
+                                            hover = None;
+                                        }
+                                    }
+                                    KeyCode::Tab if !picks.is_empty() => sel = (sel + 1) % picks.len(),
+                                    KeyCode::BackTab if !picks.is_empty() => sel = (sel + picks.len() - 1) % picks.len(),
+                                    KeyCode::Char('y') if !picks.is_empty() => {
+                                        if let Some(p) = picks.get(sel) {
+                                            let json = serde_json::to_string_pretty(&p.to_json()).unwrap_or_default();
+                                            osc52_copy(&json)?;
+                                            note = Some((Instant::now(), format!("copied {} as JSON", p.title())));
+                                        }
+                                    }
                                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                                     KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
                                     KeyCode::Char('n') => labels = !labels,
@@ -317,9 +509,41 @@ async fn main() -> Result<()> {
                             }
                             Event::Resize(..) if ctl.pixel_mouse.is_some() => ctl.pixel_mouse = cell_px(),
                             Event::Mouse(m) => {
+                                // The cell under the pointer (reports are in pixels in pixel-mouse mode).
+                                let cell = match ctl.pixel_mouse {
+                                    Some((cw, ch)) => ((m.column as f64 / cw) as u16, (m.row as f64 / ch) as u16),
+                                    None => (m.column, m.row),
+                                };
+                                let pos = ratatui::layout::Position::new(cell.0, cell.1);
+                                // Clicks in the inspector select a feature; the map never sees them.
+                                if panel_area.width > 0 && panel_area.contains(pos) {
+                                    if m.kind == event::MouseEventKind::Down(event::MouseButton::Left)
+                                        && let Some((_, i)) = list_rows.iter().find(|(r, _)| *r == cell.1)
+                                    {
+                                        sel = *i;
+                                    }
+                                    continue;
+                                }
+                                if inspect && m.kind == event::MouseEventKind::Moved && map_area.contains(pos) {
+                                    if hover.as_ref().is_none_or(|(c, _)| *c != cell) {
+                                        let under = mapterm::pick(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, cell.0, cell.1);
+                                        hover = under.first().map(|p| {
+                                            let more = if under.len() > 1 { format!(" +{} more", under.len() - 1) } else { String::new() };
+                                            (cell, format!("{} ({}){more}", p.title(), p.kind()))
+                                        });
+                                    }
+                                    continue;
+                                }
                                 ctl.mouse(m);
-                                if let Some(k) = ctl.take_click() {
-                                    clicked = Some(k);
+                                if let Some(k) = ctl.take_click()
+                                    && inspect
+                                {
+                                    picks = mapterm::pick(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, k.col, k.row);
+                                    sel = 0;
+                                    click_at = Some((k.lon, k.lat));
+                                    if picks.is_empty() {
+                                        note = Some((Instant::now(), "nothing here".into()));
+                                    }
                                 }
                             }
                             _ => {}

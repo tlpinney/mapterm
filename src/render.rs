@@ -425,7 +425,7 @@ impl Widget for MapWidget<'_> {
                     cv.fill(&rings, *c);
                 }
                 Paint::Line(c) => {
-                    for part in &it.parts {
+                    for part in it.parts.iter() {
                         let pts: Vec<(f64, f64)> = part.iter().map(to_dot).collect();
                         for s in pts.windows(2) {
                             cv.line(s[0], s[1], *c);
