@@ -21,6 +21,7 @@ pub struct Stats {
     pub length_km: Option<f64>,
     /// Area of a polygon in km² (holes subtracted).
     pub area_km2: Option<f64>,
+    /// How many vertices it has.
     pub vertices: usize,
 }
 
@@ -29,8 +30,11 @@ pub struct Stats {
 pub struct Pick {
     /// The vector tile the feature came from (None for GeoJSON layers).
     pub tile: Option<TileId>,
+    /// The source-layer (vector tiles) or source id (GeoJSON) it came from.
     pub layer: Arc<str>,
+    /// Points, lines or polygons.
     pub geom: GeomType,
+    /// Its properties, the identifying ones first.
     pub props: Vec<(String, Value)>,
     /// Geometry in (lon, lat): points, lines, or polygon rings.
     pub lonlat: Vec<Vec<(f64, f64)>>,
@@ -42,10 +46,12 @@ pub struct Pick {
     pub style_layer: Option<Arc<str>>,
     /// The feature's id (or the source's `promoteId` property), the key for feature state.
     pub id: Option<Value>,
+    /// Its center, length or area, and vertex count.
     pub stats: Stats,
 }
 
 impl Pick {
+    /// A property by name.
     pub fn prop(&self, key: &str) -> Option<&Value> {
         self.props.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
@@ -99,6 +105,7 @@ impl Pick {
     }
 }
 
+/// `point`, `line`, `polygon` or `unknown`.
 pub fn geom_name(g: GeomType) -> &'static str {
     match g {
         GeomType::Point => "point",
