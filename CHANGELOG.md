@@ -4,7 +4,9 @@ All notable changes to mapterm are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor version may break the API).
 
-## [Unreleased]
+## [0.1.2] - 2026-11-01
+
+Cleaner rivers in the built-in style, and label-free snapshots.
 
 ### Added
 
@@ -150,7 +152,7 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
-[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.1.1...HEAD
+[0.1.2]: https://github.com/tlpinney/mapterm/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tlpinney/mapterm/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.3...v0.1.0
 [0.1.0-alpha.3]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.2...v0.1.0-alpha.3
