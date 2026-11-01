@@ -113,7 +113,8 @@ pub fn overlay_layers(source: &str, color: Color, fill: bool) -> Vec<crate::spec
     out
 }
 
-/// Load a layer from a path or http(s) URL.
+/// Load a layer from a path or http(s) URL: GeoJSON, or CSV, GPX or KML (by extension, else
+/// by content; see [`crate::formats`]).
 pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
     let bytes = if spec.starts_with("http://") || spec.starts_with("https://") {
         let http = crate::source::http_client();
@@ -125,8 +126,20 @@ pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
         }
         std::fs::read(spec).with_context(|| format!("reading {spec}"))?
     };
-    let name = spec.rsplit('/').next().unwrap_or(spec).trim_end_matches(".geojson").trim_end_matches(".json").to_string();
-    tokio::task::spawn_blocking(move || parse(&bytes, name, color)).await?
+    // The layer's name: the file name without its extension.
+    let file = spec.rsplit('/').next().unwrap_or(spec).split(['?', '#']).next().unwrap_or(spec);
+    let name = match file.rsplit_once('.') {
+        Some((stem, ext)) if ["geojson", "json", "csv", "tsv", "txt", "gpx", "kml"].contains(&ext.to_ascii_lowercase().as_str()) => stem.to_string(),
+        _ => file.to_string(),
+    };
+    let spec = spec.to_string();
+    tokio::task::spawn_blocking(move || {
+        // CSV, GPX and KML become GeoJSON first.
+        let doc = crate::formats::to_geojson(&spec, &bytes).with_context(|| format!("{spec}: not GeoJSON, CSV, GPX or KML"))?;
+        let (features, bbox) = features(&doc)?;
+        Ok(GeoJson { name, color, features, bbox, fill: true, labels: true })
+    })
+    .await?
 }
 
 /// Parse a GeoJSON document (FeatureCollection, Feature, or bare geometry).

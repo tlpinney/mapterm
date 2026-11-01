@@ -25,6 +25,7 @@ pub mod export;
 pub mod cluster;
 pub mod events;
 pub mod expr;
+pub mod formats;
 pub mod geocode;
 pub mod geojson;
 pub mod icons;

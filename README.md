@@ -54,7 +54,14 @@ They follow the MapLibre GL / Mapbox GL defaults:
 
 ```sh
 mapterm --geojson sites.geojson --geojson https://example.com/routes.geojson
+mapterm --geojson stores.csv --geojson run.gpx --geojson places.kml
 ```
+
+Besides GeoJSON it reads CSV/TSV with latitude/longitude columns (`lat`,
+`latitude`, `lon`, `lng`, `longitude`, any case) or a WKT geometry column, GPX
+(waypoints, tracks, routes) and KML (placemarks with their names, descriptions
+and extended data; unzip KMZ first). The format comes from the extension, else
+the content.
 
 - Points, lines and polygons (including Multi* and GeometryCollection), each
   layer in its own color with a legend in the status bar; polygon interiors are
