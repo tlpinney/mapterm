@@ -453,10 +453,14 @@ impl RasterTile {
         let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
         // Sample a few points instead of every pixel: cells are small next to tiles.
         let step = ((w.max(h)) / 4).max(1);
-        let mut yy = y.min(ih.saturating_sub(1));
-        while yy < y1.max(yy + 1) && yy < ih {
-            let mut xx = x.min(iw.saturating_sub(1));
-            while xx < x1.max(xx + 1) && xx < iw {
+        // At least one pixel, inside the image (the bounds are fixed before the loops: a
+        // bound that moves with the cursor would run on to the image's edge).
+        let (x0, y0) = (x.min(iw.saturating_sub(1)), y.min(ih.saturating_sub(1)));
+        let (x1, y1) = (x1.max(x0 + 1).min(iw), y1.max(y0 + 1).min(ih));
+        let mut yy = y0;
+        while yy < y1 {
+            let mut xx = x0;
+            while xx < x1 {
                 let p = self.rgba.get_pixel(xx, yy);
                 (r, g, b, n) = (r + p[0] as u32, g + p[1] as u32, b + p[2] as u32, n + 1);
                 xx += step;
@@ -664,6 +668,19 @@ impl Widget for RasterCells<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn average_covers_only_its_rectangle() {
+        let mut rgba = image::RgbaImage::new(8, 8);
+        for (x, y, p) in rgba.enumerate_pixels_mut() {
+            *p = if x < 2 && y < 2 { image::Rgba([200, 0, 0, 255]) } else { image::Rgba([0, 0, 200, 255]) };
+        }
+        let t = RasterTile { id: 0, png: Vec::new(), rgba };
+        assert_eq!(t.average(0, 0, 2, 2), Color::Rgb(200, 0, 0));
+        assert_eq!(t.average(1, 1, 1, 1), Color::Rgb(200, 0, 0));
+        assert_eq!(t.average(4, 4, 2, 2), Color::Rgb(0, 0, 200));
+        assert_eq!(t.average(7, 7, 4, 4), Color::Rgb(0, 0, 200), "clipped at the edge");
+    }
 
     #[test]
     fn urls_xyz_and_tms() {
