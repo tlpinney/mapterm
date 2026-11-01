@@ -122,6 +122,14 @@ fn osc52_copy(text: &str) -> std::io::Result<()> {
     out.flush()
 }
 
+/// Set the mouse pointer shape (OSC 22: "crosshair", "default", ...). Terminals that don't
+/// support it ignore the sequence.
+fn set_pointer(shape: &str) -> std::io::Result<()> {
+    let mut out = std::io::stdout();
+    write!(out, "\x1b]22;{shape}\x1b\\")?;
+    out.flush()
+}
+
 /// Translated names (name:de, name_fr, ...) are collapsed in the panel; the JSON keeps them.
 fn is_translation(key: &str) -> bool {
     (key.starts_with("name:") || key.starts_with("name_")) && key != "name_en" && key != "name:en"
@@ -176,7 +184,7 @@ fn draw_inspector(f: &mut ratatui::Frame, area: Rect, picks: &[mapterm::Pick], s
 
     // Details of the selected feature.
     let Some(p) = picks.get(sel) else { return rows };
-    let key = |k: &str| Span::styled(format!(" {k:<11}"), dim);
+    let key = |k: &str| Span::styled(format!(" {k:<17}"), dim);
     let mut d: Vec<Line> = vec![Line::default(), Line::from(Span::styled(format!(" {}", p.title()), TStyle::new().add_modifier(Modifier::BOLD)))];
     d.push(Line::from(vec![key("layer"), Span::raw(p.layer.to_string())]));
     let geom = mapterm::pick::geom_name(p.geom);
@@ -198,7 +206,7 @@ fn draw_inspector(f: &mut ratatui::Frame, area: Rect, picks: &[mapterm::Pick], s
             translations += 1;
             continue;
         }
-        d.push(Line::from(vec![key(&cut(k, 11)), Span::raw(v.to_string())]));
+        d.push(Line::from(vec![key(&cut(k, 17)), Span::raw(v.to_string())]));
     }
     if translations > 0 {
         d.push(Line::from(Span::styled(format!(" + {translations} translated names (in the JSON)"), dim)));
@@ -323,6 +331,8 @@ async fn main() -> Result<()> {
     let mut sel = 0usize;
     let mut click_at: Option<(f64, f64)> = None;
     let mut hover: Option<((u16, u16), String)> = None;
+    // The cell under the pointer while inspecting, for the on-map crosshair.
+    let mut hover_cell: Option<(u16, u16)> = None;
     let mut list_rows: Vec<(u16, usize)> = Vec::new();
     let mut panel_area = Rect::default();
     let mut note: Option<(Instant, String)> = None;
@@ -354,6 +364,12 @@ async fn main() -> Result<()> {
                         overlays.push(Overlay::Line { pts: part.clone(), color: hl });
                     }
                 }
+            }
+            if let (true, Some((col, row))) = (inspect, hover_cell)
+                && map_area.contains(ratatui::layout::Position::new(col, row))
+            {
+                let (lon, lat) = Viewport::new(&draw_cam, map_area).cell_to_lonlat(col - map_area.x, row - map_area.y);
+                overlays.push(Overlay::Marker { lon, lat, glyph: "┼".into(), style: TStyle::new().fg(Color::Rgb(255, 215, 0)), label: None, priority: 98 });
             }
             if let (true, Some((lon, lat))) = (inspect && !picks.is_empty(), click_at) {
                 overlays.push(Overlay::Marker { lon, lat, glyph: "+".into(), style: TStyle::new().fg(Color::Rgb(255, 215, 0)), label: None, priority: 99 });
@@ -469,13 +485,17 @@ async fn main() -> Result<()> {
                                     KeyCode::Esc if inspect => {
                                         inspect = false;
                                         hover = None;
+                                        hover_cell = None;
+                                        set_pointer("default")?;
                                     }
                                     KeyCode::Char('i') => {
                                         inspect = !inspect;
+                                        set_pointer(if inspect { "crosshair" } else { "default" })?;
                                         if !inspect {
                                             picks.clear();
                                             click_at = None;
                                             hover = None;
+                                            hover_cell = None;
                                         }
                                     }
                                     KeyCode::Tab if !picks.is_empty() => sel = (sel + 1) % picks.len(),
@@ -524,7 +544,11 @@ async fn main() -> Result<()> {
                                     }
                                     continue;
                                 }
+                                if inspect && !map_area.contains(pos) {
+                                    hover_cell = None;
+                                }
                                 if inspect && m.kind == event::MouseEventKind::Moved && map_area.contains(pos) {
+                                    hover_cell = Some(cell);
                                     if hover.as_ref().is_none_or(|(c, _)| *c != cell) {
                                         let under = mapterm::pick(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, cell.0, cell.1);
                                         hover = under.first().map(|p| {
@@ -559,6 +583,7 @@ async fn main() -> Result<()> {
         let _ = std::io::stdout().write_all(smooth::SMOOTH_OFF.as_bytes());
     }
     let _ = set_pixel_mouse(false);
+    let _ = set_pointer("default");
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
     result
