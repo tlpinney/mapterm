@@ -222,12 +222,12 @@ async fn list_planet_mosaics(key_cmd: Option<&str>) -> Result<()> {
     let key = mapterm::raster::find_key(key_cmd, &["PL_API_KEY", "PLANET_API_KEY"])?
         .context("Planet needs a key: set PL_API_KEY or pass --raster-key-cmd")?;
     let auth = vec![("Authorization".to_string(), format!("Basic {}", mapterm::kitty::base64(format!("{key}:").as_bytes())))];
-    let http = mapterm::source::http_client();
+    let http = mapterm::source::keyed_client();
     const API: &str = "https://api.planet.com/";
     let mut url = format!("{API}basemaps/v1/mosaics");
     let mut count = 0;
     for _ in 0..20 {
-        let bytes = mapterm::source::get_limited(&http, &url, &auth, 16 << 20).await.context("Planet mosaics")?;
+        let bytes = mapterm::source::get_limited(http, &url, &auth, 16 << 20).await.context("Planet mosaics")?;
         let v: serde_json::Value = serde_json::from_slice(&bytes.context("Planet mosaics: not found")?)?;
         for m in v["mosaics"].as_array().into_iter().flatten() {
             let s = |k: &str| m[k].as_str().unwrap_or("").get(..10).unwrap_or("").to_string();
