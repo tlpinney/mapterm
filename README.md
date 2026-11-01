@@ -286,6 +286,10 @@ It is off unless you turn it on with an environment variable:
 With either set, `s` toggles it while mapterm runs. Terminals without the
 protocol ignore it and behave as usual.
 
+The animation at the top of this page and the full video were recorded this way:
+real mapterm in Ghostty Smooth with `MAPTERM_SMOOTH=shift`. In other terminals the map
+moves the same way, but a whole character at a time.
+
 ## License
 
 MIT. Map data © OpenStreetMap contributors.
