@@ -196,6 +196,9 @@ async fn load_basemap(spec: &str, source: &str, dark: bool, cam: Camera) -> Resu
     }
 }
 
+/// GeoJSON layers with more single points than this cluster them.
+const CLUSTER_ABOVE: usize = 1000;
+
 /// Ids of the layers the viewer adds.
 const RASTER: &str = "mapterm-raster";
 const OVERLAYS: &str = "mapterm-overlays";
@@ -597,7 +600,13 @@ async fn main() -> Result<()> {
         if map.source(&id).is_some() {
             id = format!("{id}-{}", i + 1);
         }
-        map.add_source(&id, MapSource::from(g))?;
+        // Many points cluster (as MapLibre's `cluster: true`) so they don't bury the map.
+        let points = g.features.iter().filter(|f| f.geom == mapterm::mvt::GeomType::Point && f.parts.len() == 1).count();
+        let mut src = MapSource::from(g);
+        if points > CLUSTER_ABOVE {
+            src = src.with_cluster(mapterm::cluster::ClusterOptions::default());
+        }
+        map.add_source(&id, src)?;
         map.add_layers(mapterm::geojson::overlay_layers(&id, color, true), None)?;
         legend.push((id, color));
     }

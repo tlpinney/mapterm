@@ -63,6 +63,9 @@ mapterm --geojson sites.geojson --geojson https://example.com/routes.geojson
 - Without `--at`, the map starts zoomed to fit all layers.
 - Inspect mode (`i`) lists your features first, with all their properties, and
   `--snapshot ... --pick COL,ROW` prints them as JSON lines.
+- Big files stay fast: features are spatially indexed, and a layer with more
+  than 1,000 points clusters them (`◉ 152`) until you zoom in, as MapLibre's
+  `cluster: true` does.
 
 ## Raster layers
 
@@ -195,6 +198,9 @@ let under = map.query_rendered_features(&ctl.cam, area, dot, Some(&["pins"]));
   opacity (blended with the background), filters, zoom ranges, `text-field`,
   bold and italic fonts, `text-anchor` and `symbol-sort-key` are used. The
   `mapterm:glyph` layout property sets the character drawn at points.
+- GeoJSON sources are spatially indexed, and `with_cluster` (or `cluster: true`
+  in a style) clusters points; clusters carry `point_count` and
+  `point_count_abbreviated`, and `cluster_expansion_zoom` says where they split.
 - `events::Events` turns the pointer and clicks into MapLibre-style layer events
   (`Click`, `Enter`, `Leave` for the layers you name) and can set a `hover` feature
   state, so a layer styled with `["feature-state", "hover"]` lights up under the

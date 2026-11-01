@@ -67,8 +67,9 @@ impl GeoJson {
 }
 
 /// Style layers that draw a GeoJSON source in one color, the way `--geojson` does: tinted
-/// polygon fills (when `fill`), outlines and lines, `●` points with their names, and names
-/// at the middle of lines and polygons. Ids are `{source}-fill`, `-line`, `-point`, `-label`.
+/// polygon fills (when `fill`), outlines and lines, `●` points with their names, names at the
+/// middle of lines and polygons, and `◉` clusters with their point counts (for a clustered
+/// source). Ids are `{source}-fill`, `-line`, `-point`, `-cluster`, `-label`.
 pub fn overlay_layers(source: &str, color: Color, fill: bool) -> Vec<crate::spec::StyleLayer> {
     use crate::spec::StyleLayer;
     use serde_json::json;
@@ -88,9 +89,17 @@ pub fn overlay_layers(source: &str, color: Color, fill: bool) -> Vec<crate::spec
     out.push(StyleLayer::line(format!("{source}-line"), source).color(hex.as_str()));
     out.push(
         StyleLayer::symbol(format!("{source}-point"), source)
-            .filter(json!(["==", ["geometry-type"], "Point"]))
+            .filter(json!(["all", ["==", ["geometry-type"], "Point"], ["!", ["has", "point_count"]]]))
             .glyph("●")
             .text(name.clone())
+            .layout("text-font", bold.clone())
+            .color(hex.as_str()),
+    );
+    out.push(
+        StyleLayer::symbol(format!("{source}-cluster"), source)
+            .filter(json!(["has", "point_count"]))
+            .glyph("◉")
+            .text(json!(["get", "point_count_abbreviated"]))
             .layout("text-font", bold.clone())
             .color(hex.as_str()),
     );

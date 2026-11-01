@@ -111,6 +111,13 @@ impl Map {
                     if let Some(p) = s["promoteId"].as_str() {
                         src = src.with_promote_id(p);
                     }
+                    if s["cluster"].as_bool() == Some(true) {
+                        let d = crate::cluster::ClusterOptions::default();
+                        src = src.with_cluster(crate::cluster::ClusterOptions {
+                            radius_px: s["clusterRadius"].as_f64().unwrap_or(d.radius_px),
+                            max_zoom: s["clusterMaxZoom"].as_u64().map_or(d.max_zoom, |z| z.min(24) as u8),
+                        });
+                    }
                     map.add_source(id, src)?;
                 }
                 Some("raster") => match open_raster(s).await {

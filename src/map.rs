@@ -80,6 +80,16 @@ impl MapSource {
         }
     }
 
+    /// Cluster a GeoJSON source's points (MapLibre's `cluster: true`, `clusterRadius`,
+    /// `clusterMaxZoom`). Cluster features have `cluster`, `cluster_id`, `point_count` and
+    /// `point_count_abbreviated` properties.
+    pub fn with_cluster(mut self, options: crate::cluster::ClusterOptions) -> Self {
+        if let MapSource::GeoJson(g) = &mut self {
+            g.set_cluster(Some(options));
+        }
+        self
+    }
+
     /// Use a property as the feature id (MapLibre's `promoteId`), for feature state.
     pub fn with_promote_id(mut self, prop: impl Into<String>) -> Self {
         match &mut self {
@@ -201,7 +211,7 @@ impl KittyState {
 
 impl From<geojson::GeoJson> for MapSource {
     fn from(g: geojson::GeoJson) -> Self {
-        MapSource::GeoJson(GeoJsonSource { features: g.features, bbox: g.bbox, attribution: None, promote_id: None })
+        MapSource::GeoJson(GeoJsonSource::new(g.features, g.bbox))
     }
 }
 
@@ -217,19 +227,52 @@ pub struct VectorSource {
 }
 
 pub struct GeoJsonSource {
-    pub features: Vec<geojson::Feature>,
+    /// The features, with a spatial index so drawing and picking look only at those in view.
+    data: crate::cluster::Level,
     /// [min_x, min_y, max_x, max_y] in world coordinates.
     pub bbox: [f64; 4],
     /// Credit to show while the source is drawn (plain text).
     pub attribution: Option<String>,
     /// A property to use as the feature id (MapLibre's `promoteId`), for feature state.
     pub promote_id: Option<String>,
+    /// Point clusters by zoom, when clustering is on.
+    clusters: Option<crate::cluster::Clusters>,
 }
 
 impl GeoJsonSource {
+    pub fn new(features: Vec<geojson::Feature>, bbox: [f64; 4]) -> Self {
+        Self { data: crate::cluster::Level::new(features), bbox, attribution: None, promote_id: None, clusters: None }
+    }
+
     pub fn parse(doc: &Json) -> Result<Self> {
         let (features, bbox) = geojson::features(doc)?;
-        Ok(Self { features, bbox, attribution: None, promote_id: None })
+        Ok(Self::new(features, bbox))
+    }
+
+    /// The features as given.
+    pub fn features(&self) -> &[geojson::Feature] {
+        &self.data.features
+    }
+
+    /// Cluster nearby points (MapLibre's `cluster: true`); `None` turns it off.
+    pub fn set_cluster(&mut self, options: Option<crate::cluster::ClusterOptions>) {
+        self.clusters = options.map(|o| crate::cluster::Clusters::build(&self.data.features, o));
+    }
+
+    /// The clustering settings, if on.
+    pub fn cluster_options(&self) -> Option<crate::cluster::ClusterOptions> {
+        self.clusters.as_ref().map(|c| c.options)
+    }
+
+    /// The features to draw at `zoom` (clusters when on) and their index.
+    fn at(&self, zoom: f64) -> &crate::cluster::Level {
+        self.clusters.as_ref().and_then(|c| c.at(zoom)).unwrap_or(&self.data)
+    }
+
+    /// Features (of [`GeoJsonSource::at`]) whose boxes overlap `q` (world coordinates).
+    fn near(&self, zoom: f64, q: crate::index::BBox) -> impl Iterator<Item = &geojson::Feature> {
+        let level = self.at(zoom);
+        level.index.search(q).into_iter().map(move |i| &level.features[i])
     }
 }
 
@@ -614,12 +657,23 @@ impl Map {
         out
     }
 
+    /// The zoom at which a cluster of a clustered GeoJSON source splits into its parts
+    /// (MapLibre's `getClusterExpansionZoom`): fly there when a cluster is clicked.
+    pub fn cluster_expansion_zoom(&self, source: &str, cluster_id: u64) -> Option<f64> {
+        match self.source(source)? {
+            MapSource::GeoJson(g) => g.clusters.as_ref()?.expansion_zoom(cluster_id).map(f64::from),
+            _ => None,
+        }
+    }
+
     /// Replace a GeoJSON source's data (MapLibre's `setData`).
     pub fn set_data(&mut self, id: &str, doc: &Json) -> Result<()> {
         let mut data = GeoJsonSource::parse(doc)?;
         match self.sources.iter_mut().find(|(s, _)| s == id) {
             Some((_, MapSource::GeoJson(g))) => {
                 data.attribution = g.attribution.take();
+                data.promote_id = g.promote_id.take();
+                data.set_cluster(g.cluster_options());
                 *g = data;
             }
             Some(_) => bail!("source \"{id}\" is not a GeoJSON source"),
@@ -631,7 +685,7 @@ impl Map {
     /// Lon/lat bounds (west, south, east, north) of a GeoJSON source, for fitting the view.
     pub fn source_bounds(&self, id: &str) -> Option<(f64, f64, f64, f64)> {
         match self.source(id)? {
-            MapSource::GeoJson(g) if !g.features.is_empty() => {
+            MapSource::GeoJson(g) if !g.features().is_empty() => {
                 let (w, n) = to_lonlat(g.bbox[0], g.bbox[1]);
                 let (e, s) = to_lonlat(g.bbox[2], g.bbox[3]);
                 Some((w, s, e, n))
@@ -1120,7 +1174,7 @@ impl Map {
                     }
                 }
                 Some(MapSource::GeoJson(g)) => {
-                    for f in &g.features {
+                    for f in g.near(cam.zoom, near_box(&vp, target)) {
                         let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
                         if resolve(l, &c, cam.zoom, bg).is_none() {
                             continue;
@@ -1203,7 +1257,7 @@ impl Map {
                     }
                 }
                 MapSource::GeoJson(g) => {
-                    for f in &g.features {
+                    for f in g.near(cam.zoom, near_box(&vp, target)) {
                         let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
                         let Some((rank, score)) = hit(f.geom, &dots, target, true) else { continue };
                         let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
@@ -1499,6 +1553,16 @@ fn along(part: &[(f64, f64)], spacing: f64) -> Vec<(f64, f64)> {
     out
 }
 
+/// A box (world coordinates) around a spot in dots, wide enough for the hit tolerances.
+fn near_box(vp: &Viewport, target: (f64, f64)) -> crate::index::BBox {
+    let tol = 6.0;
+    let (w, n) = vp.dot_to_lonlat(target.0 - tol, target.1 - tol);
+    let (e, s) = vp.dot_to_lonlat(target.0 + tol, target.1 + tol);
+    let (x0, y0) = to_world(w, n);
+    let (x1, y1) = to_world(e, s);
+    [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]
+}
+
 /// An expression value as JSON.
 fn val_json(v: &Val) -> Json {
     match v {
@@ -1571,7 +1635,7 @@ impl Widget for MapView<'_> {
                         }
                     }
                     Some(MapSource::GeoJson(g)) => {
-                        for f in &g.features {
+                        for f in g.near(cam.zoom, ctx.world_view()) {
                             if !ctx.visible(f.bbox) {
                                 continue;
                             }
@@ -1886,7 +1950,7 @@ mod tests {
         map.add_source("mine", MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
             {"type": "Feature", "properties": {"name": "Pin"}, "geometry": {"type": "Point", "coordinates": [-77.0353, 38.8895]}}]})).unwrap()).unwrap();
         map.add_layers(crate::geojson::overlay_layers("mine", Color::Rgb(255, 99, 132), true), None).unwrap();
-        assert_eq!(map.layer_ids(), vec!["mine-fill", "mine-line", "mine-point", "mine-label"]);
+        assert_eq!(map.layer_ids(), vec!["mine-fill", "mine-line", "mine-point", "mine-cluster", "mine-label"]);
         let cam = Camera::new(-77.0353, 38.8895, 15.0);
         let buf = render(&map, &cam, Rect::new(0, 0, 60, 20));
         let row: String = (0..60).map(|x| buf[(x, 10)].symbol().to_string()).collect();
@@ -2117,5 +2181,32 @@ mod tests {
         map.set_feature_state("g", &crate::mvt::Value::Str("DC".into()), &json!({"on": true})).unwrap();
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(0, 255, 0));
         assert_eq!(map.query_features(&cam, area, (40.0, 40.0))[0].id, Some(crate::mvt::Value::Str("DC".into())));
+    }
+
+    #[test]
+    fn clustered_geojson_source() {
+        // 50 points in a tight group plus one far away.
+        let mut feats: Vec<Json> = (0..50).map(|i| json!({"type": "Feature", "properties": {"name": format!("p{i}")},
+            "geometry": {"type": "Point", "coordinates": [-77.03 + i as f64 * 1e-5, 38.89]}})).collect();
+        feats.push(json!({"type": "Feature", "properties": {"name": "far"}, "geometry": {"type": "Point", "coordinates": [-76.0, 38.89]}}));
+        let doc = json!({"type": "FeatureCollection", "features": feats});
+        let mut map = Map::new();
+        map.add_source("pts", MapSource::geojson(&doc).unwrap().with_cluster(crate::cluster::ClusterOptions::default())).unwrap();
+        map.add_layers(crate::geojson::overlay_layers("pts", Color::Rgb(255, 99, 132), false), None).unwrap();
+        let area = Rect::new(0, 0, 80, 20);
+        let cam = Camera::new(-77.03, 38.89, 10.0);
+        let rows = text_rows(&render(&map, &cam, area)).join("\n");
+        assert!(rows.contains("◉ 50"), "one cluster of 50: {rows}");
+        let picks = map.query_rendered_features(&cam, area, (80.0, 40.0), Some(&["pts-cluster"]));
+        assert_eq!(picks.len(), 1);
+        let Some(crate::mvt::Value::Num(id)) = picks[0].prop("cluster_id").cloned() else { panic!("{:?}", picks[0]) };
+        let z = map.cluster_expansion_zoom("pts", id as u64).unwrap();
+        assert!(z > 10.0, "{z}");
+        // Past the cluster max zoom, the points themselves.
+        let close = Camera::new(-77.03, 38.89, 15.5);
+        assert!(!text_rows(&render(&map, &close, area)).join("").contains('◉'));
+        // New data keeps clustering on.
+        map.set_data("pts", &doc).unwrap();
+        assert!(text_rows(&render(&map, &cam, area)).join("").contains("◉ 50"));
     }
 }

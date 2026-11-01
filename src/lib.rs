@@ -22,11 +22,13 @@
 //! - [`smooth`] opt-in pixel smooth vertical panning for the Ghostty smooth-scroll fork.
 
 pub mod export;
+pub mod cluster;
 pub mod events;
 pub mod expr;
 pub mod geocode;
 pub mod geojson;
 pub mod icons;
+pub mod index;
 pub mod interact;
 pub mod kitty;
 pub mod layer;
