@@ -1,7 +1,11 @@
+<img align="right" src="https://raw.githubusercontent.com/tlpinney/mapterm/main/assets/wordmark.png" alt="mapterm, written in braille" width="220">
+
 # mapterm
 
 A map in your terminal, with the pan, zoom and styling of a web map, that also works
 over SSH.
+
+<img src="https://raw.githubusercontent.com/tlpinney/mapterm/main/assets/hero.jpg" alt="mapterm in a terminal: the Potomac from Key Bridge to Georgetown, with roads, parks and labels drawn in braille characters">
 
 - **Any vector tiles:** OpenFreeMap out of the box (no key), PMTiles files locally or over
   HTTP, XYZ URLs and TileJSON, drawn in braille with cell-color fills and labels that

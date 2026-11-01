@@ -13,7 +13,7 @@ keywords = ["map", "terminal", "tui", "ratatui", "maplibre"]
 categories = ["command-line-utilities", "science::geo", "visualization"]
 # Kept out of the package: CI and release tooling, and the integration tests with their
 # fixtures (they live in the repository).
-exclude = [".github/", "tests/", "deny.toml", "release/", "signing/", "fuzz/"]
+exclude = [".github/", "tests/", "deny.toml", "release/", "signing/", "fuzz/", "assets/"]
 
 [dependencies]
 anyhow = "1.0.104"
