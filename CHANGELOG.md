@@ -4,6 +4,21 @@ All notable changes to mapterm are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor version may break the API).
 
+## [Unreleased]
+
+### Added
+
+- `--no-labels` starts the viewer with labels and symbols hidden, as if `n` had been
+  pressed (`n` shows them). With `--snapshot` it prints a frame of map lines and fills
+  only, e.g. for images: labels otherwise take cells where the map would be drawn.
+
+### Changed
+
+- The built-in style draws rivers in the water color from zoom 11, as MapLibre styles do,
+  so a river's centerline disappears into its water polygon instead of showing as a
+  stray line down the river, or as a stub where a creek flows into a wider river.
+  Streams, canals and ditches stay bright, and rivers stay bright below zoom 11.
+
 ## [0.1.1] - 2026-11-01
 
 Security fixes for memory use and API keys.
@@ -135,6 +150,7 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
+[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/tlpinney/mapterm/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.3...v0.1.0
 [0.1.0-alpha.3]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.2...v0.1.0-alpha.3

@@ -322,13 +322,20 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
     };
     let poly = json!(["==", ["geometry-type"], "Polygon"]);
     let lines = json!(["==", ["geometry-type"], "LineString"]);
+    // A river's centerline runs down the middle of its water polygon and stops at its mouth,
+    // so drawn bright it shows as a stray line, and as a stub into the water it flows into.
+    // From z11, where rivers have polygons, they take the water color (as MapLibre styles do)
+    // and disappear into them; streams, canals and ditches stay bright.
+    let river_line = |attr: &str| {
+        json!(["match", ["get", attr], "river", ["step", ["zoom"], waterway.clone(), 11, water.clone()], waterway.clone()])
+    };
     match schema {
         Schema::OpenMapTiles => {
             layers.push(fill("park", "park", poly.clone(), &park, 0));
             layers.push(fill("landcover", "landcover", json!(["in", ["get", "class"], ["literal", ["wood", "grass", "forest"]]]), &park, 0));
             layers.push(fill("water", "water", poly.clone(), &water, 0));
             layers.push(fill("building", "building", poly.clone(), &building, 14));
-            layers.push(line("waterway", "waterway", lines.clone(), &waterway, 9));
+            layers.push(line("waterway", "waterway", lines.clone(), &river_line("class"), 9));
             layers.push(line("boundary", "boundary", json!(["all", ["<=", ["get", "admin_level"], 4], ["!=", ["get", "maritime"], 1]]), &boundary, 0));
             layers.push(line("rail", "transportation", json!(["in", ["get", "class"], ["literal", ["rail", "transit"]]]), &rail, 11));
             for (name, color, min, _, _) in &roads {
@@ -372,7 +379,7 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
             layers.push(fill("landcover", "landcover", json!(["in", ["get", "kind"], ["literal", ["forest", "wood", "grass", "meadow"]]]), &park, 0));
             layers.push(fill("water", "water", poly.clone(), &water, 0));
             layers.push(fill("building", "buildings", poly.clone(), &building, 15));
-            layers.push(line("waterway", "water", lines.clone(), &waterway, 0));
+            layers.push(line("waterway", "water", lines.clone(), &river_line("kind"), 0));
             layers.push(line("boundary", "boundaries", json!(["in", ["get", "kind"], ["literal", ["country", "region"]]]), &boundary, 0));
             layers.push(line("rail", "roads", json!(["==", ["get", "kind"], "rail"]), &rail, 0));
             layers.push(line("transit", "transit", lines.clone(), &rail, 11));

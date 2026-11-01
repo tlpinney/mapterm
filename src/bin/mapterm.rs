@@ -31,7 +31,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL, drawn
                 with mapterm's terminal style (default: OpenFreeMap planet)
@@ -61,7 +61,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --raster-attribution T  credit for the layer (known providers are filled in)
   --tms                   count raster rows from the bottom (TMS) even with a plain {y}
   --light       light theme (the built-in style; t switches)
-  --snapshot    render one frame to stdout as text and exit
+  --no-labels   start with labels and symbols hidden (n shows them); with --snapshot, a
+                frame of map lines and fills only
+  --snapshot   render one frame to stdout as text and exit
   --format      with --snapshot: text (default), ansi (24-bit color) or html (a <pre> fragment)
   --pick        with --snapshot: print the features under that cell as JSON lines instead
 
@@ -88,6 +90,8 @@ struct Args {
     at: Option<(f64, f64)>,
     zoom: Option<f64>,
     light: bool,
+    /// --no-labels: start with symbol layers hidden, as if `n` had been pressed.
+    no_labels: bool,
     snapshot: Option<(u16, u16)>,
     /// --snapshot output: text, ansi or html.
     format: String,
@@ -114,7 +118,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, snapshot: None, format: "text".into(), pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
+    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, no_labels: false, snapshot: None, format: "text".into(), pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -126,6 +130,7 @@ fn args() -> Result<Args> {
             "--style" => a.style = Some(it.next().context("--style NAME|URL|FILE")?),
             "-z" | "--zoom" => a.zoom = Some(it.next().context("-z ZOOM")?.parse()?),
             "--light" => a.light = true,
+            "--no-labels" => a.no_labels = true,
             "--raster" => a.raster = Some(it.next().context("--raster URL")?),
             "--tms" => a.tms = true,
             "--geojson" => a.geojson.push(it.next().context("--geojson FILE|URL")?),
@@ -616,7 +621,7 @@ async fn main() -> Result<()> {
     // Highlights, the crosshair and the clicked spot, on top of everything.
     map.add_custom_layer(OVERLAYS, Markers::default(), None)?;
     let mut base = base_visibility(&map);
-    let mut labels = true;
+    let mut labels = !a.no_labels;
     // Vector overlay: 0 = everything (no fills over a raster), 1 = labels only, 2 = off.
     let mut vector: u8 = 0;
     apply_toggles(&mut map, &base, labels, vector, raster.is_some());

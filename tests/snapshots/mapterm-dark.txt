@@ -54,11 +54,11 @@
     1 fg Rgb(210, 195, 110) bg Rgb(22, 42, 70)
    20 fg Rgb(210, 195, 110) bg Rgb(26, 50, 32)
    20 fg Rgb(210, 195, 110) bg Rgb(48, 48, 54)
+   20 fg Rgb(22, 42, 70) bg Rgb(22, 42, 70)
   448 fg Rgb(235, 110, 60) bg Reset
    65 fg Rgb(235, 110, 60) bg Rgb(22, 42, 70)
    24 fg Rgb(235, 110, 60) bg Rgb(26, 50, 32)
    40 fg Rgb(235, 110, 60) bg Rgb(48, 48, 54)
-   20 fg Rgb(80, 130, 190) bg Rgb(22, 42, 70)
   258 fg Rgb(88, 88, 88) bg Reset
     9 fg Rgb(88, 88, 88) bg Rgb(26, 50, 32)
    61 fg Rgb(88, 88, 88) bg Rgb(48, 48, 54)
