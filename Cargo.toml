@@ -1,6 +1,6 @@
 [package]
 name = "mapterm"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # The oldest Rust that builds it (the uuid dependency needs 1.89; mapterm itself 1.88).
 rust-version = "1.89"
