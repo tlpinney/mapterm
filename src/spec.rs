@@ -23,7 +23,7 @@
 //! | fill | `fill-color`, `fill-opacity`, `fill-outline-color` | `visibility` |
 //! | line | `line-color`, `line-opacity` | `visibility` |
 //! | circle | `circle-color`, `circle-opacity` | `visibility`, `mapterm:glyph` |
-//! | symbol | `text-color`, `text-opacity`, `icon-color`, `icon-opacity` | `visibility`, `text-field`, `text-font` (bold, italic), `text-transform`, `text-anchor`, `symbol-placement`, `symbol-sort-key`, `icon-image` (as a glyph), `mapterm:glyph` |
+//! | symbol | `text-color`, `text-opacity`, `icon-color`, `icon-opacity` | `visibility`, `text-field`, `text-font` (bold, italic), `text-transform`, `text-anchor`, `text-variable-anchor`, `text-offset`, `symbol-placement`, `symbol-spacing`, `symbol-sort-key`, `icon-image` (as a glyph), `mapterm:glyph` |
 //!
 //! `mapterm:glyph` is a mapterm extension: the character drawn for a point (`●` by default
 //! for circles; symbols draw it before their text, like a marker). Without it, a point's
@@ -101,8 +101,20 @@ const USED_PAINT: [&str; 13] = [
     "icon-color",
     "icon-opacity",
 ];
-const USED_LAYOUT: [&str; 9] =
-    ["text-field", "text-font", "text-transform", "text-anchor", "symbol-placement", "symbol-sort-key", "mapterm:glyph", "icon-image", "visibility"];
+const USED_LAYOUT: [&str; 12] = [
+    "text-field",
+    "text-font",
+    "text-transform",
+    "text-anchor",
+    "text-variable-anchor",
+    "text-offset",
+    "symbol-placement",
+    "symbol-spacing",
+    "symbol-sort-key",
+    "mapterm:glyph",
+    "icon-image",
+    "visibility",
+];
 
 /// One style layer.
 #[derive(Clone, Debug)]
@@ -295,7 +307,7 @@ fn set(props: &mut Vec<(String, Expr)>, name: &str, v: &Json) -> Result<()> {
     let e = match (name, v) {
         ("text-field", _) => Expr::parse_text(v)?,
         // An array of font names is a literal, not an expression.
-        ("text-font", Json::Array(a)) if a.iter().all(Json::is_string) => Expr::Lit(crate::expr::Val::Array(
+        ("text-font" | "text-variable-anchor", Json::Array(a)) if a.iter().all(Json::is_string) => Expr::Lit(crate::expr::Val::Array(
             a.iter().filter_map(Json::as_str).map(|s| crate::expr::Val::Str(s.to_string())).collect(),
         )),
         _ => Expr::parse(v)?,

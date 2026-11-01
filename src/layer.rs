@@ -5,7 +5,7 @@
 //!
 //! [`Markers`] is a ready-made one for a list of [`Overlay`] markers and lines.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use ratatui::{
     buffer::Buffer,
@@ -40,7 +40,14 @@ pub trait CustomLayer {
 }
 
 type MarkerItem = (i32, (f64, f64), String, TStyle, Option<(String, TStyle)>);
-type LabelItem = (i32, String, TStyle, (f64, f64));
+/// A label: priority, text, style, candidate positions (tried in order), and how far (in
+/// dots) it must be from a placed label with the same text.
+type LabelItem = (i32, String, TStyle, Vec<(f64, f64)>, f64);
+
+/// By default the same text isn't placed again within this many braille dots (20 columns or
+/// 10 rows; a dot is about as tall as it is wide), so copies of one label from neighboring
+/// tiles merge.
+pub const REPEAT_DOTS: f64 = 40.0;
 
 /// What a layer draws into. Positions are braille dots relative to the map area (2 per
 /// column, 4 per row); helpers take world (Web Mercator 0..1) or lon/lat coordinates.
@@ -128,8 +135,21 @@ impl DrawContext<'_> {
 
     /// A label centered on a dot position (skipped where it would overlap another).
     pub fn label_dot(&mut self, p: (f64, f64), text: &str, style: TStyle, priority: i32) {
-        if self.inside(p) {
-            self.labels.push((self.base.saturating_add(priority), text.to_string(), style, p));
+        self.label_dots(vec![p], text, style, priority);
+    }
+
+    /// A label with candidate positions (dots), tried in order until one fits, like
+    /// MapLibre's `text-variable-anchor`. Positions off the map are dropped.
+    pub fn label_dots(&mut self, candidates: Vec<(f64, f64)>, text: &str, style: TStyle, priority: i32) {
+        self.label_spaced(candidates, text, style, priority, REPEAT_DOTS);
+    }
+
+    /// Like [`DrawContext::label_dots`], kept at least `repeat` dots from any placed label
+    /// with the same text (road names repeated along a road).
+    pub fn label_spaced(&mut self, mut candidates: Vec<(f64, f64)>, text: &str, style: TStyle, priority: i32, repeat: f64) {
+        candidates.retain(|p| self.inside(*p));
+        if !candidates.is_empty() {
+            self.labels.push((self.base.saturating_add(priority), text.to_string(), style, candidates, repeat));
         }
     }
 }
@@ -174,19 +194,19 @@ pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: i
     // unless the label would only run off the edge of the map.
     enum Sym {
         Marker((f64, f64), String, TStyle, Option<(String, TStyle)>),
-        Label(String, TStyle, (f64, f64)),
+        Label(String, TStyle, Vec<(f64, f64)>, f64),
     }
     let inside = |p: (f64, f64)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < vw && p.1 < vh;
     let mut syms: Vec<(i32, usize, Sym)> = Vec::with_capacity(markers.len() + labels.len());
     for (pri, p, g, st, l) in markers.drain(..) {
         syms.push((pri, syms.len(), Sym::Marker(p, g, st, l)));
     }
-    for (pri, t, st, p) in labels.drain(..) {
-        syms.push((pri, syms.len(), Sym::Label(t, st, p)));
+    for (pri, t, st, p, repeat) in labels.drain(..) {
+        syms.push((pri, syms.len(), Sym::Label(t, st, p, repeat)));
     }
     // Stable among equal priorities: markers before labels, then in the order added.
     syms.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    let mut placed = HashSet::new();
+    let mut placed: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
     for (_, _, sym) in syms {
         match sym {
             Sym::Marker(p, glyph, st, label) => {
@@ -215,13 +235,17 @@ pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: i
                     }
                 }
             }
-            Sym::Label(text, st, p) => {
-                if placed.contains(&text) {
+            Sym::Label(text, st, cands, repeat) => {
+                let near = |a: (f64, f64)| placed.get(&text).is_some_and(|ps| ps.iter().any(|b| (a.0 - b.0).hypot(a.1 - b.1) < repeat));
+                if cands.first().is_none_or(|p| near(*p)) {
                     continue;
                 }
-                let col = (p.0 / 2.0) as i64 - text.width() as i64 / 2;
-                if canvas.text_at(col, (p.1 / 4.0) as i64, &text, st, true) {
-                    placed.insert(text);
+                for p in cands {
+                    let col = (p.0 / 2.0) as i64 - text.width() as i64 / 2;
+                    if canvas.text_at(col, (p.1 / 4.0) as i64, &text, st, true) {
+                        placed.entry(text).or_default().push(p);
+                        break;
+                    }
                 }
             }
         }

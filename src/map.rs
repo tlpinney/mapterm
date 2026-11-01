@@ -217,7 +217,9 @@ enum Resolved {
     Line(Color),
     /// A glyph at each point, with an optional label beside it.
     Point { glyph: String, style: TStyle, label: Option<(String, TStyle)>, priority: i32 },
-    Text { text: String, style: TStyle, anchor: (i8, i8), along_line: bool, priority: i32 },
+    /// `anchors` are tried in order (`text-variable-anchor`); `offset` is `text-offset` in
+    /// dots; `spacing` is `symbol-spacing` in dots, for labels repeated along lines.
+    Text { text: String, style: TStyle, anchors: Vec<(i8, i8)>, offset: (f64, f64), along_line: bool, spacing: f64, priority: i32 },
 }
 
 struct Item {
@@ -1228,19 +1230,22 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
                     Some(Resolved::Point { glyph, style: icon, label: text.map(|t| (t, style)), priority })
                 }
                 (_, Some(text)) => {
-                    let anchor = match layout_str("text-anchor").as_deref() {
-                        Some("left") => (1, 0),
-                        Some("right") => (-1, 0),
-                        Some("top") => (0, 1),
-                        Some("bottom") => (0, -1),
-                        Some("top-left") => (1, 1),
-                        Some("top-right") => (-1, 1),
-                        Some("bottom-left") => (1, -1),
-                        Some("bottom-right") => (-1, -1),
-                        _ => (0, 0),
+                    // Where the text sits relative to its point: text-variable-anchor (tried
+                    // in order), else text-anchor.
+                    let variable: Vec<(i8, i8)> = match l.layout_expr("text-variable-anchor").map(|e| e.eval(c)) {
+                        Some(crate::expr::Val::Array(a)) => a.iter().map(|v| anchor_of(&v.to_text())).collect(),
+                        _ => Vec::new(),
                     };
+                    let anchors = if variable.is_empty() { vec![anchor_of(layout_str("text-anchor").as_deref().unwrap_or("center"))] } else { variable };
+                    // Ems to dots: an em is about two columns wide (4 dots) and a row tall.
+                    let offset = match l.layout_expr("text-offset").map(|e| e.eval(c)) {
+                        Some(crate::expr::Val::Array(a)) if a.len() == 2 => (a[0].as_num().unwrap_or(0.0) * 4.0, a[1].as_num().unwrap_or(0.0) * 4.0),
+                        _ => (0.0, 0.0),
+                    };
+                    // CSS pixels to dots: a dot is about 4 px.
+                    let spacing = (l.layout_expr("symbol-spacing").and_then(|e| e.eval(c).as_num()).unwrap_or(250.0) / 4.0).max(8.0);
                     let along_line = c.geom != GeomType::Point && layout_str("symbol-placement").is_some_and(|p| p.starts_with("line"));
-                    Some(Resolved::Text { text, style, anchor, along_line, priority })
+                    Some(Resolved::Text { text, style, anchors, offset, along_line, spacing, priority })
                 }
                 _ => None,
             }
@@ -1272,25 +1277,31 @@ fn draw_resolved(ctx: &mut DrawContext, r: &Resolved, geom: GeomType, dots: &[Ve
                 ctx.marker_dot(p, glyph, *style, *priority, label.clone());
             }
         }
-        Resolved::Text { text, style, anchor, along_line, priority } => {
-            let shift = |p: (f64, f64)| {
-                // Half the text's width in dots (2 per column), plus a column of room.
+        Resolved::Text { text, style, anchors, offset, along_line, spacing, priority } => {
+            // Candidate positions around a point, one per anchor: half the text's width in
+            // dots (2 per column) plus a column of room sideways, a row up or down.
+            let place = |p: (f64, f64)| -> Vec<(f64, f64)> {
                 let half = text.width() as f64 + 2.0;
-                (p.0 + anchor.0 as f64 * half, p.1 + anchor.1 as f64 * 4.0)
+                anchors.iter().map(|a| (p.0 + a.0 as f64 * half + offset.0, p.1 + a.1 as f64 * 4.0 + offset.1)).collect()
             };
             if geom == GeomType::Point {
                 for &p in dots.iter().flatten() {
-                    ctx.label_dot(shift(p), text, *style, *priority);
+                    ctx.label_dots(place(p), text, *style, *priority);
                 }
             } else if *along_line || geom == GeomType::Line {
-                // Anchor at fixed vertices along the feature (not the middle of whatever is on
-                // screen), so labels stay put while the map pans.
-                let anchor = dots.iter().find_map(|part| {
-                    let step = (part.len() / 3).max(1);
-                    (step / 2..part.len()).step_by(step).map(|i| part[i]).find(|p| ctx.inside(*p))
-                });
-                if let Some(p) = anchor {
-                    ctx.label_dot(shift(p), text, *style, *priority);
+                // Repeat along the line every `spacing`, measured from the start of each part
+                // at the whole zoom level, so labels stay put while the map pans and zooms
+                // within a level (MapLibre's symbol-spacing). Short parts get one, mid-way.
+                // The same name keeps most of a spacing apart, so a road made of many short
+                // pieces is still labelled about once per spacing.
+                let scale = 2f64.powf(ctx.camera.zoom - ctx.camera.zoom.floor());
+                let repeat = (spacing * scale * 0.8).max(crate::layer::REPEAT_DOTS);
+                for part in dots {
+                    for p in along(part, spacing * scale) {
+                        if ctx.inside(p) {
+                            ctx.label_spaced(place(p), text, *style, *priority, repeat);
+                        }
+                    }
                 }
             } else {
                 // Polygons: the middle of the outer ring's bounding box.
@@ -1299,11 +1310,59 @@ fn draw_resolved(ctx: &mut DrawContext, r: &Resolved, geom: GeomType, dots: &[Ve
                     for &(x, y) in ring {
                         (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
                     }
-                    ctx.label_dot(shift(((x0 + x1) / 2.0, (y0 + y1) / 2.0)), text, *style, *priority);
+                    ctx.label_dots(place(((x0 + x1) / 2.0, (y0 + y1) / 2.0)), text, *style, *priority);
                 }
             }
         }
     }
+}
+
+/// A `text-anchor` name as a direction: (-1 left .. 1 right, -1 up .. 1 down) from the
+/// point to the text's center.
+fn anchor_of(name: &str) -> (i8, i8) {
+    match name {
+        "left" => (1, 0),
+        "right" => (-1, 0),
+        "top" => (0, 1),
+        "bottom" => (0, -1),
+        "top-left" => (1, 1),
+        "top-right" => (-1, 1),
+        "bottom-left" => (1, -1),
+        "bottom-right" => (-1, -1),
+        _ => (0, 0),
+    }
+}
+
+/// Points every `spacing` along a polyline, starting half a spacing in; a line shorter than
+/// one spacing gets its middle.
+fn along(part: &[(f64, f64)], spacing: f64) -> Vec<(f64, f64)> {
+    let lens: Vec<f64> = part.windows(2).map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1)).collect();
+    let total: f64 = lens.iter().sum();
+    if total <= 0.0 || part.len() < 2 {
+        return part.first().copied().into_iter().collect();
+    }
+    let mut targets = Vec::new();
+    if total < spacing {
+        targets.push(total / 2.0);
+    } else {
+        let mut s = spacing / 2.0;
+        while s < total {
+            targets.push(s);
+            s += spacing;
+        }
+    }
+    let mut out = Vec::with_capacity(targets.len());
+    let (mut seg, mut start) = (0usize, 0.0);
+    for t in targets {
+        while seg < lens.len() - 1 && start + lens[seg] < t {
+            start += lens[seg];
+            seg += 1;
+        }
+        let k = if lens[seg] > 0.0 { ((t - start) / lens[seg]).clamp(0.0, 1.0) } else { 0.0 };
+        let (a, b) = (part[seg], part[seg + 1]);
+        out.push((a.0 + (b.0 - a.0) * k, a.1 + (b.1 - a.1) * k));
+    }
+    out
 }
 
 /// Draws a [`Map`] with a camera. Make one with [`Map::view`].
@@ -1746,5 +1805,67 @@ mod tests {
         // Map can move to another task (built while a style loads).
         fn is_send<T: Send>() {}
         is_send::<Map>();
+    }
+
+    fn text_rows(buf: &Buffer) -> Vec<String> {
+        let a = buf.area;
+        (a.y..a.bottom()).map(|y| (a.x..a.right()).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn points_along_a_line() {
+        let line = [(0.0, 0.0), (60.0, 0.0), (100.0, 0.0)];
+        assert_eq!(along(&line, 30.0), vec![(15.0, 0.0), (45.0, 0.0), (75.0, 0.0)]);
+        assert_eq!(along(&line, 300.0), vec![(50.0, 0.0)], "a short line gets its middle");
+        assert_eq!(along(&[(0.0, 0.0), (0.0, 40.0)], 40.0), vec![(0.0, 20.0)]);
+    }
+
+    #[test]
+    fn long_roads_repeat_their_name_and_close_copies_merge() {
+        let mut map = Map::new();
+        // A road across the whole view, and two same-named points: one close to the other,
+        // one far away.
+        map.add_source("r", MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"name": "Long Road"}, "geometry": {"type": "LineString", "coordinates": [[-0.5, 0], [0.5, 0]]}},
+            {"type": "Feature", "properties": {"name": "Pump"}, "geometry": {"type": "Point", "coordinates": [-0.2, 0.1]}},
+            {"type": "Feature", "properties": {"name": "Pump"}, "geometry": {"type": "Point", "coordinates": [-0.195, 0.1]}},
+            {"type": "Feature", "properties": {"name": "Pump"}, "geometry": {"type": "Point", "coordinates": [0.25, 0.1]}}
+        ]})).unwrap()).unwrap();
+        map.add_layer(StyleLayer::symbol("road", "r").filter(json!(["==", ["geometry-type"], "LineString"])).text("{name}").color("#fff")).unwrap();
+        map.add_layer(StyleLayer::symbol("pumps", "r").filter(json!(["==", ["geometry-type"], "Point"])).text("{name}").color("#fff")).unwrap();
+        let buf = render(&map, &Camera::new(0.0, 0.0, 9.0), Rect::new(0, 0, 160, 20));
+        let all = text_rows(&buf).join("\n");
+        let roads = all.matches("Long Road").count();
+        assert!(roads >= 3, "repeated along the road: {roads}\n{all}");
+        assert_eq!(all.matches("Pump").count(), 2, "the close copy merges, the far one stays\n{all}");
+        // Wider spacing, fewer repeats.
+        map.set_layout("road", "symbol-spacing", &json!(1000)).unwrap();
+        let fewer = text_rows(&render(&map, &Camera::new(0.0, 0.0, 9.0), Rect::new(0, 0, 160, 20))).join("\n").matches("Long Road").count();
+        assert!(fewer < roads, "{fewer} < {roads}");
+    }
+
+    #[test]
+    fn variable_anchor_and_offset() {
+        let mut map = Map::new();
+        map.add_source("p", MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"name": "Blocker"}, "geometry": {"type": "Point", "coordinates": [0, 0]}},
+            {"type": "Feature", "properties": {"name": "Here"}, "geometry": {"type": "Point", "coordinates": [0, 0]}}
+        ]})).unwrap()).unwrap();
+        // "Blocker" (higher layer, placed first) sits on the point; "Here" wants the same spot
+        // first, then tries below it.
+        map.add_layer(StyleLayer::symbol("here", "p").filter(json!(["==", "name", "Here"])).text("{name}").color("#fff")
+            .layout("text-variable-anchor", json!(["center", "top"]))).unwrap();
+        map.add_layer(StyleLayer::symbol("blocker", "p").filter(json!(["==", "name", "Blocker"])).text("{name}").color("#fff")).unwrap();
+        let area = Rect::new(0, 0, 40, 11);
+        let rows = text_rows(&render(&map, &Camera::new(0.0, 0.0, 5.0), area));
+        assert!(rows[5].contains("Blocker") && rows[6].contains("Here"), "{rows:#?}");
+        // Without the alternative, it has nowhere to go.
+        map.set_layout("here", "text-variable-anchor", &json!(["center"])).unwrap();
+        let rows = text_rows(&render(&map, &Camera::new(0.0, 0.0, 5.0), area));
+        assert!(!rows.join("").contains("Here"));
+        // text-offset in ems: two ems down is two rows.
+        map.set_layout("here", "text-offset", &json!([0, 2])).unwrap();
+        let rows = text_rows(&render(&map, &Camera::new(0.0, 0.0, 5.0), area));
+        assert!(rows[7].contains("Here"), "{rows:#?}");
     }
 }
