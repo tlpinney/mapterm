@@ -51,3 +51,17 @@ Numbers (Mapbox Streets, two zoom-ins and three zoom-outs with + and -, 229 fram
 
 Still: feature-state changes (hover highlights) don't invalidate tiles yet; no cross-fade
 (a stand-in is swapped for the exact tile at once).
+
+## Backdrop, checked in a recording (same day)
+
+Per-tile stand-ins were too slow to build every frame (a first recording showed solid dark
+blocks mid-zoom: tiles not placed, the terminal background showing). Now, while tiles are
+missing, one low-resolution backdrop of the map area (a third of its pixels: the map's
+background, then every cached tile of any zoom scaled into place) is stretched by the
+terminal over the area's cells under the tiles. Tile signatures leave out layers' zoom
+ranges, or other zooms' tiles never matched.
+
+Recorded in Ghostty Smooth with `MAPTERM_DEMO` (zoom in twice, out three times, pan):
+`zoom-in-recording.png` steps through the first zoom-in, 16.0 -> 17.0, filled throughout;
+677 frames, p50 5.6 ms, p90 18 ms, max 58 ms. The sharp tiles show the drawn colors (water
+#99ddff drawn, #a0e2fe on screen: display color management, not darkening).
