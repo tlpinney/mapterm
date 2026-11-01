@@ -1,6 +1,6 @@
 [package]
 name = "mapterm"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 edition = "2024"
 # The oldest Rust that builds it (the uuid dependency needs 1.89; mapterm itself 1.88).
 rust-version = "1.89"
@@ -11,9 +11,6 @@ repository = "https://github.com/tlpinney/mapterm"
 readme = "README.md"
 keywords = ["map", "terminal", "tui", "ratatui", "maplibre"]
 categories = ["command-line-utilities", "science::geo", "visualization"]
-# Private for now: never published to crates.io (cargo publish refuses). Install from git:
-#   CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.2
-publish = false
 # Kept out of the package: CI and release tooling, and the integration tests with their
 # fixtures (they live in the repository).
 exclude = [".github/", "tests/", "deny.toml", "release/", "signing/", "fuzz/"]

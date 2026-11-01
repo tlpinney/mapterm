@@ -23,7 +23,7 @@ style API (sources, style layers, expressions, events and feature state, feature
 queries) that you can drop into your own terminal apps.
 
 ```sh
-cargo install --path .         # installs the `mapterm` command
+cargo install mapterm --version 0.1.0-alpha.3   # installs the `mapterm` command
 
 mapterm                                                # OpenFreeMap planet, no key needed
 mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lon) at zoom 13

@@ -2,7 +2,9 @@ name: Release
 
 # Builds release binaries for a version tag and attaches them to its GitHub release as a
 # draft. The maintainer then signs SHA256SUMS locally and publishes it with
-# release/sign-release.sh; CI never holds the signing key.
+# release/sign-release.sh; CI never holds the signing key. The crate goes to crates.io
+# only after the maintainer approves the crates-io environment, using trusted publishing
+# (a short-lived token from GitHub's OIDC identity; no crates.io token is stored).
 on:
   push:
     tags: ["v*"]
@@ -117,3 +119,26 @@ jobs:
           fi
           gh release upload "$TAG" dist/mapterm-*.tar.gz dist/SHA256SUMS --clobber
           echo "Drafted $TAG; sign and publish it with: release/sign-release.sh $TAG"
+
+  publish:
+    name: Publish to crates.io
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Required reviewers on this environment: the job waits for the maintainer's approval.
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: cargo publish --locked
