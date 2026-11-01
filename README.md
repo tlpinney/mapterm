@@ -32,6 +32,11 @@ They follow the MapLibre GL / Mapbox GL defaults:
 - **Double-click:** zoom in; **shift+double-click:** zoom out
 - **Shift+drag:** box zoom
 - **Arrows** (or `hjkl`) pan, **`+`/`-`** zoom to the next level, both eased
+- **`/`** searches for a place: type, press Enter, and the map flies there
+  (MapLibre's flyTo curve). Several matches open a list (↑/↓, Enter or click);
+  Esc clears the marker. Searches go to [Photon](https://photon.komoot.io), an
+  OpenStreetMap geocoder, only when you press Enter; `MAPTERM_GEOCODER=nominatim`
+  or the URL of your own Photon or Nominatim server switches.
 - Terminal extras: sideways swipes pan; `i` inspect, `v` vector overlay, `n` labels, `t` light/dark theme (built-in style), `q` quit
 
 ## GeoJSON layers
@@ -184,8 +189,9 @@ let under = map.query_rendered_features(&ctl.cam, area, dot, Some(&["pins"]));
 - Anything else is a `CustomLayer`: `draw` (lines, fills, markers and labels
   through a `DrawContext`) and `pick`. Markers and labels from every layer are
   placed together, so they never overlap.
-- `Controller` gives MapLibre-style mouse and keyboard handling;
-  `take_click` reports clicks for your own popups and panels.
+- `Controller` gives MapLibre-style mouse and keyboard handling and camera
+  moves (`fly_to`, `ease_to`, `fit_bounds`), and `take_click` reports clicks for
+  your own popups and panels. `geocode::Geocoder` searches places.
 
 [`examples/hello_map.rs`](examples/hello_map.rs) builds a basemap from a few
 style layers and adds a pin in about 50 lines, and

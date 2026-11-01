@@ -15,12 +15,14 @@
 //!   properties and measurements ([`Pick`]), for inspection and analysis.
 //! - [`raster`] PNG/JPEG/WebP XYZ, TMS or PMTiles sources for raster layers, drawn as images
 //!   with the [`kitty`] graphics protocol ([`Map::kitty_commands`]) or as cell colors.
+//! - [`geocode`] place search with Photon or Nominatim (OpenStreetMap geocoders).
 //! - [`geojson`] GeoJSON files or URLs, and ready-made overlay style layers for them.
 //! - [`export`] a drawn map as plain text, ANSI-colored text or HTML, for snapshots.
 //! - [`smooth`] opt-in pixel smooth vertical panning for the Ghostty smooth-scroll fork.
 
 pub mod export;
 pub mod expr;
+pub mod geocode;
 pub mod geojson;
 pub mod interact;
 pub mod kitty;

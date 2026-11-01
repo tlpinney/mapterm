@@ -64,7 +64,12 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · i inspect · v vector overlay · n labels · t theme · q quit
+      +/- zoom · sideways swipe pans · / search · i inspect · v vector overlay · n labels ·
+      t theme · q quit
+
+search (/): type a place and press enter; one match flies there, several open a list
+      (up/down or tab, enter or click to fly); esc clears the marker. Uses Photon
+      (photon.komoot.io); MAPTERM_GEOCODER=nominatim or a server URL switches.
 
 inspect mode (i): hover shows what's under the pointer; click lists every feature there
       (drawn or not) with its properties, size and location; click an entry or tab/shift+tab
@@ -351,6 +356,48 @@ fn set_pixel_mouse(on: bool) -> std::io::Result<()> {
     out.flush()
 }
 
+/// Search state: typing a query, waiting for the geocoder, or choosing among results.
+enum Search {
+    Off,
+    Typing(String),
+    Waiting(String),
+    Results { places: Vec<mapterm::geocode::Place>, sel: usize },
+}
+
+/// The search results panel. Returns the screen rows of each entry, so clicks can choose.
+fn draw_results(f: &mut ratatui::Frame, area: Rect, places: &[mapterm::geocode::Place], sel: usize) -> Vec<(u16, usize)> {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::Borders;
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(format!(" places · {} ", places.len()));
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let w = inner.width.saturating_sub(3) as usize;
+    let cut = |s: &str| if s.chars().count() > w { format!("{}…", s.chars().take(w.saturating_sub(1)).collect::<String>()) } else { s.to_string() };
+    let mut lines = Vec::new();
+    let mut rows = Vec::new();
+    for (i, p) in places.iter().enumerate() {
+        let y = inner.y + lines.len() as u16;
+        if y + 1 >= inner.bottom() {
+            break;
+        }
+        let mut st = TStyle::new().add_modifier(Modifier::BOLD);
+        if i == sel {
+            st = st.add_modifier(Modifier::REVERSED);
+        }
+        let kind = if p.kind.is_empty() { String::new() } else { format!("  {}", p.kind) };
+        lines.push(Line::from(vec![Span::styled(format!(" ◆ {}", cut(&p.name)), st), Span::styled(kind, dim)]));
+        lines.push(Line::from(Span::styled(format!("   {}", cut(&p.context)), dim)));
+        rows.push((y, i));
+        rows.push((y + 1, i));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(" ↑↓ choose · enter fly · esc close", dim)));
+    f.render_widget(Paragraph::new(lines), inner);
+    rows
+}
+
 /// Guess the vector tile schema from the tile under the camera (OpenMapTiles if unsure).
 async fn detect_schema(src: &Source, cam: &Camera) -> Schema {
     let z = cam.tile_zoom(src.min_zoom, src.max_zoom);
@@ -632,6 +679,11 @@ async fn main() -> Result<()> {
     let mut last_cam = cam;
     let mut map_area = Rect::default();
     let mut frame_ms = 0.0f64;
+    // Place search: the state, the chosen place (marked on the map), and the geocoder.
+    let geocoder = mapterm::geocode::Geocoder::from_env()?;
+    let mut search = Search::Off;
+    let mut found: Option<mapterm::geocode::Place> = None;
+    let (gtx, mut grx) = mpsc::unbounded_channel::<(String, Result<Vec<mapterm::geocode::Place>>)>();
     let result: Result<()> = async {
         loop {
             ctl.tick(Instant::now());
@@ -669,6 +721,16 @@ async fn main() -> Result<()> {
                     overlays.push(Overlay::Line { pts: vec![vp.dot_to_lonlat(ax, ay), vp.dot_to_lonlat(bx, by)], color: cross });
                 }
             }
+            // Search results as small diamonds, the selected or chosen one with its name.
+            let mark = TStyle::new().fg(Color::Rgb(255, 120, 200));
+            if let Search::Results { places, sel } = &search {
+                for (i, p) in places.iter().enumerate() {
+                    let label = (i == *sel).then(|| (p.name.clone(), mark.add_modifier(ratatui::style::Modifier::BOLD)));
+                    overlays.push(Overlay::Marker { lon: p.lon, lat: p.lat, glyph: if i == *sel { "◆" } else { "◇" }.into(), style: mark, label, priority: 97 - i as i32 });
+                }
+            } else if let Some(p) = &found {
+                overlays.push(Overlay::Marker { lon: p.lon, lat: p.lat, glyph: "◆".into(), style: mark, label: Some((p.name.clone(), mark.add_modifier(ratatui::style::Modifier::BOLD))), priority: 98 });
+            }
             if let (true, Some((lon, lat))) = (inspect && !picks.is_empty(), click_at) {
                 overlays.push(Overlay::Marker { lon, lat, glyph: "+".into(), style: TStyle::new().fg(Color::Rgb(255, 215, 0)), label: None, priority: 99 });
             }
@@ -677,12 +739,17 @@ async fn main() -> Result<()> {
             }
             term.draw(|f| {
                 let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
-                let panel_w = if inspect && !picks.is_empty() { 52.min(main.width / 2) } else { 0 };
+                let results = matches!(search, Search::Results { .. });
+                let panel_w = if results || (inspect && !picks.is_empty()) { 52.min(main.width / 2) } else { 0 };
                 let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
                 map_area = m;
                 panel_area = panel;
                 f.render_widget(map.view(&draw_cam), m);
-                list_rows = if panel_w > 0 { draw_inspector(f, panel, &picks, sel) } else { Vec::new() };
+                list_rows = match &search {
+                    Search::Results { places, sel } if panel_w > 0 => draw_results(f, panel, places, *sel),
+                    _ if panel_w > 0 => draw_inspector(f, panel, &picks, sel),
+                    _ => Vec::new(),
+                };
                 if let Some(r) = box_rect {
                     f.render_widget(Block::bordered().border_style(TStyle::new().fg(Color::Yellow)), r);
                 }
@@ -736,6 +803,17 @@ async fn main() -> Result<()> {
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
                 spans.push(Span::styled(format!("· {basemap_name} · © OpenStreetMap · q quit"), dim));
+                // While typing a search, the status line is the search box.
+                if let Search::Typing(q) = &search {
+                    spans = vec![
+                        Span::styled(" / ", TStyle::new().fg(Color::Black).bg(Color::Rgb(255, 120, 200))),
+                        Span::raw(format!(" {q}")),
+                        Span::styled("█", TStyle::new().fg(Color::Rgb(255, 120, 200))),
+                        Span::styled("  enter search · esc cancel", dim),
+                    ];
+                } else if let Search::Waiting(q) = &search {
+                    spans.insert(1, Span::styled(format!("searching {q}… "), TStyle::new().fg(Color::Yellow)));
+                }
                 f.render_widget(Paragraph::new(Line::from(spans)), s);
             })?;
             ctl.set_area(map_area);
@@ -781,6 +859,23 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Some((query, r)) = grx.recv() => {
+                    // Only the answer to the search still waiting counts.
+                    if matches!(&search, Search::Waiting(q) if *q == query) {
+                        search = Search::Off;
+                        match r {
+                            Ok(places) if places.is_empty() => note = Some((Instant::now(), format!("no places found for {query}"))),
+                            Ok(mut places) if places.len() == 1 => {
+                                let p = places.remove(0);
+                                let (lon, lat, z) = p.view(map_area.width, map_area.height);
+                                ctl.fly_to(Camera::new(lon, lat, z));
+                                found = Some(p);
+                            }
+                            Ok(places) => search = Search::Results { places, sel: 0 },
+                            Err(e) => note = Some((Instant::now(), format!("search failed: {e:#}"))),
+                        }
+                    }
+                }
                 Some(first) = krx.recv() => {
                     // Handle everything already queued before drawing again, so a fast drag or
                     // flick catches up in one frame instead of trailing the pointer.
@@ -791,10 +886,66 @@ async fn main() -> Result<()> {
                     for ev in queued {
                         match ev {
                             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                                // Typing a search: every key goes to the search box.
+                                if let Search::Typing(q) = &mut search {
+                                    match k.code {
+                                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                                        KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => q.clear(),
+                                        KeyCode::Char(c) => q.push(c),
+                                        KeyCode::Backspace => {
+                                            q.pop();
+                                        }
+                                        KeyCode::Esc => search = Search::Off,
+                                        KeyCode::Enter if !q.trim().is_empty() => {
+                                            let query = q.trim().to_string();
+                                            let (geo, gtx) = (geocoder.clone(), gtx.clone());
+                                            let near = (ctl.cam.lon, ctl.cam.lat, ctl.cam.zoom);
+                                            let qq = query.clone();
+                                            tokio::spawn(async move {
+                                                let r = geo.search(&qq, Some(near), 8).await;
+                                                let _ = gtx.send((qq, r));
+                                            });
+                                            search = Search::Waiting(query);
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
+                                // Choosing among results.
+                                if let Search::Results { places, sel: rsel } = &mut search {
+                                    let n = places.len();
+                                    match k.code {
+                                        KeyCode::Down | KeyCode::Tab => {
+                                            *rsel = (*rsel + 1) % n;
+                                            continue;
+                                        }
+                                        KeyCode::Up | KeyCode::BackTab => {
+                                            *rsel = (*rsel + n - 1) % n;
+                                            continue;
+                                        }
+                                        KeyCode::Enter => {
+                                            let p = places.swap_remove(*rsel);
+                                            let (lon, lat, z) = p.view(map_area.width, map_area.height);
+                                            ctl.fly_to(Camera::new(lon, lat, z));
+                                            found = Some(p);
+                                            search = Search::Off;
+                                            continue;
+                                        }
+                                        KeyCode::Esc => {
+                                            search = Search::Off;
+                                            continue;
+                                        }
+                                        _ => {}
+                                    }
+                                }
                                 if ctl.key(k) {
                                     continue;
                                 }
                                 match k.code {
+                                    KeyCode::Char('/') => {
+                                        search = Search::Typing(String::new());
+                                    }
+                                    KeyCode::Esc if found.is_some() && picks.is_empty() => found = None,
                                     KeyCode::Esc if !picks.is_empty() => {
                                         picks.clear();
                                         click_at = None;
@@ -892,9 +1043,17 @@ async fn main() -> Result<()> {
                                 // Clicks in the inspector select a feature; the map never sees them.
                                 if panel_area.width > 0 && panel_area.contains(pos) {
                                     if m.kind == event::MouseEventKind::Down(event::MouseButton::Left)
-                                        && let Some((_, i)) = list_rows.iter().find(|(r, _)| *r == cell.1)
+                                        && let Some(&(_, i)) = list_rows.iter().find(|(r, _)| *r == cell.1)
                                     {
-                                        sel = *i;
+                                        if let Search::Results { places, .. } = &mut search {
+                                            let p = places.swap_remove(i);
+                                            let (lon, lat, z) = p.view(map_area.width, map_area.height);
+                                            ctl.fly_to(Camera::new(lon, lat, z));
+                                            found = Some(p);
+                                            search = Search::Off;
+                                        } else {
+                                            sel = i;
+                                        }
                                     }
                                     continue;
                                 }

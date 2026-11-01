@@ -107,6 +107,58 @@ enum Motion {
     Pan { dots: (f64, f64) },
     /// Move to a camera (center and zoom).
     To { to: Camera },
+    /// Fly to a camera along MapLibre's flyTo curve: zoom out, travel, zoom in.
+    Fly { to: Camera, fly: FlyPath },
+}
+
+/// The van Wijk and Nuij path MapLibre's flyTo follows (rho 1.42), in braille dots at the
+/// starting zoom.
+#[derive(Clone, Copy, Debug)]
+struct FlyPath {
+    r0: f64,
+    /// Path length.
+    s: f64,
+    w0: f64,
+    u1: f64,
+}
+
+const FLY_RHO: f64 = 1.42;
+
+impl FlyPath {
+    /// None when the centers coincide (a plain eased zoom does then).
+    fn new(from: &Camera, to: &Camera, area: Rect) -> Option<FlyPath> {
+        let scale = 256.0 * 2f64.powf(from.zoom);
+        let (fx, fy) = to_world(from.lon, from.lat);
+        let (tx, ty) = to_world(to.lon, to.lat);
+        let u1 = (tx - fx).hypot(ty - fy) * scale;
+        let w0 = (area.width as f64 * 2.0).max(area.height as f64 * 4.0).max(1.0);
+        let w1 = w0 / 2f64.powf(to.zoom - from.zoom);
+        let rho2 = FLY_RHO * FLY_RHO;
+        if u1 < 1.0 {
+            return None;
+        }
+        let r = |last: bool| {
+            let (w, sign) = if last { (w1, -1.0) } else { (w0, 1.0) };
+            let b = (w1 * w1 - w0 * w0 + sign * rho2 * rho2 * u1 * u1) / (2.0 * w * rho2 * u1);
+            ((b * b + 1.0).sqrt() - b).ln()
+        };
+        let (r0, r1) = (r(false), r(true));
+        let s = (r1 - r0) / FLY_RHO;
+        (r0.is_finite() && s.is_finite() && s > 0.0).then_some(FlyPath { r0, s, w0, u1 })
+    }
+
+    /// Zoom change and fraction of the distance traveled at progress `k` (0..1).
+    fn at(&self, k: f64) -> (f64, f64) {
+        let s = k * self.s;
+        let w = self.r0.cosh() / (self.r0 + FLY_RHO * s).cosh();
+        let u = self.w0 * ((self.r0.cosh() * (self.r0 + FLY_RHO * s).tanh() - self.r0.sinh()) / (FLY_RHO * FLY_RHO)) / self.u1;
+        ((1.0 / w).log2(), u)
+    }
+
+    /// MapLibre's duration: path length over speed 1.2, kept between 0.4 and 3 s here.
+    fn duration(&self) -> Duration {
+        Duration::from_secs_f64((self.s / 1.2).clamp(0.4, 3.0))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -259,6 +311,23 @@ impl Controller {
         self.start(Motion::To { to }, FIT_DURATION, DEFAULT_EASING);
     }
 
+    /// Fly to a camera the way MapLibre's `flyTo` does: zoom out, travel, zoom back in, taking
+    /// longer for longer trips. Short or zoom-only moves ease directly.
+    pub fn fly_to(&mut self, to: Camera) {
+        let to = Camera::new(to.lon, to.lat, to.zoom.clamp(self.min_zoom, self.max_zoom));
+        match FlyPath::new(&self.cam, &to, self.area) {
+            Some(fly) => self.start(Motion::Fly { to, fly }, fly.duration(), DEFAULT_EASING),
+            None => self.ease_to(to),
+        }
+    }
+
+    /// Fly so that lon/lat `bounds` (west, south, east, north) fill the map, zooming in no
+    /// further than `max_zoom`.
+    pub fn fit_bounds(&mut self, bounds: (f64, f64, f64, f64), max_zoom: f64) {
+        let (lon, lat, zoom) = crate::geojson::fit(bounds, self.area.width.max(1), self.area.height.max(1), max_zoom.min(self.max_zoom));
+        self.fly_to(Camera::new(lon, lat, zoom));
+    }
+
     fn center_cell(&self) -> (u16, u16) {
         (self.area.x + self.area.width / 2, self.area.y + self.area.height / 2)
     }
@@ -272,6 +341,13 @@ impl Controller {
         match a.motion {
             Motion::ZoomAround { to, at } => cam.zoom_at((to - a.from.zoom) * e, self.max_zoom, self.area, at.0, at.1),
             Motion::Pan { dots } => cam.pan_dots(dots.0 * e, dots.1 * e),
+            Motion::Fly { to, fly } => {
+                let (dz, u) = if t >= 1.0 { (to.zoom - a.from.zoom, 1.0) } else { fly.at(e) };
+                let (fx, fy) = to_world(a.from.lon, a.from.lat);
+                let (tx, ty) = to_world(to.lon, to.lat);
+                let (lon, lat) = to_lonlat(fx + (tx - fx) * u, fy + (ty - fy) * u);
+                cam = Camera::new(lon, lat, (a.from.zoom + dz).clamp(self.min_zoom, self.max_zoom));
+            }
             Motion::To { to } => {
                 let (fx, fy) = to_world(a.from.lon, a.from.lat);
                 let (tx, ty) = to_world(to.lon, to.lat);
@@ -573,5 +649,34 @@ mod tests {
         let mut c = ctl();
         c.mouse(ev(MouseEventKind::ScrollUp, 80, 10, KeyModifiers::NONE));
         assert!(c.cam.zoom > 12.0 && c.cam.zoom < 12.5);
+    }
+
+    #[test]
+    fn fly_to_zooms_out_on_the_way_and_lands_exactly() {
+        let mut c = Controller::new(Camera::new(-77.0353, 38.8895, 15.0), 0.0, 18.0);
+        c.set_area(Rect::new(0, 0, 120, 40));
+        let to = Camera::new(-122.4194, 37.7749, 14.0);
+        c.fly_to(to);
+        assert!(c.animating());
+        let Some(Anim { start, dur, .. }) = c.anim else { panic!() };
+        assert!(dur > Duration::from_millis(1500), "a cross-country flight takes a while: {dur:?}");
+        c.tick(start + dur / 2);
+        assert!(c.cam.zoom < 11.0, "zoomed out mid-flight: {}", c.cam.zoom);
+        c.tick(start + dur);
+        assert!(!c.animating());
+        assert!((c.cam.lon - to.lon).abs() < 1e-9 && (c.cam.lat - to.lat).abs() < 1e-9 && (c.cam.zoom - 14.0).abs() < 1e-9);
+        // In place: just eases the zoom.
+        c.fly_to(Camera::new(to.lon, to.lat, 16.0));
+        assert!(matches!(c.anim, Some(Anim { motion: Motion::To { .. }, .. })));
+    }
+
+    #[test]
+    fn fit_bounds_flies_to_fit() {
+        let mut c = Controller::new(Camera::new(0.0, 0.0, 2.0), 0.0, 18.0);
+        c.set_area(Rect::new(0, 0, 100, 40));
+        c.fit_bounds((-77.05, 38.88, -77.0, 38.9), 20.0);
+        let Some(Anim { start, dur, .. }) = c.anim else { panic!() };
+        c.tick(start + dur);
+        assert!((c.cam.lon - -77.025).abs() < 1e-6 && c.cam.zoom > 12.0 && c.cam.zoom < 16.0, "{:?}", c.cam);
     }
 }
