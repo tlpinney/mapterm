@@ -38,7 +38,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --style       a MapLibre style instead: liberty, positron, bright, dark or fiord
                 (OpenFreeMap), a style URL, or a style.json file
   --geojson     a data file or URL drawn as a layer over the map: GeoJSON, CSV with
-                lat/lon (or WKT) columns, GPX or KML (repeatable; each gets its own color;
+                lat/lon (or WKT) columns, GPX, KML or FlatGeobuf (repeatable; each gets its own color;
                 names from a `name` property; inspect shows properties)
   --at          start position (default: fit the GeoJSON layers, else the source's center)
   -z            start zoom

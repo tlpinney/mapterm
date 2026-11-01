@@ -118,7 +118,7 @@ pub fn overlay_layers(source: &str, color: Color, fill: bool) -> Vec<crate::spec
 pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
     let bytes = if spec.starts_with("http://") || spec.starts_with("https://") {
         let http = crate::source::http_client();
-        crate::source::get_with(&http, spec, None, &[]).await?.with_context(|| format!("{spec}: not found"))?
+        crate::source::get_data(&http, spec, MAX_BYTES).await?.with_context(|| format!("{spec}: not found"))?
     } else {
         let meta = std::fs::metadata(spec).with_context(|| format!("reading {spec}"))?;
         if meta.len() as usize > MAX_BYTES {
@@ -129,13 +129,13 @@ pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
     // The layer's name: the file name without its extension.
     let file = spec.rsplit('/').next().unwrap_or(spec).split(['?', '#']).next().unwrap_or(spec);
     let name = match file.rsplit_once('.') {
-        Some((stem, ext)) if ["geojson", "json", "csv", "tsv", "txt", "gpx", "kml"].contains(&ext.to_ascii_lowercase().as_str()) => stem.to_string(),
+        Some((stem, ext)) if ["geojson", "json", "csv", "tsv", "txt", "gpx", "kml", "fgb"].contains(&ext.to_ascii_lowercase().as_str()) => stem.to_string(),
         _ => file.to_string(),
     };
     let spec = spec.to_string();
     tokio::task::spawn_blocking(move || {
         // CSV, GPX and KML become GeoJSON first.
-        let doc = crate::formats::to_geojson(&spec, &bytes).with_context(|| format!("{spec}: not GeoJSON, CSV, GPX or KML"))?;
+        let doc = crate::formats::to_geojson(&spec, &bytes).with_context(|| format!("{spec}: not GeoJSON, CSV, GPX, KML or FlatGeobuf"))?;
         let (features, bbox) = features(&doc)?;
         Ok(GeoJson { name, color, features, bbox, fill: true, labels: true })
     })

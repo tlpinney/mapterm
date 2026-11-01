@@ -1,5 +1,6 @@
 //! Other vector data as GeoJSON: CSV / TSV with latitude and longitude columns (or a WKT
-//! column), GPX (waypoints, tracks, routes) and KML (placemarks). Each is turned into a
+//! column), GPX (waypoints, tracks, routes), KML (placemarks) and FlatGeobuf
+//! ([`crate::fgb`]). Each is turned into a
 //! GeoJSON FeatureCollection, so it draws, inspects and clusters like GeoJSON.
 
 use anyhow::{Result, bail};
@@ -12,6 +13,7 @@ pub enum Format {
     Csv,
     Gpx,
     Kml,
+    FlatGeobuf,
 }
 
 impl Format {
@@ -23,8 +25,12 @@ impl Format {
             Some("csv" | "tsv" | "txt") => return Format::Csv,
             Some("gpx") => return Format::Gpx,
             Some("kml") => return Format::Kml,
+            Some("fgb") => return Format::FlatGeobuf,
             Some("geojson" | "json") => return Format::GeoJson,
             _ => {}
+        }
+        if crate::fgb::is_fgb(bytes) {
+            return Format::FlatGeobuf;
         }
         let head = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).to_ascii_lowercase();
         let start = head.trim_start_matches('\u{feff}').trim_start();
@@ -47,6 +53,7 @@ pub fn to_geojson(name: &str, bytes: &[u8]) -> Result<Json> {
         Format::Csv => csv(&String::from_utf8_lossy(bytes)),
         Format::Gpx => gpx(&String::from_utf8_lossy(bytes)),
         Format::Kml => kml(&String::from_utf8_lossy(bytes)),
+        Format::FlatGeobuf => crate::fgb::to_geojson(bytes),
     }
 }
 
@@ -462,6 +469,8 @@ mod tests {
         assert_eq!(Format::detect("data", b"<?xml version=\"1.0\"?><kml xmlns="), Format::Kml);
         assert_eq!(Format::detect("data", b"<?xml?>\n<gpx version="), Format::Gpx);
         assert_eq!(Format::detect("data", b"name,lat,lon\n"), Format::Csv);
+        assert_eq!(Format::detect("data", b"fgb\x03fgb\x00\x10\0\0\0"), Format::FlatGeobuf);
+        assert_eq!(Format::detect("x.FGB", b""), Format::FlatGeobuf);
     }
 
     #[test]

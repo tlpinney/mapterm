@@ -59,9 +59,9 @@ mapterm --geojson stores.csv --geojson run.gpx --geojson places.kml
 
 Besides GeoJSON it reads CSV/TSV with latitude/longitude columns (`lat`,
 `latitude`, `lon`, `lng`, `longitude`, any case) or a WKT geometry column, GPX
-(waypoints, tracks, routes) and KML (placemarks with their names, descriptions
-and extended data; unzip KMZ first). The format comes from the extension, else
-the content.
+(waypoints, tracks, routes), KML (placemarks with their names, descriptions
+and extended data; unzip KMZ first) and FlatGeobuf (lon/lat). The format comes
+from the extension, else the content. Files and URLs up to 512 MB.
 
 - Points, lines and polygons (including Multi* and GeometryCollection), each
   layer in its own color with a legend in the status bar; polygon interiors are

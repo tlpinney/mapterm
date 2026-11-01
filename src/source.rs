@@ -63,6 +63,22 @@ pub(crate) async fn get_with(
     range: Option<(u64, u64)>,
     headers: &[(String, String)],
 ) -> Result<Option<Vec<u8>>> {
+    get_capped(http, url, range, headers, MAX_FETCH).await
+}
+
+/// A whole data file (GeoJSON, CSV, FlatGeobuf...) by URL, up to `max` bytes: data files are
+/// often far bigger than a tile.
+pub(crate) async fn get_data(http: &reqwest::Client, url: &str, max: usize) -> Result<Option<Vec<u8>>> {
+    get_capped(http, url, None, &[], max).await
+}
+
+async fn get_capped(
+    http: &reqwest::Client,
+    url: &str,
+    range: Option<(u64, u64)>,
+    headers: &[(String, String)],
+    max: usize,
+) -> Result<Option<Vec<u8>>> {
     let mut req = http.get(url);
     for (k, v) in headers {
         req = req.header(k.as_str(), v.as_str());
@@ -81,14 +97,14 @@ pub(crate) async fn get_with(
     if range.is_some() && status != reqwest::StatusCode::PARTIAL_CONTENT {
         bail!("{url}: server ignored the byte range (HTTP {status})");
     }
-    if resp.content_length().is_some_and(|n| n as usize > MAX_FETCH) {
-        bail!("{url}: response larger than {} MB", MAX_FETCH >> 20);
+    if resp.content_length().is_some_and(|n| n as usize > max) {
+        bail!("{url}: response larger than {} MB", max >> 20);
     }
     let mut out = Vec::new();
     while let Some(chunk) = resp.chunk().await? {
         out.extend_from_slice(&chunk);
-        if out.len() > MAX_FETCH {
-            bail!("{url}: response larger than {} MB", MAX_FETCH >> 20);
+        if out.len() > max {
+            bail!("{url}: response larger than {} MB", max >> 20);
         }
     }
     Ok(Some(out))

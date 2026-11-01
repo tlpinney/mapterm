@@ -7,3 +7,6 @@
 - `openfreemap-*.json`: the OpenFreeMap styles (liberty, positron, bright, dark,
   fiord) as published at `https://tiles.openfreemap.org/styles/<name>`; see
   OpenFreeMap for their licenses and upstream credits.
+- `countries.fgb`: the FlatGeobuf project's sample of Natural Earth countries
+  (`https://flatgeobuf.org/test/data/countries.fgb`); Natural Earth data is in
+  the public domain.
