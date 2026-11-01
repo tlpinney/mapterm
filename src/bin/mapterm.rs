@@ -763,7 +763,7 @@ async fn main() -> Result<()> {
                     for (source, id, r) in batch {
                         pending.remove(&(source.clone(), id));
                         if let Err(e) = map.insert_loaded(&source, id, r) {
-                            // Stored empty, so the tile isn't fetched again and again.
+                            // The map asks for it again after a growing wait.
                             dlog(|| format!("{e:#}"));
                             errors += 1;
                         }

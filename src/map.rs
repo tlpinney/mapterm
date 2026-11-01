@@ -290,6 +290,29 @@ pub struct Map {
     pub raster_mode: RasterMode,
     /// The starting view (lon, lat, zoom) a style suggests.
     pub center: Option<(f64, f64, f64)>,
+    /// When to ask again for tiles that failed to load.
+    pub retry: RetryPolicy,
+    /// Tiles whose last load failed: attempts so far and when to try again.
+    failed: HashMap<(String, TileId), (u32, std::time::Instant)>,
+}
+
+/// Retrying tiles that failed to load (timeouts, network or server errors). A tile that
+/// doesn't exist ("no tile here") is not a failure: it is stored empty at once.
+#[derive(Clone, Copy, Debug)]
+pub struct RetryPolicy {
+    /// Wait after the first failure; doubles with each further one.
+    pub base: std::time::Duration,
+    /// Longest wait between attempts.
+    pub max: std::time::Duration,
+    /// After this many failures in a row the tile is stored empty and not requested again
+    /// (until it leaves the cache).
+    pub attempts: u32,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self { base: std::time::Duration::from_secs(2), max: std::time::Duration::from_secs(60), attempts: 5 }
+    }
 }
 
 impl Map {
@@ -369,7 +392,7 @@ impl Map {
                 MapSource::Vector(v) => {
                     let Some(f) = &v.fetch else { continue };
                     let z = cam.tile_zoom(v.min_zoom, v.max_zoom);
-                    out.extend(vp.tiles(z).into_iter().filter(|t| !v.tiles.map.contains_key(t)).map(|t| TileRequest {
+                    out.extend(vp.tiles(z).into_iter().filter(|t| !v.tiles.map.contains_key(t) && self.due(id, t)).map(|t| TileRequest {
                         source: id.clone(),
                         id: t,
                         fetch: Fetch::Vector(f.clone()),
@@ -377,7 +400,7 @@ impl Map {
                 }
                 MapSource::Raster(r) => {
                     let rz = self.raster_zoom(&r.src, cam);
-                    out.extend(crate::raster::tiles_for(cam, area, rz).into_iter().filter(|t| !r.tiles.contains(t)).map(|t| TileRequest {
+                    out.extend(crate::raster::tiles_for(cam, area, rz).into_iter().filter(|t| !r.tiles.contains(t) && self.due(id, t)).map(|t| TileRequest {
                         source: id.clone(),
                         id: t,
                         fetch: Fetch::Raster(r.src.clone()),
@@ -399,14 +422,30 @@ impl Map {
         crate::raster::raster_zoom(cam, src.tile_px, dots_per_px, src.max_zoom)
     }
 
-    /// Store a tile loaded with [`TileRequest::load`]. A failed load is stored empty, so the
-    /// tile isn't requested again, and its error is returned.
+    /// Store a tile loaded with [`TileRequest::load`]. A failed load returns its error and the
+    /// tile is requested again after a growing wait ([`Map::retry`]); after the last attempt
+    /// it is stored empty. Lower-zoom tiles stand in until then.
     pub fn insert_loaded(&mut self, source: &str, id: TileId, loaded: Result<Loaded>) -> Result<()> {
         let is_raster = matches!(self.source(source), Some(MapSource::Raster(_)));
+        let key = (source.to_string(), id);
         let (tile, err) = match loaded {
-            Ok(Loaded(t)) => (t, None),
-            Err(e) if is_raster => (LoadedTile::Raster(None), Some(e)),
-            Err(e) => (LoadedTile::Vector(Vec::new()), Some(e)),
+            Ok(Loaded(t)) => {
+                self.failed.remove(&key);
+                (t, None)
+            }
+            Err(e) => {
+                let e = e.context(format!("{source} tile {}/{}/{}", id.0, id.1, id.2));
+                let attempts = self.failed.get(&key).map_or(0, |f| f.0) + 1;
+                if attempts < self.retry.attempts {
+                    // Ask again later; lower-zoom tiles stand in meanwhile.
+                    let wait = self.retry.base.saturating_mul(1 << (attempts - 1).min(16)).min(self.retry.max);
+                    self.failed.insert(key, (attempts, std::time::Instant::now() + wait));
+                    return Err(e);
+                }
+                // Given up: store it empty so it isn't requested again and again.
+                self.failed.remove(&key);
+                (if is_raster { LoadedTile::Raster(None) } else { LoadedTile::Vector(Vec::new()) }, Some(e))
+            }
         };
         match tile {
             LoadedTile::Vector(features) => self.insert_features(source, id, features)?,
@@ -415,11 +454,17 @@ impl Map {
                 _ => bail!("no raster source \"{source}\""),
             },
         }
-        err.map_or(Ok(()), |e| Err(e.context(format!("{source} tile {}/{}/{}", id.0, id.1, id.2))))
+        err.map_or(Ok(()), Err)
+    }
+
+    /// Whether a tile may be requested now (it hasn't failed recently).
+    fn due(&self, source: &str, id: &TileId) -> bool {
+        self.failed.get(&(source.to_string(), *id)).is_none_or(|(_, at)| std::time::Instant::now() >= *at)
     }
 
     /// Fetch the missing tiles one at a time (simple apps; see [`Map::tile_requests`] to load
-    /// in the background). Failed tiles are stored empty and the first error is returned.
+    /// in the background). Failed tiles are retried later (see [`Map::retry`]) and the first
+    /// error is returned.
     pub async fn load_tiles(&mut self, cam: &Camera, area: Rect) -> Result<()> {
         let mut first_err = None;
         for req in self.tile_requests(cam, area) {
@@ -1373,13 +1418,46 @@ mod tests {
     }
 
     #[test]
-    fn failed_loads_are_stored_empty() {
+    fn failed_loads_are_retried_then_given_up() {
+        use std::time::Duration;
         let mut map = raster_map();
         let cam = Camera::new(0.0, 0.0, 0.0);
         let area = Rect::new(0, 0, 40, 20);
-        assert!(map.insert_loaded("img", (0, 0, 0), Err(anyhow!("HTTP 500"))).is_err());
-        assert!(map.tile_requests(&cam, area).is_empty(), "not requested again");
+        let fail = |map: &mut Map| map.insert_loaded("img", (0, 0, 0), Err(anyhow!("HTTP 500"))).unwrap_err();
+        // A long wait: not requested again until it passes.
+        map.retry = RetryPolicy { base: Duration::from_secs(3600), max: Duration::from_secs(3600), attempts: 3 };
+        assert!(fail(&mut map).to_string().contains("img tile 0/0/0"));
+        assert!(map.tile_requests(&cam, area).is_empty(), "waiting before the retry");
+        // No wait: requested again right away, still nothing drawn.
+        map.retry.base = Duration::ZERO;
+        map.failed.values_mut().for_each(|f| f.1 = std::time::Instant::now());
+        assert_eq!(map.tile_requests(&cam, area).len(), 1);
+        fail(&mut map);
+        assert_eq!(map.tile_requests(&cam, area).len(), 1);
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset);
+        // The last attempt gives up: stored empty, never requested again.
+        fail(&mut map);
+        assert!(map.tile_requests(&cam, area).is_empty());
+        // A success clears the failure record.
+        let mut map = raster_map();
+        map.retry.base = Duration::ZERO;
+        fail(&mut map);
+        map.insert_loaded("img", (0, 0, 0), Ok(Loaded(LoadedTile::Raster(Some(solid_tile(1, 2, 3)))))).unwrap();
+        assert!(map.failed.is_empty() && map.tile_requests(&cam, area).is_empty());
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn vector_failures_are_retried_too() {
+        let mut map = Map::new();
+        map.retry.base = std::time::Duration::ZERO;
+        let src = crate::source::Source::xyz_for_tests();
+        map.add_source("v", MapSource::vector(src)).unwrap();
+        map.add_layer(StyleLayer::fill("water", "v").source_layer("water").color("#00f")).unwrap();
+        let (cam, area) = (Camera::new(0.0, 0.0, 0.0), Rect::new(0, 0, 40, 20));
+        let req = map.tile_requests(&cam, area).remove(0);
+        assert!(map.insert_loaded(&req.source, req.id, Err(anyhow!("timed out"))).is_err());
+        assert_eq!(map.tile_requests(&cam, area).len(), 1, "asked for again, not stored empty");
     }
 
     #[test]

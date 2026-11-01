@@ -212,6 +212,13 @@ pub struct Source {
 pub const OPENFREEMAP: &str = "https://tiles.openfreemap.org/planet";
 
 impl Source {
+    /// An XYZ source that is never fetched, for tests.
+    #[cfg(test)]
+    pub(crate) fn xyz_for_tests() -> Self {
+        let t = "https://tiles.invalid/{z}/{x}/{y}.pbf";
+        Self { name: t.into(), kind: Kind::Xyz(t.into()), http: http_client(), cache_dir: None, min_zoom: 0, max_zoom: 14, center: None }
+    }
+
     /// `spec` is a .pmtiles path or URL, an XYZ template containing {z}/{x}/{y}, or a TileJSON URL.
     pub async fn open(spec: &str) -> Result<Self> {
         let http = http_client();
