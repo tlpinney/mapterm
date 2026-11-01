@@ -566,7 +566,7 @@ impl RasterStore {
 pub fn raster_zoom(cam: &Camera, tile_px: u32, dots_per_source_px: f64, max_zoom: u8) -> u8 {
     // At zoom z a tile spans 256 * 2^(cam.zoom - z) dots over tile_px source pixels.
     let z = cam.zoom - (dots_per_source_px * tile_px as f64 / 256.0).log2();
-    (z.round() as i64).clamp(0, max_zoom as i64) as u8
+    (z.round() as i64).clamp(0, max_zoom.min(crate::render::MAX_TILE_ZOOM) as i64) as u8
 }
 
 /// The tiles a view needs at raster zoom `rz`, nearest the center first.

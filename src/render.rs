@@ -101,8 +101,19 @@ impl Camera {
 
     /// Integer tile zoom to fetch for this camera.
     pub fn tile_zoom(&self, min: u8, max: u8) -> u8 {
+        // Source zooms come from file headers and TileJSON: keep them in range and ordered.
+        let max = max.min(MAX_TILE_ZOOM);
+        let min = min.min(max);
         ((self.zoom + 0.2).floor() as i64).clamp(min as i64, max as i64) as u8
     }
+}
+
+/// The highest tile zoom mapterm requests; 2^30 tiles a side is far below a millimetre.
+pub(crate) const MAX_TILE_ZOOM: u8 = 30;
+
+/// `s` without control characters (C0, DEL and C1), which a terminal would act on.
+pub(crate) fn printable(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().any(char::is_control) { s.chars().filter(|c| !c.is_control()).collect::<String>().into() } else { s.into() }
 }
 
 /// Camera + screen area -> dot transform.
@@ -371,6 +382,10 @@ impl Canvas {
     }
 
     pub(crate) fn text_at(&mut self, col: i64, row: i64, s: &str, st: TStyle, pad: bool) -> bool {
+        // Text comes from tiles, styles and data files: control characters would reach the
+        // terminal as escape sequences, so they never enter a cell.
+        let s = printable(s);
+        let s = s.as_ref();
         let wdt = s.width() as i64;
         if row < 0 || row >= self.h as i64 || col < 0 || col + wdt > self.w as i64 || wdt == 0 {
             return false;

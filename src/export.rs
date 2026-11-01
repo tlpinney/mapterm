@@ -142,6 +142,7 @@ fn escape(out: &mut String, s: &str) {
             '>' => out.push_str("&gt;"),
             '&' => out.push_str("&amp;"),
             '"' => out.push_str("&quot;"),
+            c if c.is_control() => {}
             _ => out.push(ch),
         }
     }

@@ -220,6 +220,12 @@ fn split(xy: &[f64], ends: &[u32]) -> Vec<Json> {
 }
 
 fn geometry(g: &Table, header_type: u8) -> Result<Json> {
+    geometry_at(g, header_type, 0)
+}
+
+fn geometry_at(g: &Table, header_type: u8, depth: usize) -> Result<Json> {
+    // Collections can nest; a limit keeps a hostile file from overflowing the stack.
+    anyhow::ensure!(depth <= 16, "geometry collections nested too deeply");
     let kind = match header_type {
         0 => g.u8(6, 0)?,
         t => t,
@@ -237,7 +243,7 @@ fn geometry(g: &Table, header_type: u8) -> Result<Json> {
             json!({"type": "MultiPolygon", "coordinates": polys})
         }
         7 => {
-            let parts: Vec<Json> = g.tables(7)?.iter().map(|p| geometry(p, 0)).collect::<Result<_>>()?;
+            let parts: Vec<Json> = g.tables(7)?.iter().map(|p| geometry_at(p, 0, depth + 1)).collect::<Result<_>>()?;
             json!({"type": "GeometryCollection", "geometries": parts})
         }
         _ => Json::Null,

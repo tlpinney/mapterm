@@ -165,7 +165,11 @@ pub fn wkt_geometry(s: &str) -> Option<Json> {
     let kind = kind.trim_end_matches(" Z").trim_end_matches(" M").trim_end_matches(" ZM").trim();
     let body = &s[open..];
     // Nested lists of coordinates, by parenthesis depth.
-    fn parse(b: &str) -> Option<(Json, &str)> {
+    fn parse(b: &str, depth: usize) -> Option<(Json, &str)> {
+        // MULTIPOLYGON needs 3 levels; a limit keeps hostile input from overflowing the stack.
+        if depth > MAX_NESTING {
+            return None;
+        }
         let b = b.trim_start();
         if let Some(rest) = b.strip_prefix('(') {
             let mut items = Vec::new();
@@ -177,7 +181,7 @@ pub fn wkt_geometry(s: &str) -> Option<Json> {
                 }
                 let r = r.strip_prefix(',').unwrap_or(r).trim_start();
                 if r.starts_with('(') {
-                    let (item, after) = parse(r)?;
+                    let (item, after) = parse(r, depth + 1)?;
                     items.push(item);
                     rest = after;
                 } else {
@@ -193,7 +197,7 @@ pub fn wkt_geometry(s: &str) -> Option<Json> {
         }
         None
     }
-    let (coords, _) = parse(body)?;
+    let (coords, _) = parse(body, 0)?;
     let unwrap1 = |c: &Json| c.as_array().and_then(|a| a.first()).cloned();
     Some(match kind {
         "POINT" => json!({"type": "Point", "coordinates": unwrap1(&coords)?}),
@@ -211,6 +215,10 @@ pub fn wkt_geometry(s: &str) -> Option<Json> {
 }
 
 // ---- XML (just enough for GPX and KML) ----
+
+/// The deepest nesting accepted in WKT and XML. Real files stay in single digits; the
+/// limit keeps the recursive readers (and dropping the tree) off the end of the stack.
+const MAX_NESTING: usize = 64;
 
 #[derive(Debug, Default)]
 struct Element {
@@ -338,6 +346,9 @@ fn parse_xml(s: &str) -> Result<Element> {
                     parent.children.push(el);
                 }
             } else {
+                if stack.len() > MAX_NESTING {
+                    anyhow::bail!("XML nested more than {MAX_NESTING} levels deep");
+                }
                 stack.push(el);
             }
         }

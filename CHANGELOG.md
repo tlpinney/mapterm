@@ -6,6 +6,16 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [0.1.0-alpha.2] - unreleased
 
+### Security
+
+- Control characters in map text (tile labels, style text and glyphs, search results,
+  data file properties) no longer reach the terminal, where they could set the clipboard
+  or window title; `--snapshot` exports drop them too.
+- Deeply nested KML, WKT and FlatGeobuf geometry is rejected instead of overflowing the
+  stack.
+- A source with a bad zoom range (min above max, or past zoom 30) in a PMTiles header,
+  TileJSON or style no longer panics.
+
 ### Releases
 
 - Signed binaries: each version tag builds `mapterm` for macOS (Apple silicon) and Linux
