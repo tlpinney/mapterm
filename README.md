@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/8bf59b7f-3156-4820-aeeb-2b138fc5bc2b
 - **Imagery:** satellite and aerial layers (OSM, Esri, USGS, NASA GIBS, and keyed
   providers such as Vantor, Planet and Mapbox) as real images in kitty-graphics terminals, or as
   cell colors anywhere else.
-- **Your data:** GeoJSON, CSV, GPX, KML and FlatGeobuf, from a file or a URL, drawn over
+- **Your data:** GeoJSON, CSV, GPX, KML, FlatGeobuf and Shapefiles, from a file or a URL, drawn over
   the map, with clustering for large point sets.
 - **Search and inspect:** find a place and fly there; point at anything to see its
   features and properties, and copy them as JSON.
@@ -107,13 +107,17 @@ They follow the MapLibre GL / Mapbox GL defaults:
 ```sh
 mapterm --geojson sites.geojson --geojson https://example.com/routes.geojson
 mapterm --geojson stores.csv --geojson run.gpx --geojson places.kml
+mapterm --geojson parcels.shp
 ```
 
 Besides GeoJSON it reads CSV/TSV with latitude/longitude columns (`lat`,
 `latitude`, `lon`, `lng`, `longitude`, any case) or a WKT geometry column, GPX
 (waypoints, tracks, routes), KML (placemarks with their names, descriptions
-and extended data; unzip KMZ first) and FlatGeobuf (lon/lat). The format comes
-from the extension, else the content. Files and URLs up to 512 MB.
+and extended data; unzip KMZ first), FlatGeobuf (lon/lat) and Shapefiles
+(lon/lat; the `.dbf` attributes, `.prj` and `.cpg` code page beside the `.shp`
+are read too). The format comes from the extension, else the content. Files and
+URLs up to 512 MB. The readers are checked against GDAL on a corpus of real files
+(`tests/differential.rs`).
 
 - Points, lines and polygons (including Multi* and GeometryCollection), each
   layer in its own color with a legend in the status bar; polygon interiors are
