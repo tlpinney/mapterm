@@ -42,6 +42,8 @@ usage: mapterm [SOURCE] [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [
   --raster-key-cmd CMD    print the API key with a command, e.g. 'pass show vantor/api-key'
                           (otherwise the provider's variable, or MAPTERM_RASTER_KEY for URLs)
   --raster-header 'N: V'  extra request header; {key} in the value is the API key
+  --raster-param N=V      fill another {N} in the URL, e.g. mosaic=NAME for Planet
+  --raster-list-mosaics   list the Planet mosaics your key can use, then exit
   --raster-cache / --raster-no-cache
                           keep tiles on disk or not (default: on, off for keyed providers)
   --raster-attribution T  credit for the layer (known providers are filled in)
@@ -75,6 +77,8 @@ struct Args {
     raster_key_cmd: Option<String>,
     raster_headers: Vec<String>,
     raster_cache: Option<bool>,
+    raster_params: Vec<(String, String)>,
+    list_mosaics: bool,
     /// Experimental smooth scrolling, from MAPTERM_SMOOTH only (no flag): `1` pans the wheel
     /// smoothly, `shift` makes dragging pixel-exact (smooth protocol v3).
     smooth: bool,
@@ -88,7 +92,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, smooth, shift };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -103,6 +107,12 @@ fn args() -> Result<Args> {
             "--tms" => a.tms = true,
             "--raster-key-cmd" => a.raster_key_cmd = Some(it.next().context("--raster-key-cmd CMD")?),
             "--raster-header" => a.raster_headers.push(it.next().context("--raster-header 'Name: value'")?),
+            "--raster-param" => {
+                let v = it.next().context("--raster-param NAME=VALUE")?;
+                let (n, val) = v.split_once('=').context("--raster-param NAME=VALUE")?;
+                a.raster_params.push((n.trim().to_string(), val.trim().to_string()));
+            }
+            "--raster-list-mosaics" => a.list_mosaics = true,
             "--raster-cache" => a.raster_cache = Some(true),
             "--raster-no-cache" => a.raster_cache = Some(false),
             "--raster-list" => {
@@ -137,6 +147,35 @@ fn args() -> Result<Args> {
 }
 
 type Done = (TileId, Result<Prepared>);
+
+/// Print the Planet basemap mosaics the key can use (name, dates), following pagination.
+/// The key goes in a Basic auth header (Planet's API accepts the key as the user name).
+async fn list_planet_mosaics(key_cmd: Option<&str>) -> Result<()> {
+    let key = mapterm::raster::find_key(key_cmd, &["PL_API_KEY", "PLANET_API_KEY"])?
+        .context("Planet needs a key: set PL_API_KEY or pass --raster-key-cmd")?;
+    let auth = format!("Basic {}", mapterm::kitty::base64(format!("{key}:").as_bytes()));
+    let http = mapterm::source::http_client();
+    let mut url = "https://api.planet.com/basemaps/v1/mosaics".to_string();
+    let mut count = 0;
+    for _ in 0..20 {
+        let resp = http.get(&url).header("Authorization", &auth).send().await?;
+        if !resp.status().is_success() {
+            bail!("Planet mosaics: HTTP {}", resp.status());
+        }
+        let v: serde_json::Value = serde_json::from_slice(&resp.bytes().await?)?;
+        for m in v["mosaics"].as_array().into_iter().flatten() {
+            let s = |k: &str| m[k].as_str().unwrap_or("").get(..10).unwrap_or("").to_string();
+            println!("{:<48} {} .. {}", m["name"].as_str().unwrap_or("?"), s("first_acquired"), s("last_acquired"));
+            count += 1;
+        }
+        match v["_links"]["_next"].as_str() {
+            Some(next) if !next.is_empty() => url = next.to_string(),
+            _ => break,
+        }
+    }
+    eprintln!("{count} mosaics; use one with --raster planet --raster-param mosaic=NAME");
+    Ok(())
+}
 type RasterDone = (TileId, Result<Option<mapterm::raster::RasterTile>>);
 
 fn fetch_raster(src: &Arc<mapterm::raster::RasterSource>, sem: &Arc<Semaphore>, id: TileId, tx: mpsc::UnboundedSender<RasterDone>) {
@@ -303,6 +342,9 @@ fn fetch(src: &Arc<Source>, sem: &Arc<Semaphore>, style: Style, id: TileId, tx: 
 #[tokio::main]
 async fn main() -> Result<()> {
     let a = args()?;
+    if a.list_mosaics {
+        return list_planet_mosaics(a.raster_key_cmd.as_deref()).await;
+    }
     let src = Arc::new(Source::open(&a.source).await?);
     let (lon, lat, z) = match (a.at, src.center) {
         (Some((lo, la)), _) => (lo, la, a.zoom.unwrap_or(12.0)),
@@ -343,6 +385,18 @@ async fn main() -> Result<()> {
                 for h in &a.raster_headers {
                     r.add_header(h)?;
                 }
+            }
+            for (n, v) in &a.raster_params {
+                r.set_param(n, v);
+            }
+            let missing = r.missing_params();
+            if !missing.is_empty() {
+                let hint = if missing.iter().any(|m| m == "mosaic") {
+                    " (Planet: --raster-param mosaic=NAME or PLANET_MOSAIC; list yours with --raster-list-mosaics)"
+                } else {
+                    ""
+                };
+                bail!("the raster URL needs {}: use --raster-param NAME=VALUE{hint}", missing.iter().map(|m| format!("{{{m}}}")).collect::<Vec<_>>().join(", "));
             }
             if let Some(c) = a.raster_cache {
                 r.cache = c;

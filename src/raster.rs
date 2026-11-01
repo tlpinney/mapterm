@@ -39,6 +39,8 @@ pub struct RasterSource {
     pub cache: bool,
     /// Tile width and height in pixels (512 for Retina "@2x" tiles).
     pub tile_px: u32,
+    /// Values for other `{name}` placeholders in the URL (e.g. a Planet mosaic).
+    params: Vec<(String, String)>,
     pub max_zoom: u8,
     pub name: String,
     /// Credit to show for the imagery (known providers are filled in automatically).
@@ -55,6 +57,8 @@ pub struct Preset {
     pub headers: &'static [(&'static str, &'static str)],
     /// Environment variables checked for the key, in order (none: no key needed).
     pub key_env: &'static [&'static str],
+    /// Other `{name}` placeholders in the URL, with the environment variable that fills each.
+    pub params: &'static [(&'static str, &'static str)],
     pub attribution: &'static str,
     pub tile_px: u32,
     pub max_zoom: u8,
@@ -68,6 +72,7 @@ pub const PRESETS: &[Preset] = &[
         template: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
         headers: &[],
         key_env: &[],
+        params: &[],
         attribution: "© OpenStreetMap contributors",
         tile_px: 256,
         max_zoom: 19,
@@ -79,6 +84,7 @@ pub const PRESETS: &[Preset] = &[
         template: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         headers: &[],
         key_env: &[],
+        params: &[],
         attribution: "Esri, Maxar, Earthstar Geographics",
         tile_px: 256,
         max_zoom: 19,
@@ -90,6 +96,7 @@ pub const PRESETS: &[Preset] = &[
         template: "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}",
         headers: &[],
         key_env: &[],
+        params: &[],
         attribution: "USGS The National Map",
         tile_px: 256,
         max_zoom: 16,
@@ -101,6 +108,7 @@ pub const PRESETS: &[Preset] = &[
         template: "https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpg",
         headers: &[],
         key_env: &[],
+        params: &[],
         attribution: "Sentinel-2 cloudless 2024 by EOX (modified Copernicus Sentinel data)",
         tile_px: 256,
         max_zoom: 14,
@@ -112,9 +120,22 @@ pub const PRESETS: &[Preset] = &[
         template: "https://api.maxar.com/basemaps/v1/ogc/gwc/service/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=Maxar:Imagery&tileMatrixSet=EPSG:3857&tileMatrix=EPSG:3857:{z}&tileRow={y}&tileCol={x}&format=image/jpeg",
         headers: &[("maxar-api-key", "{key}")],
         key_env: &["VANTOR_API_KEY", "MAXAR_API_KEY"],
+        params: &[],
         attribution: "Vantor (Maxar) Vivid",
         tile_px: 256,
         max_zoom: 21,
+        cache: false,
+    },
+    Preset {
+        name: "planet",
+        about: "Planet basemaps (your subscription's mosaics), needs an API key and a mosaic",
+        template: "https://tiles.planet.com/basemaps/v1/planet-tiles/{mosaic}/gmap/{z}/{x}/{y}.png?api_key={key}",
+        headers: &[],
+        key_env: &["PL_API_KEY", "PLANET_API_KEY"],
+        params: &[("mosaic", "PLANET_MOSAIC")],
+        attribution: "Imagery © Planet Labs PBC",
+        tile_px: 256,
+        max_zoom: 18,
         cache: false,
     },
     Preset {
@@ -123,6 +144,7 @@ pub const PRESETS: &[Preset] = &[
         template: "https://api.mapbox.com/v4/mapbox.satellite/{z}/{x}/{y}@2x.jpg90?access_token={key}",
         headers: &[],
         key_env: &["MAPBOX_ACCESS_TOKEN"],
+        params: &[],
         attribution: "© Mapbox © Maxar",
         tile_px: 512,
         max_zoom: 22,
@@ -134,6 +156,7 @@ pub const PRESETS: &[Preset] = &[
         template: "https://api.maptiler.com/tiles/satellite-v2/{z}/{x}/{y}.jpg?key={key}",
         headers: &[],
         key_env: &["MAPTILER_KEY"],
+        params: &[],
         attribution: "© MapTiler © OpenStreetMap contributors",
         tile_px: 512,
         max_zoom: 20,
@@ -198,6 +221,7 @@ impl RasterSource {
             key: None,
             cache: true,
             tile_px: 256,
+            params: Vec::new(),
             max_zoom,
             name: template.split('/').nth(2).unwrap_or(template).to_string(),
             attribution: known_attribution(template).unwrap_or_default().to_string(),
@@ -214,6 +238,11 @@ impl RasterSource {
             );
         }
         let mut s = Self::new(p.template, false, p.max_zoom)?;
+        for (name, env) in p.params {
+            if let Some(v) = std::env::var(env).ok().filter(|v| !v.trim().is_empty()) {
+                s.params.push((name.to_string(), v.trim().to_string()));
+            }
+        }
         s.headers = p.headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
         s.key = key;
         s.cache = p.cache;
@@ -232,6 +261,27 @@ impl RasterSource {
 
     pub fn set_key(&mut self, key: Option<String>) {
         self.key = key;
+    }
+
+    /// Fill a `{name}` placeholder in the URL (e.g. `mosaic`); later calls win.
+    pub fn set_param(&mut self, name: &str, value: &str) {
+        self.params.retain(|(n, _)| n != name);
+        self.params.push((name.to_string(), value.to_string()));
+    }
+
+    /// Placeholders still unfilled, other than z/x/y/-y/key.
+    pub fn missing_params(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = self.template.as_str();
+        while let Some(i) = rest.find('{') {
+            let Some(j) = rest[i..].find('}') else { break };
+            let name = &rest[i + 1..i + j];
+            if !["z", "x", "y", "-y", "key"].contains(&name) && !self.params.iter().any(|(n, _)| n == name) {
+                out.push(name.to_string());
+            }
+            rest = &rest[i + j + 1..];
+        }
+        out
     }
 
     /// Whether the URL or a header uses `{key}`.
@@ -258,7 +308,11 @@ impl RasterSource {
     fn url(&self, z: u8, x: u32, y: u32) -> String {
         let flipped = (1u32 << z) - 1 - y;
         let y_val = if self.tms { flipped } else { y };
-        self.template
+        let mut t = self.template.clone();
+        for (name, value) in &self.params {
+            t = t.replace(&format!("{{{name}}}"), value);
+        }
+        t
             .replace("{z}", &z.to_string())
             .replace("{x}", &x.to_string())
             .replace("{-y}", &flipped.to_string())
@@ -544,6 +598,17 @@ mod tests {
         let e = s.redact(anyhow::anyhow!("https://x/?access_token=secret-key-123: HTTP 401"));
         assert!(!e.to_string().contains("secret") && e.to_string().contains("***"));
         // Free presets need nothing.
+        // Planet: the key is in the URL (its only option) but still redacted; needs a mosaic.
+        let mut pl = RasterSource::from_preset(preset("planet").unwrap(), Some("PLAK123456".into())).unwrap();
+        pl.params.clear();
+        assert_eq!(pl.missing_params(), vec!["mosaic".to_string()]);
+        pl.set_param("mosaic", "global_monthly_2025_09_mosaic");
+        assert!(pl.missing_params().is_empty());
+        assert_eq!(
+            pl.fill_key(&pl.url(12, 1171, 1566)),
+            "https://tiles.planet.com/basemaps/v1/planet-tiles/global_monthly_2025_09_mosaic/gmap/12/1171/1566.png?api_key=PLAK123456"
+        );
+        assert!(!pl.redact(anyhow::anyhow!("GET ...?api_key=PLAK123456 failed")).to_string().contains("PLAK"));
         let osm = RasterSource::from_preset(preset("osm").unwrap(), None).unwrap();
         assert!(osm.cache && !osm.wants_key());
         assert_eq!(RasterSource::from_preset(preset("mapbox").unwrap(), Some("t".into())).unwrap().tile_px, 512);

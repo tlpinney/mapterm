@@ -43,6 +43,7 @@ mapterm --raster-list                                      # providers and the k
 | `usgs` | USGS National Map imagery, US only, public domain | none |
 | `eox` | Sentinel-2 cloudless 2024, global, ~10 m (CC BY-NC-SA) | none |
 | `vantor` | Vantor (Maxar) Vivid basemap | `VANTOR_API_KEY` |
+| `planet` | Planet basemaps (your subscription's mosaics) | `PL_API_KEY` + a mosaic |
 | `mapbox` | Mapbox Satellite, Retina tiles | `MAPBOX_ACCESS_TOKEN` |
 | `maptiler` | MapTiler Satellite | `MAPTILER_KEY` |
 
@@ -55,6 +56,12 @@ out of errors. Keyed providers don't cache tiles on disk unless you pass
 other service, use its URL with `{key}` where the key goes (filled from
 `MAPTERM_RASTER_KEY` or `--raster-key-cmd`) and `--raster-header 'Name: value'`
 for header-based keys.
+
+Planet serves each customer's named mosaics: list the ones your key can use
+with `mapterm --raster-list-mosaics`, then pick one with
+`--raster planet --raster-param mosaic=NAME` (or `PLANET_MOSAIC`). Planet only
+accepts the key in the tile URL; mapterm still never prints it.
+`--raster-param NAME=VALUE` fills any other `{NAME}` in a custom URL.
 
 - URLs use `{z}`, `{x}` and `{y}` in any order; for TMS services (rows counted
   from the bottom) use `{-y}` or add `--tms`.
