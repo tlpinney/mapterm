@@ -552,6 +552,25 @@ impl Expr {
         }
     }
 
+    /// Whether the value can change with the zoom level.
+    pub fn uses_zoom(&self) -> bool {
+        match self {
+            Expr::Zoom => true,
+            Expr::Lit(_) | Expr::Get(_) | Expr::Has(_) | Expr::GeomType | Expr::Template(_) => false,
+            Expr::Cmp(_, a, b) | Expr::In(a, b) => a.uses_zoom() || b.uses_zoom(),
+            Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) | Expr::TypeOf(a) | Expr::InList(a, _) => {
+                a.uses_zoom()
+            }
+            Expr::All(v) | Expr::Any(v) | Expr::Coalesce(v) | Expr::Math(_, v) | Expr::Concat(v) | Expr::ToNum(v) | Expr::ToColor(v) | Expr::Assert(_, v) | Expr::IndexOf(v) | Expr::Slice(v) => {
+                v.iter().any(Expr::uses_zoom)
+            }
+            Expr::Match { input, arms, default } => input.uses_zoom() || default.uses_zoom() || arms.iter().any(|(_, e)| e.uses_zoom()),
+            Expr::Case { arms, default } => default.uses_zoom() || arms.iter().any(|(c, e)| c.uses_zoom() || e.uses_zoom()),
+            Expr::Interpolate { input, stops, .. } => input.uses_zoom() || stops.iter().any(|(_, e)| e.uses_zoom()),
+            Expr::Step { input, default, stops } => input.uses_zoom() || default.uses_zoom() || stops.iter().any(|(_, e)| e.uses_zoom()),
+        }
+    }
+
     pub fn eval(&self, c: &Ctx) -> Val {
         match self {
             Expr::Lit(v) => v.clone(),
@@ -843,5 +862,9 @@ mod tests {
         assert_eq!(Expr::parse_text(&json!("plain")).unwrap(), Expr::Lit(Val::Str("plain".into())));
         assert!(!Expr::parse(&json!(["get", "name"])).unwrap().is_constant());
         assert!(Expr::parse(&json!(["concat", "a", "b"])).unwrap().is_constant());
+        assert!(Expr::parse(&json!(["interpolate", ["linear"], ["zoom"], 5, 1, 10, 2])).unwrap().uses_zoom());
+        assert!(Expr::parse(&json!({"stops": [[5, "#000"], [10, "#fff"]]})).unwrap().uses_zoom());
+        assert!(Expr::parse(&json!(["all", ["==", "class", "x"], [">=", ["zoom"], 14]])).unwrap().uses_zoom());
+        assert!(!Expr::parse(&json!(["match", ["get", "class"], "a", "#fff", "#000"])).unwrap().uses_zoom());
     }
 }

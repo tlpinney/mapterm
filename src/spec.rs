@@ -241,6 +241,12 @@ impl StyleLayer {
         self.layout.iter().find(|(k, _)| k == name).map(|(_, e)| e)
     }
 
+    /// Whether the filter or any property used depends on the zoom level.
+    pub fn uses_zoom(&self) -> bool {
+        self.filter.as_ref().is_some_and(Expr::uses_zoom)
+            || self.paint.iter().chain(&self.layout).any(|(_, e)| e.uses_zoom())
+    }
+
     /// Whether the layer draws at this zoom.
     pub fn shown_at(&self, zoom: f64) -> bool {
         self.visible && zoom >= self.min_zoom && zoom < self.max_zoom

@@ -214,15 +214,83 @@ struct Item {
 /// One decoded vector tile: its features and what the style draws of them, by layer.
 struct MapTile {
     features: Arc<Vec<store::Feature>>,
-    /// Sorted by layer.
+    /// What layers whose style ignores the zoom draw, sorted by layer.
     items: Vec<Item>,
+    /// Feature indices by source-layer name.
+    by_layer: HashMap<Arc<str>, Vec<u32>>,
+    /// What zoom-dependent layers draw, by layer, for the zoom they were evaluated at.
+    zoomed: std::sync::Mutex<ZoomedItems>,
+}
+
+/// Items of zoom-dependent layers by layer index, with the zoom they were evaluated at.
+type ZoomedItems = HashMap<u16, (ZoomKey, Arc<Vec<Item>>)>;
+
+/// The zooms a zoom-dependent layer was evaluated at: filters and layout at the whole zoom
+/// level, paint at the camera zoom (to 1/20 of a level).
+type ZoomKey = (i64, i64);
+
+fn zoom_key(zoom: f64) -> ZoomKey {
+    (zoom.floor() as i64, (zoom * 20.0).round() as i64)
 }
 
 impl MapTile {
+    fn new(features: Arc<Vec<store::Feature>>, items: Vec<Item>) -> Self {
+        let mut by_layer: HashMap<Arc<str>, Vec<u32>> = HashMap::new();
+        for (i, f) in features.iter().enumerate() {
+            by_layer.entry(f.layer.clone()).or_default().push(i as u32);
+        }
+        Self { features, items, by_layer, zoomed: Default::default() }
+    }
+
     fn items_of(&self, layer: usize) -> &[Item] {
         let lo = self.items.partition_point(|i| (i.layer as usize) < layer);
         let hi = self.items.partition_point(|i| (i.layer as usize) <= layer);
         &self.items[lo..hi]
+    }
+
+    /// What style layer `i` draws from this tile at `zoom`. Layers that ignore the zoom were
+    /// evaluated when the tile loaded; the others are evaluated here, as MapLibre does:
+    /// filters and layout at the whole zoom level (past the source's last tile zoom too),
+    /// paint at the exact camera zoom. Kept until the zoom changes.
+    fn layer_items(&self, i: usize, l: &StyleLayer, zoom: f64, bg: Option<Rgba>) -> LayerItems<'_> {
+        if !l.uses_zoom() {
+            return LayerItems::Cached(self.items_of(i));
+        }
+        let key = zoom_key(zoom);
+        let mut cache = self.zoomed.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((k, items)) = cache.get(&(i as u16))
+            && *k == key
+        {
+            return LayerItems::Zoomed(items.clone());
+        }
+        let mut items = Vec::new();
+        if let Some(fs) = l.source_layer.as_deref().and_then(|s| self.by_layer.get(s)) {
+            for &fi in fs {
+                let f = &self.features[fi as usize];
+                let c = Ctx { zoom: zoom.floor(), geom: f.geom, props: &f.props };
+                if let Some(paint) = resolve(l, &c, zoom, bg) {
+                    items.push(Item { layer: i as u16, feature: fi, paint });
+                }
+            }
+        }
+        let items = Arc::new(items);
+        cache.insert(i as u16, (key, items.clone()));
+        LayerItems::Zoomed(items)
+    }
+}
+
+enum LayerItems<'a> {
+    Cached(&'a [Item]),
+    Zoomed(Arc<Vec<Item>>),
+}
+
+impl std::ops::Deref for LayerItems<'_> {
+    type Target = [Item];
+    fn deref(&self) -> &[Item] {
+        match self {
+            LayerItems::Cached(s) => s,
+            LayerItems::Zoomed(v) => v,
+        }
     }
 }
 
@@ -581,7 +649,7 @@ impl Map {
         let features = Arc::new(features);
         let items = style_tile(&self.layers, source, &features, id.0 as f64);
         match self.sources.iter_mut().find(|(s, _)| s == source) {
-            Some((_, MapSource::Vector(v))) => v.tiles.insert(id, MapTile { features, items }),
+            Some((_, MapSource::Vector(v))) => v.tiles.insert(id, MapTile::new(features, items)),
             _ => bail!("no vector source \"{source}\""),
         }
         Ok(())
@@ -760,7 +828,7 @@ impl Map {
                 for id in ids {
                     let features = v.tiles.map[&id].features.clone();
                     let items = style_tile(layers, sid, &features, id.0 as f64);
-                    v.tiles.map.insert(id, Arc::new(MapTile { features, items }));
+                    v.tiles.map.insert(id, Arc::new(MapTile::new(features, items)));
                 }
             }
         }
@@ -838,7 +906,7 @@ impl Map {
                     let tn = (1u64 << tid.0) as f64;
                     let world = |p: &[f32; 2]| ((tid.1 as f64 + p[0] as f64) / tn, (tid.2 as f64 + p[1] as f64) / tn);
                     let mut seen = HashSet::new();
-                    for it in tile.items_of(i) {
+                    for it in tile.layer_items(i, l, cam.zoom, bg).iter() {
                         let f = &tile.features[it.feature as usize];
                         let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); vp.dot(x, y) }).collect()).collect();
                         if hit(f.geom, &dots, target, edges).is_none() || !seen.insert(format!("{:?}{:?}", f.geom, f.props)) {
@@ -850,8 +918,8 @@ impl Map {
                 }
                 Some(MapSource::GeoJson(g)) => {
                     for f in &g.features {
-                        let c = Ctx { zoom: cam.zoom, geom: f.geom, props: &f.props };
-                        if resolve(l, &c, bg).is_none() {
+                        let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props };
+                        if resolve(l, &c, cam.zoom, bg).is_none() {
                             continue;
                         }
                         let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
@@ -906,11 +974,14 @@ impl Map {
                     let Some((tid, tile)) = v.tiles.get_or_ancestor(id) else { continue };
                     // The top shown layer drawing each feature.
                     let mut drawn_by: HashMap<u32, usize> = HashMap::new();
-                    for it in &tile.items {
-                        if let Entry::Style(l) = &self.layers[it.layer as usize]
+                    for (i, e) in self.layers.iter().enumerate() {
+                        if let Entry::Style(l) = e
+                            && l.source.as_deref() == Some(sid.as_str())
                             && l.shown_at(cam.zoom)
                         {
-                            drawn_by.insert(it.feature, it.layer as usize);
+                            for it in tile.layer_items(i, l, cam.zoom, bg).iter() {
+                                drawn_by.insert(it.feature, i);
+                            }
                         }
                     }
                     let tn = (1u64 << tid.0) as f64;
@@ -931,9 +1002,9 @@ impl Map {
                     for f in &g.features {
                         let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
                         let Some((rank, score)) = hit(f.geom, &dots, target, true) else { continue };
-                        let c = Ctx { zoom: cam.zoom, geom: f.geom, props: &f.props };
+                        let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props };
                         let by = self.layers.iter().rposition(|e| {
-                            matches!(e, Entry::Style(l) if l.source.as_deref() == Some(sid.as_str()) && l.shown_at(cam.zoom) && resolve(l, &c, bg).is_some())
+                            matches!(e, Entry::Style(l) if l.source.as_deref() == Some(sid.as_str()) && l.shown_at(cam.zoom) && resolve(l, &c, cam.zoom, bg).is_some())
                         });
                         let lonlat = f.parts.iter().map(|p| p.iter().map(|&(x, y)| to_lonlat(x, y)).collect()).collect();
                         push(f.geom, rank, score, lonlat, source.clone(), &f.props, None, by);
@@ -977,10 +1048,14 @@ fn style_tile(layers: &[Entry], source: &str, features: &[store::Feature], zoom:
         if l.source.as_deref() != Some(source) {
             continue;
         }
+        // Layers whose style depends on the zoom are evaluated when drawn.
+        if l.uses_zoom() {
+            continue;
+        }
         let Some(fs) = l.source_layer.as_deref().and_then(|s| by_layer.get(s)) else { continue };
         for &fi in fs {
             let f = &features[fi];
-            if let Some(paint) = resolve(l, &Ctx { zoom, geom: f.geom, props: &f.props }, bg) {
+            if let Some(paint) = resolve(l, &Ctx { zoom, geom: f.geom, props: &f.props }, zoom, bg) {
                 items.push(Item { layer: li as u16, feature: fi as u32, paint });
             }
         }
@@ -1005,16 +1080,18 @@ fn term_color(c: Rgba, opacity: f64, bg: Option<Rgba>) -> Option<Color> {
 
 const BLACK: Rgba = Rgba::rgb(0, 0, 0);
 
-/// What one style layer draws for one feature, or `None`.
-fn resolve(l: &StyleLayer, c: &Ctx, bg: Option<Rgba>) -> Option<Resolved> {
+/// What one style layer draws for one feature, or `None`. The filter and layout use `c`
+/// (its zoom is the whole zoom level); paint uses `paint_zoom`.
+fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option<Resolved> {
     if let Some(f) = &l.filter
         && !f.eval(c).as_bool()
     {
         return None;
     }
+    let cp = Ctx { zoom: paint_zoom, geom: c.geom, props: c.props };
     let color = |prop: &str, opacity: &str, default: Option<Rgba>| -> Option<Color> {
-        let rgba = l.paint_expr(prop).and_then(|e| e.eval(c).as_color()).or(default)?;
-        let o = l.paint_expr(opacity).and_then(|e| e.eval(c).as_num()).unwrap_or(1.0);
+        let rgba = l.paint_expr(prop).and_then(|e| e.eval(&cp).as_color()).or(default)?;
+        let o = l.paint_expr(opacity).and_then(|e| e.eval(&cp).as_num()).unwrap_or(1.0);
         term_color(rgba, o, bg)
     };
     let layout_str = |name: &str| l.layout_expr(name).map(|e| e.eval(c).to_text()).filter(|s| !s.is_empty());
@@ -1184,7 +1261,7 @@ impl Widget for MapView<'_> {
                     Some(MapSource::Vector(_)) => {
                         for ((z, tx, ty), tile) in tiles.get(sid).into_iter().flatten() {
                             let n = (1u64 << z) as f64;
-                            for it in tile.items_of(i) {
+                            for it in tile.layer_items(i, l, cam.zoom, bg).iter() {
                                 let f = &tile.features[it.feature as usize];
                                 let dots: Vec<Vec<(f64, f64)>> = f
                                     .parts
@@ -1200,7 +1277,7 @@ impl Widget for MapView<'_> {
                             if !ctx.visible(f.bbox) {
                                 continue;
                             }
-                            let Some(r) = resolve(l, &Ctx { zoom: cam.zoom, geom: f.geom, props: &f.props }, bg) else { continue };
+                            let Some(r) = resolve(l, &Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props }, cam.zoom, bg) else { continue };
                             let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
                             draw_resolved(ctx, &r, f.geom, &dots);
                         }
@@ -1499,5 +1576,42 @@ mod tests {
         let row: String = (0..60).map(|x| buf[(x, 10)].symbol().to_string()).collect();
         assert!(row.contains("● Pin"), "{row}");
         assert_eq!(buf[(30, 10)].fg, Color::Rgb(255, 99, 132));
+    }
+
+    fn water_map(max_zoom: u8, tile: TileId, layer: StyleLayer) -> Map {
+        let mvt = crate::mvt::tests_support::square_tile("water", 4096);
+        let mut map = Map::new();
+        map.add_source("v", MapSource::vector_tiles(0, max_zoom)).unwrap();
+        map.add_layer(layer).unwrap();
+        map.insert_tile("v", tile, Some(&mvt)).unwrap();
+        map
+    }
+
+    #[test]
+    fn paint_follows_the_fractional_camera_zoom() {
+        // Black at z2 fading to white at z4, drawn from a z2-only source.
+        let layer = StyleLayer::fill("water", "v").source_layer("water").color(json!(["interpolate", ["linear"], ["zoom"], 2, "#000000", 4, "#ffffff"]));
+        let map = water_map(2, (2, 1, 1), layer);
+        // The middle of tile 2/1/1 (lon -45, lat ~40.98).
+        let at = |z: f64| render(&map, &Camera::new(-45.0, 40.979898, z), Rect::new(0, 0, 40, 20))[(20, 10)].bg;
+        assert_eq!(at(2.0), Color::Rgb(0, 0, 0));
+        assert_eq!(at(2.5), Color::Rgb(64, 64, 64), "a quarter of the way at z2.5, not the tile's z2");
+        assert_eq!(at(3.0), Color::Rgb(128, 128, 128));
+        assert_eq!(at(4.0), Color::Rgb(255, 255, 255), "past the source's last zoom");
+    }
+
+    #[test]
+    fn filters_use_the_whole_zoom_level_past_the_source_max() {
+        // Only drawn from z16, from a source whose tiles stop at z14.
+        let layer = StyleLayer::fill("water", "v").source_layer("water").filter(json!([">=", ["zoom"], 16])).color("#0000ff");
+        let map = water_map(14, (14, 4686, 6268), layer);
+        let center = |z: f64| Camera::new(-77.025146484375, 38.882481197550796, z);
+        let area = Rect::new(0, 0, 40, 20);
+        assert_eq!(render(&map, &center(15.9), area)[(20, 10)].bg, Color::Reset, "z15.9 is level 15");
+        assert_eq!(render(&map, &center(16.0), area)[(20, 10)].bg, Color::Rgb(0, 0, 255));
+        assert_eq!(map.query_rendered_features(&center(16.2), area, (40.0, 40.0), None).len(), 1);
+        assert!(map.query_rendered_features(&center(15.2), area, (40.0, 40.0), None).is_empty());
+        let picks = map.query_features(&center(15.2), area, (40.0, 40.0));
+        assert!(picks.len() == 1 && !picks[0].drawn, "listed by inspect, but not drawn at z15");
     }
 }
