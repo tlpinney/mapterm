@@ -24,6 +24,11 @@ All notable changes to mapterm are listed here. The format follows
 - A FlatGeobuf file with part ends out of order no longer crashes mapterm, and huge
   feature counts or offsets in FlatGeobuf and PMTiles no longer overflow (found by the new
   fuzz targets in `fuzz/`).
+- `--raster-list-mosaics` only follows Planet's next-page links back to
+  `https://api.planet.com/`, since each request carries the key; place search and the
+  mosaic list read at most 4 and 16 MB per response.
+- PMTiles directory entries must lie inside their section of the archive, and zero-length
+  or wrapping byte ranges are refused before any request.
 
 ### Releases
 

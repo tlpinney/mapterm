@@ -221,23 +221,23 @@ fn dlog(msg: impl FnOnce() -> String) {
 async fn list_planet_mosaics(key_cmd: Option<&str>) -> Result<()> {
     let key = mapterm::raster::find_key(key_cmd, &["PL_API_KEY", "PLANET_API_KEY"])?
         .context("Planet needs a key: set PL_API_KEY or pass --raster-key-cmd")?;
-    let auth = format!("Basic {}", mapterm::kitty::base64(format!("{key}:").as_bytes()));
+    let auth = vec![("Authorization".to_string(), format!("Basic {}", mapterm::kitty::base64(format!("{key}:").as_bytes())))];
     let http = mapterm::source::http_client();
-    let mut url = "https://api.planet.com/basemaps/v1/mosaics".to_string();
+    const API: &str = "https://api.planet.com/";
+    let mut url = format!("{API}basemaps/v1/mosaics");
     let mut count = 0;
     for _ in 0..20 {
-        let resp = http.get(&url).header("Authorization", &auth).send().await?;
-        if !resp.status().is_success() {
-            bail!("Planet mosaics: HTTP {}", resp.status());
-        }
-        let v: serde_json::Value = serde_json::from_slice(&resp.bytes().await?)?;
+        let bytes = mapterm::source::get_limited(&http, &url, &auth, 16 << 20).await.context("Planet mosaics")?;
+        let v: serde_json::Value = serde_json::from_slice(&bytes.context("Planet mosaics: not found")?)?;
         for m in v["mosaics"].as_array().into_iter().flatten() {
             let s = |k: &str| m[k].as_str().unwrap_or("").get(..10).unwrap_or("").to_string();
             println!("{:<48} {} .. {}", m["name"].as_str().unwrap_or("?"), s("first_acquired"), s("last_acquired"));
             count += 1;
         }
         match v["_links"]["_next"].as_str() {
-            Some(next) if !next.is_empty() => url = next.to_string(),
+            // The key goes with every request: only follow links back to Planet's API over https.
+            Some(next) if next.starts_with(API) => url = next.to_string(),
+            Some(next) if !next.is_empty() => bail!("Planet mosaics: refusing to send the key to the next-page link {next:?}"),
             _ => break,
         }
     }

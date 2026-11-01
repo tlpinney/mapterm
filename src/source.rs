@@ -73,6 +73,13 @@ pub(crate) async fn get_data(http: &reqwest::Client, url: &str, max: usize) -> R
     get_capped(http, url, None, &[], max).await
 }
 
+/// A response body of at most `max` bytes, read as it streams in, with extra request
+/// headers; `None` for 404 and 204. For API responses (search results, listings), which
+/// must not grow without bound however long the request takes.
+pub async fn get_limited(http: &reqwest::Client, url: &str, headers: &[(String, String)], max: usize) -> Result<Option<Vec<u8>>> {
+    get_capped(http, url, None, headers, max).await
+}
+
 async fn get_capped(
     http: &reqwest::Client,
     url: &str,
@@ -85,7 +92,10 @@ async fn get_capped(
         req = req.header(k.as_str(), v.as_str());
     }
     if let Some((off, len)) = range {
-        req = req.header("Range", format!("bytes={}-{}", off, off + len - 1));
+        // Offsets and lengths come from archive directories: a zero or wrapping range is corrupt.
+        let last = off.checked_add(len).and_then(|end| end.checked_sub(1)).filter(|_| len > 0);
+        let last = last.ok_or_else(|| anyhow!("{url}: bad byte range {off}+{len}"))?;
+        req = req.header("Range", format!("bytes={off}-{last}"));
     }
     let mut resp = req.send().await?;
     let status = resp.status();
@@ -111,6 +121,16 @@ async fn get_capped(
     Ok(Some(out))
 }
 
+/// Where entry `e` starts in the file, checking it lies inside its section (tile data or
+/// leaf directories). Directory offsets come from the archive, so they may be anything.
+fn section(off: u64, len: u64, e: &Entry) -> Result<u64> {
+    let end = e.offset.checked_add(e.length as u64).filter(|&end| len == 0 || end <= len);
+    match (end, off.checked_add(e.offset)) {
+        (Some(_), Some(start)) => Ok(start),
+        _ => bail!("PMTiles entry at {}+{} is outside its section", e.offset, e.length),
+    }
+}
+
 enum Backend {
     File(PathBuf),
     Http(String),
@@ -134,6 +154,9 @@ impl PmArchive {
     async fn read(backend: &Backend, http: &reqwest::Client, off: u64, len: u64) -> Result<Vec<u8>> {
         if len as usize > MAX_FETCH {
             bail!("PMTiles read of {len} bytes refused");
+        }
+        if len == 0 {
+            return Ok(Vec::new());
         }
         match backend {
             Backend::File(p) => {
@@ -209,10 +232,10 @@ impl PmArchive {
         for _ in 0..4 {
             let Some(e) = pmtiles::find(&dir, id) else { return Ok(None) };
             if e.run_length > 0 {
-                let raw = Self::read(&self.backend, http, self.header.data_off + e.offset, e.length as u64).await?;
+                let raw = Self::read(&self.backend, http, section(self.header.data_off, self.header.data_len, &e)?, e.length as u64).await?;
                 return decompress(raw, self.header.tile_compression).map(Some);
             }
-            let key = (self.header.leaf_off + e.offset, e.length as u64);
+            let key = (section(self.header.leaf_off, self.header.leaf_len, &e)?, e.length as u64);
             let cached = self.leaves.lock().unwrap().get(&key).cloned();
             dir = match cached {
                 Some(d) => d,
@@ -380,6 +403,24 @@ pub(crate) fn read_fresh(p: &Path) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entries_outside_their_section_are_refused() {
+        let e = |offset, length| Entry { tile_id: 0, offset, length, run_length: 1 };
+        assert_eq!(section(100, 50, &e(10, 40)).unwrap(), 110);
+        assert!(section(100, 50, &e(10, 41)).is_err(), "past the section");
+        assert!(section(100, 50, &e(u64::MAX, 1)).is_err(), "offset + length wraps");
+        assert!(section(u64::MAX, 0, &e(1, 1)).is_err(), "section start + offset wraps");
+    }
+
+    #[tokio::test]
+    async fn bad_byte_ranges_are_refused_before_sending() {
+        let http = http_client();
+        for range in [(10, 0), (u64::MAX, 2)] {
+            let err = get(&http, "http://127.0.0.1:9/never", Some(range)).await.unwrap_err();
+            assert!(format!("{err:#}").contains("bad byte range"), "{err:#}");
+        }
+    }
 
     #[test]
     fn gunzip_cap() {

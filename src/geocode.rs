@@ -43,6 +43,9 @@ pub enum Api {
     Nominatim,
 }
 
+/// The largest search response read: results are a few KB.
+const MAX_RESPONSE: usize = 4 << 20;
+
 /// A geocoding server.
 #[derive(Clone, Debug)]
 pub struct Geocoder {
@@ -100,11 +103,9 @@ impl Geocoder {
             }
         }
         let url = reqwest::Url::parse_with_params(&self.url, &params).context("geocoder URL")?;
-        let resp = self.http.get(url).send().await.context("place search")?;
-        if !resp.status().is_success() {
-            bail!("place search: HTTP {}", resp.status());
-        }
-        let body: Json = serde_json::from_slice(&resp.bytes().await?).context("place search: not JSON")?;
+        // Capped: a hostile or broken geocoder can't fill memory with one answer.
+        let bytes = crate::source::get_limited(&self.http, url.as_str(), &[], MAX_RESPONSE).await.context("place search")?;
+        let body: Json = serde_json::from_slice(&bytes.unwrap_or_default()).context("place search: not JSON")?;
         let mut places = match self.api {
             Api::Photon => parse_photon(&body),
             Api::Nominatim => parse_nominatim(&body),
