@@ -141,18 +141,32 @@ sharper tiles load, lower-zoom tiles stand in for them.
 
 ## Use it in your own app
 
-The crate's library has the pieces mapterm is built from:
+mapterm is also a library, built like Leaflet: a map is a camera plus a stack of
+layers, and anything can be a layer.
 
-- `Source` opens a PMTiles file or URL, an XYZ template, or a TileJSON URL
-- `prepare` decodes and styles one tile; `TileStore` keeps the prepared tiles
-- `MapWidget` is the ratatui widget, with `Overlay` markers and lines on top
-- `Controller` turns crossterm mouse and key events into camera moves, and
-  reports single clicks (`take_click`) so you can act on the spot under them
-- `pick` returns the features under a spot with their properties and
-  measurements, for your own inspection or analysis views
+```rust
+let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);   // the basemap
+let sites = mapterm::geojson::load("sites.geojson", PALETTE[0]).await?;
+let pins = Markers(&[Overlay::Marker { lon, lat, glyph: "◆".into(), .. }]);
+let layers: [&dyn Layer; 3] = [&tiles, &sites, &pins];               // bottom to top
 
-`src/bin/mapterm.rs` is a complete example: about 500 lines that fetch the
-tiles the view needs, feed input to the controller, and draw the widget.
+frame.render_widget(MapView { camera: &ctl.cam, layers: &layers }, area);
+let under = pick_all(&layers, &ctl.cam, area, dot);                  // top layer first
+```
+
+- `Layer` is three methods: `draw` (lines, fills, markers and labels through a
+  `DrawContext`, in lon/lat or world coordinates), `pick` (features under a
+  spot) and `bounds` (for fitting the view). Markers and labels from every
+  layer are placed together, so they never overlap.
+- Built in: `VectorTiles` (PMTiles, OpenFreeMap or any MVT source), `GeoJson`,
+  and `Markers`. Raster layers draw as terminal images outside the text grid
+  and are handled by the app for now (see `src/bin/mapterm.rs`).
+- `Controller` gives MapLibre-style mouse and keyboard handling;
+  `take_click` reports clicks for your own popups and panels.
+
+[`examples/hello_map.rs`](examples/hello_map.rs) is a complete pan-and-zoom map
+with a marker in about 50 lines (`cargo run --release --example hello_map`), and
+`src/bin/mapterm.rs` is the full viewer.
 
 ## Experimental: smooth scrolling
 

@@ -6,8 +6,13 @@ use anyhow::{Context, Result, bail};
 use ratatui::style::Color;
 use serde_json::Value as Json;
 
+use ratatui::style::{Modifier, Style as TStyle};
+use unicode_width::UnicodeWidthStr;
+
 use crate::{
+    layer::{DrawContext, Layer, PickContext},
     mvt::{GeomType, Value},
+    pick::Pick,
     render::to_world,
 };
 
@@ -37,15 +42,19 @@ pub struct Feature {
     pub label: Option<String>,
 }
 
-pub struct Layer {
+pub struct GeoJson {
     pub name: String,
     pub color: Color,
     pub features: Vec<Feature>,
+    /// Tint polygon interiors (turn off over a raster layer to keep it visible).
+    pub fill: bool,
+    /// Label features that have a name.
+    pub labels: bool,
     /// [min_x, min_y, max_x, max_y] in world coordinates over all features.
     pub bbox: [f64; 4],
 }
 
-impl Layer {
+impl GeoJson {
     /// Lon/lat bounds (west, south, east, north).
     pub fn bounds_lonlat(&self) -> Option<(f64, f64, f64, f64)> {
         if self.features.is_empty() {
@@ -58,8 +67,72 @@ impl Layer {
     }
 }
 
+impl Layer for GeoJson {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Polygon interiors tinted, outlines and lines in braille, points as `●`, names as
+    /// labels; only features overlapping the view are projected.
+    fn draw(&self, ctx: &mut DrawContext) {
+        let color = self.color;
+        let tint = match color {
+            Color::Rgb(r, g, b) => Color::Rgb((r as f32 * 0.32) as u8, (g as f32 * 0.32) as u8, (b as f32 * 0.32) as u8),
+            c => c,
+        };
+        for f in &self.features {
+            if !ctx.visible(f.bbox) {
+                continue;
+            }
+            let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| ctx.dot(x, y)).collect()).collect();
+            match f.geom {
+                GeomType::Polygon => {
+                    if self.fill {
+                        ctx.fill_dots(&dots, tint);
+                    }
+                    for ring in &dots {
+                        ctx.line_dots(ring, color);
+                    }
+                }
+                GeomType::Line => {
+                    for part in &dots {
+                        ctx.line_dots(part, color);
+                    }
+                }
+                _ => {
+                    for &p in dots.iter().flatten() {
+                        ctx.marker_dot(p, "●", TStyle::new().fg(color), 50, None);
+                    }
+                }
+            }
+            if self.labels
+                && let Some(text) = &f.label
+            {
+                // Points label beside the marker; lines and polygons at their middle.
+                let anchor = if f.geom == GeomType::Point {
+                    dots.first().and_then(|p| p.first()).map(|p| (p.0 + 4.0 + text.width() as f64, p.1))
+                } else {
+                    let a = ctx.dot((f.bbox[0] + f.bbox[2]) / 2.0, (f.bbox[1] + f.bbox[3]) / 2.0);
+                    Some(a)
+                };
+                if let Some(p) = anchor {
+                    ctx.label_dot(p, text, TStyle::new().fg(color).add_modifier(Modifier::BOLD), 60);
+                }
+            }
+        }
+    }
+
+    fn pick(&self, ctx: &PickContext) -> Vec<Pick> {
+        crate::pick::pick_layers(std::slice::from_ref(self), ctx.camera, ctx.area, ctx.target)
+    }
+
+    fn bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        self.bounds_lonlat()
+    }
+}
+
 /// Load a layer from a path or http(s) URL.
-pub async fn load(spec: &str, color: Color) -> Result<Layer> {
+pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
     let bytes = if spec.starts_with("http://") || spec.starts_with("https://") {
         let http = crate::source::http_client();
         crate::source::get_with(&http, spec, None, &[]).await?.with_context(|| format!("{spec}: not found"))?
@@ -75,7 +148,7 @@ pub async fn load(spec: &str, color: Color) -> Result<Layer> {
 }
 
 /// Parse a GeoJSON document (FeatureCollection, Feature, or bare geometry).
-pub fn parse(bytes: &[u8], name: String, color: Color) -> Result<Layer> {
+pub fn parse(bytes: &[u8], name: String, color: Color) -> Result<GeoJson> {
     let doc: Json = serde_json::from_slice(bytes).context("not valid JSON")?;
     let mut features = Vec::new();
     match doc["type"].as_str() {
@@ -92,7 +165,7 @@ pub fn parse(bytes: &[u8], name: String, color: Color) -> Result<Layer> {
     for f in &features {
         bbox = [bbox[0].min(f.bbox[0]), bbox[1].min(f.bbox[1]), bbox[2].max(f.bbox[2]), bbox[3].max(f.bbox[3])];
     }
-    Ok(Layer { name, color, features, bbox })
+    Ok(GeoJson { name, color, features, bbox, fill: true, labels: true })
 }
 
 fn to_value(v: &Json) -> Option<Value> {

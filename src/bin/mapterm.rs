@@ -21,7 +21,7 @@ use std::io::Write;
 
 use mapterm::{
     Controller,
-    Camera, MapWidget, Overlay, Source, Style, Theme, TileId, TileStore, Viewport, prepare, smooth, source::OPENFREEMAP,
+    Camera, Layer, MapView, Markers, Overlay, Source, VectorTiles, pick_all, Style, Theme, TileId, TileStore, Viewport, prepare, smooth, source::OPENFREEMAP,
     store::Prepared,
 };
 use tokio::sync::{Semaphore, mpsc};
@@ -470,16 +470,19 @@ async fn main() -> Result<()> {
         }
         if let Some((c, r)) = a.pick {
             let dot = ((c as f64 - area.x as f64) * 2.0 + 1.0, (r as f64 - area.y as f64) * 4.0 + 2.0);
-            let mut found = mapterm::pick::pick_layers(&layers, &cam, area, dot);
-            found.extend(mapterm::pick(&store, &cam, src.min_zoom, src.max_zoom, area, c, r));
-            for p in found {
+            let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
+            let mut stack: Vec<&dyn Layer> = vec![&tiles];
+            stack.extend(layers.iter().map(|l| l as &dyn Layer));
+            for p in pick_all(&stack, &cam, area, dot) {
                 println!("{}", p.to_json());
             }
             return Ok(());
         }
         let mut buf = Buffer::empty(area);
-        MapWidget { store: &store, camera: &cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &[], fills: true, lines: true, labels: true, layers: &layers, layer_fills: true }
-            .render(area, &mut buf);
+        let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
+        let mut stack: Vec<&dyn Layer> = vec![&tiles];
+        stack.extend(layers.iter().map(|l| l as &dyn Layer));
+        MapView { camera: &cam, layers: &stack }.render(area, &mut buf);
         for y in 0..h {
             let line: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
             println!("{}", line.trim_end());
@@ -586,6 +589,10 @@ async fn main() -> Result<()> {
                 let dots_per_px = if kitty { 2.0 / (cpx.0 / 2.0) } else { 2.0 };
                 mapterm::raster::raster_zoom(&draw_cam, r.tile_px, dots_per_px, r.max_zoom)
             });
+            for l in &mut layers {
+                l.fill = raster.is_none();
+                l.labels = labels && vector < 2;
+            }
             term.draw(|f| {
                 let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
                 let panel_w = if inspect && !picks.is_empty() { 52.min(main.width / 2) } else { 0 };
@@ -596,21 +603,20 @@ async fn main() -> Result<()> {
                     let blocks = mapterm::raster::layout(&rstore, &draw_cam, m, rz);
                     f.render_widget(mapterm::raster::RasterCells { blocks: &blocks }, m);
                 }
-                f.render_widget(
-                    MapWidget {
-                        store: &store,
-                        camera: &draw_cam,
-                        min_zoom: src.min_zoom,
-                        max_zoom: src.max_zoom,
-                        overlays: &overlays,
-                        fills: raster.is_none() && vector == 0,
-                        lines: vector == 0,
-                        labels: labels && vector < 2,
-                        layers: &layers,
-                        layer_fills: raster.is_none(),
-                    },
-                    m,
-                );
+                // The layer stack, bottom to top: basemap, GeoJSON layers, highlights and markers.
+                let tiles = VectorTiles {
+                    store: &store,
+                    min_zoom: src.min_zoom,
+                    max_zoom: src.max_zoom,
+                    fills: raster.is_none() && vector == 0,
+                    lines: vector == 0,
+                    labels: labels && vector < 2,
+                };
+                let marks = Markers(&overlays);
+                let mut stack: Vec<&dyn Layer> = vec![&tiles];
+                stack.extend(layers.iter().map(|l| l as &dyn Layer));
+                stack.push(&marks);
+                f.render_widget(MapView { camera: &draw_cam, layers: &stack }, m);
                 list_rows = if panel_w > 0 { draw_inspector(f, panel, &picks, sel) } else { Vec::new() };
                 if let Some(r) = box_rect {
                     f.render_widget(Block::bordered().border_style(TStyle::new().fg(Color::Yellow)), r);
@@ -863,8 +869,10 @@ async fn main() -> Result<()> {
                                     hover_dot = Some(dot);
                                     let key = (dot.0.floor() as i32, dot.1.floor() as i32);
                                     if hover.as_ref().is_none_or(|(k, _)| *k != key) {
-                                        let mut under = mapterm::pick::pick_layers(&layers, &last_cam, map_area, dot);
-                                        under.extend(mapterm::pick_dot(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, dot));
+                                        let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
+                                        let mut stack: Vec<&dyn Layer> = vec![&tiles];
+                                        stack.extend(layers.iter().map(|l| l as &dyn Layer));
+                                        let under = pick_all(&stack, &last_cam, map_area, dot);
                                         hover = Some((key, match under.first() {
                                             Some(p) => {
                                                 let more = if under.len() > 1 { format!(" +{} more", under.len() - 1) } else { String::new() };
@@ -880,8 +888,10 @@ async fn main() -> Result<()> {
                                     && inspect
                                 {
                                     let dot = Viewport::new(&last_cam, map_area).dot_ll(k.lon, k.lat);
-                                    picks = mapterm::pick::pick_layers(&layers, &last_cam, map_area, dot);
-                                    picks.extend(mapterm::pick_lonlat(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, k.lon, k.lat));
+                                    let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);
+                                    let mut stack: Vec<&dyn Layer> = vec![&tiles];
+                                    stack.extend(layers.iter().map(|l| l as &dyn Layer));
+                                    picks = pick_all(&stack, &last_cam, map_area, dot);
                                     sel = 0;
                                     click_at = Some((k.lon, k.lat));
                                     if picks.is_empty() {

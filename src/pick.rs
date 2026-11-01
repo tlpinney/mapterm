@@ -239,7 +239,7 @@ pub fn pick_dot(store: &TileStore, cam: &Camera, min_zoom: u8, max_zoom: u8, are
 
 /// Features of GeoJSON layers under a braille-dot position (relative to the map area), most
 /// specific first, the same way [`pick_dot`] ranks basemap features.
-pub fn pick_layers(layers: &[crate::geojson::Layer], cam: &Camera, area: Rect, target: (f64, f64)) -> Vec<Pick> {
+pub fn pick_layers(layers: &[crate::geojson::GeoJson], cam: &Camera, area: Rect, target: (f64, f64)) -> Vec<Pick> {
     let vp = Viewport::new(cam, area);
     let mut hits: Vec<(u8, f64, Pick)> = Vec::new();
     for layer in layers {

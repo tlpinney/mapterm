@@ -1,23 +1,19 @@
 //! Camera, projection and the ratatui map widget. Lines are drawn with braille dots (2x4 per
 //! cell); filled areas color the cell background; labels and markers are text on top.
 
-use std::collections::HashSet;
-
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style as TStyle},
-    widgets::Widget,
+    style::{Color, Style as TStyle},
 };
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    store::{TileId, TileStore},
-    style::Paint,
+    store::TileId,
 };
 
 /// Dots per tile edge at integer zoom.
-const TILE_DOTS: f64 = 256.0;
+pub(crate) const TILE_DOTS: f64 = 256.0;
 
 /// lon/lat -> Web Mercator world coordinates in 0..1 (y grows south).
 pub fn to_world(lon: f64, lat: f64) -> (f64, f64) {
@@ -172,7 +168,7 @@ pub enum Overlay {
     Marker { lon: f64, lat: f64, glyph: String, style: TStyle, label: Option<(String, TStyle)>, priority: i32 },
 }
 
-struct Canvas {
+pub(crate) struct Canvas {
     w: usize,
     h: usize,
     dots: Vec<u8>,
@@ -188,7 +184,7 @@ struct Canvas {
 const BRAILLE: [[u8; 2]; 4] = [[0x01, 0x08], [0x02, 0x10], [0x04, 0x20], [0x40, 0x80]];
 
 impl Canvas {
-    fn new(w: usize, h: usize) -> Self {
+    pub(crate) fn new(w: usize, h: usize) -> Self {
         let n = w * h;
         Self {
             w,
@@ -214,7 +210,7 @@ impl Canvas {
         self.fg[i] = Some(c);
     }
 
-    fn line(&mut self, a: (f64, f64), b: (f64, f64), c: Color) {
+    pub(crate) fn line(&mut self, a: (f64, f64), b: (f64, f64), c: Color) {
         let v = [0.0, 0.0, self.w as f64 * 2.0 - 0.001, self.h as f64 * 4.0 - 0.001];
         let Some((x0, y0, x1, y1)) = clip(a, b, v) else { return };
         let (mut x, mut y) = (x0.floor() as i64, y0.floor() as i64);
@@ -240,7 +236,7 @@ impl Canvas {
     }
 
     /// Even-odd scanline fill at dot resolution; a cell takes the color when half its dots are in.
-    fn fill(&mut self, rings: &[Vec<(f64, f64)>], c: Color) {
+    pub(crate) fn fill(&mut self, rings: &[Vec<(f64, f64)>], c: Color) {
         let hd = self.h * 4;
         let wd = (self.w * 2) as f32;
         for r in self.rows.iter_mut() {
@@ -297,7 +293,7 @@ impl Canvas {
     }
 
     /// Place text starting at cell (col,row) if it fits and the cells are free (with 1-cell padding).
-    fn text_at(&mut self, col: i64, row: i64, s: &str, st: TStyle, pad: bool) -> bool {
+    pub(crate) fn text_at(&mut self, col: i64, row: i64, s: &str, st: TStyle, pad: bool) -> bool {
         let wdt = s.width() as i64;
         if row < 0 || row >= self.h as i64 || col < 0 || col + wdt > self.w as i64 || wdt == 0 {
             return false;
@@ -322,7 +318,7 @@ impl Canvas {
         true
     }
 
-    fn flush(&self, area: Rect, buf: &mut Buffer) {
+    pub(crate) fn flush(&self, area: Rect, buf: &mut Buffer) {
         for row in 0..self.h {
             for col in 0..self.w {
                 let i = row * self.w + col;
@@ -375,201 +371,6 @@ pub fn clip(a: (f64, f64), b: (f64, f64), v: [f64; 4]) -> Option<(f64, f64, f64,
         }
     }
     Some((a.0 + t0 * dx, a.1 + t0 * dy, a.0 + t1 * dx, a.1 + t1 * dy))
-}
-
-pub struct MapWidget<'a> {
-    pub store: &'a TileStore,
-    pub camera: &'a Camera,
-    pub min_zoom: u8,
-    pub max_zoom: u8,
-    pub overlays: &'a [Overlay],
-    /// Area fills (water, parks, buildings); turn off over a raster layer to keep it visible.
-    pub fills: bool,
-    /// Roads, rivers, boundaries.
-    pub lines: bool,
-    pub labels: bool,
-    /// GeoJSON overlay layers, drawn over the map in order.
-    pub layers: &'a [crate::geojson::Layer],
-    /// Tint polygon interiors of overlay layers (off over a raster to keep it visible).
-    pub layer_fills: bool,
-}
-
-impl Widget for MapWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.width < 2 || area.height < 2 {
-            return;
-        }
-        let vp = Viewport::new(self.camera, area);
-        let mut cv = Canvas::new(area.width as usize, area.height as usize);
-        let tz = self.camera.tile_zoom(self.min_zoom, self.max_zoom);
-
-        // Loaded tiles (or stand-in ancestors), each once.
-        let mut seen = HashSet::new();
-        let mut tiles = Vec::new();
-        for id in vp.tiles(tz) {
-            if let Some((aid, t)) = self.store.get_or_ancestor(id)
-                && seen.insert(aid)
-            {
-                tiles.push((aid, t));
-            }
-        }
-        // Ancestors first so real tiles draw over them.
-        tiles.sort_by_key(|(id, _)| id.0);
-
-        let mut items: Vec<(u16, usize, usize)> = Vec::new();
-        for (ti, (_, t)) in tiles.iter().enumerate() {
-            for (ii, it) in t.items.iter().enumerate() {
-                items.push((it.order, ti, ii));
-            }
-        }
-        items.sort_by_key(|(o, _, _)| *o);
-
-        let (vw, vh) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
-        let inside = |p: (f64, f64)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < vw && p.1 < vh;
-        let mut labels: Vec<(i32, String, TStyle, (f64, f64))> = Vec::new();
-        for (_, ti, ii) in items {
-            let ((z, tx, ty), t) = &tiles[ti];
-            let n = (1u64 << z) as f64;
-            let it = &t.items[ii];
-            let to_dot = |p: &[f32; 2]| vp.dot((*tx as f64 + p[0] as f64) / n, (*ty as f64 + p[1] as f64) / n);
-            match &it.paint {
-                Paint::Fill(c) if self.fills => {
-                    let rings: Vec<Vec<(f64, f64)>> = it.parts.iter().map(|r| r.iter().map(to_dot).collect()).collect();
-                    cv.fill(&rings, *c);
-                }
-                Paint::Line(c) if self.lines => {
-                    for part in it.parts.iter() {
-                        let pts: Vec<(f64, f64)> = part.iter().map(to_dot).collect();
-                        for s in pts.windows(2) {
-                            cv.line(s[0], s[1], *c);
-                        }
-                    }
-                }
-                Paint::Label { text, color, priority, bold } if self.labels => {
-                    // Anchor at fixed vertices along the feature (not the middle of whatever is on
-                    // screen), so labels stay put while the map pans.
-                    let anchor = it.parts.iter().find_map(|part| {
-                        let step = (part.len() / 3).max(1);
-                        (step / 2..part.len()).step_by(step).map(|i| to_dot(&part[i])).find(|p| inside(*p))
-                    });
-                    if let Some(p) = anchor.as_ref() {
-                        let mut st = TStyle::new().fg(*color);
-                        if *bold {
-                            st = st.add_modifier(Modifier::BOLD);
-                        }
-                        labels.push((*priority, text.clone(), st, *p));
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // GeoJSON layers: polygon interiors tinted, outlines and lines in braille, points as
-        // markers, `name` labels. Only features overlapping the view are projected.
-        let mut markers = Vec::new();
-        let view = {
-            let (cx, cy) = to_world(self.camera.lon, self.camera.lat);
-            let s = TILE_DOTS * 2f64.powf(self.camera.zoom);
-            let (hw, hh) = (vw / 2.0 / s, vh / 2.0 / s);
-            [cx - hw, cy - hh, cx + hw, cy + hh]
-        };
-        for layer in self.layers {
-            let color = layer.color;
-            let tint = match color {
-                Color::Rgb(r, g, b) => Color::Rgb((r as f32 * 0.32) as u8, (g as f32 * 0.32) as u8, (b as f32 * 0.32) as u8),
-                c => c,
-            };
-            for f in &layer.features {
-                if f.bbox[2] < view[0] || f.bbox[0] > view[2] || f.bbox[3] < view[1] || f.bbox[1] > view[3] {
-                    continue;
-                }
-                let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
-                match f.geom {
-                    crate::mvt::GeomType::Polygon => {
-                        if self.layer_fills {
-                            cv.fill(&dots, tint);
-                        }
-                        for ring in &dots {
-                            for s in ring.windows(2) {
-                                cv.line(s[0], s[1], color);
-                            }
-                        }
-                    }
-                    crate::mvt::GeomType::Line => {
-                        for part in &dots {
-                            for s in part.windows(2) {
-                                cv.line(s[0], s[1], color);
-                            }
-                        }
-                    }
-                    _ => {
-                        for &p in dots.iter().flatten() {
-                            markers.push((50, p, "●".to_string(), TStyle::new().fg(color), None));
-                        }
-                    }
-                }
-                if self.labels
-                    && let Some(text) = &f.label
-                {
-                    // Points label beside the marker; lines and polygons at their middle.
-                    let anchor = if f.geom == crate::mvt::GeomType::Point {
-                        dots.first().and_then(|p| p.first()).map(|p| (p.0 + 4.0 + text.width() as f64, p.1))
-                    } else {
-                        let (x0, y0, x1, y1) = (
-                            (f.bbox[0] - view[0]) / (view[2] - view[0]) * vw,
-                            (f.bbox[1] - view[1]) / (view[3] - view[1]) * vh,
-                            (f.bbox[2] - view[0]) / (view[2] - view[0]) * vw,
-                            (f.bbox[3] - view[1]) / (view[3] - view[1]) * vh,
-                        );
-                        Some(((x0 + x1) / 2.0, (y0 + y1) / 2.0))
-                    };
-                    if let Some(p) = anchor.filter(|p| inside(*p)) {
-                        labels.push((60, text.clone(), TStyle::new().fg(color).add_modifier(Modifier::BOLD), p));
-                    }
-                }
-            }
-        }
-
-        // Overlays: lines on the map, markers as text with first claim on space.
-        for o in self.overlays {
-            match o {
-                Overlay::Line { pts, color } => {
-                    let d: Vec<(f64, f64)> = pts.iter().map(|(lon, lat)| vp.dot_ll(*lon, *lat)).collect();
-                    for s in d.windows(2) {
-                        cv.line(s[0], s[1], *color);
-                    }
-                }
-                Overlay::Marker { lon, lat, glyph, style, label, priority } => {
-                    markers.push((*priority, vp.dot_ll(*lon, *lat), glyph.clone(), *style, label.clone()))
-                }
-            }
-        }
-        markers.sort_by(|a, b| b.0.cmp(&a.0));
-        for (_, p, glyph, st, label) in markers {
-            if !inside(p) {
-                continue;
-            }
-            let (col, row) = ((p.0 / 2.0) as i64, (p.1 / 4.0) as i64);
-            if cv.text_at(col, row, &glyph, st, false)
-                && let Some((l, ls)) = label
-            {
-                cv.text_at(col + glyph.width() as i64 + 1, row, &l, ls, true);
-            }
-        }
-
-        labels.sort_by(|a, b| b.0.cmp(&a.0));
-        let mut placed = HashSet::new();
-        for (_, text, st, p) in labels {
-            if placed.contains(&text) {
-                continue;
-            }
-            let col = (p.0 / 2.0) as i64 - text.width() as i64 / 2;
-            if cv.text_at(col, (p.1 / 4.0) as i64, &text, st, true) {
-                placed.insert(text);
-            }
-        }
-        cv.flush(area, buf);
-    }
 }
 
 #[cfg(test)]
