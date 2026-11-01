@@ -1129,11 +1129,15 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
                     Some("lowercase") => t.to_lowercase(),
                     _ => t,
                 });
-            let glyph = layout_str("mapterm:glyph");
+            // A point's glyph: `mapterm:glyph`, else the style's icon as a one-cell symbol.
+            let glyph = layout_str("mapterm:glyph").or_else(|| {
+                (c.geom == GeomType::Point).then(|| layout_str("icon-image")).flatten().and_then(|n| crate::icons::glyph(&n)).map(str::to_string)
+            });
             let priority = sort();
             match (glyph, text) {
                 (Some(glyph), text) if c.geom == GeomType::Point => {
-                    Some(Resolved::Point { glyph, style, label: text.map(|t| (t, style)), priority })
+                    let icon = color("icon-color", "icon-opacity", None).map_or(style, |c| TStyle::new().fg(c));
+                    Some(Resolved::Point { glyph, style: icon, label: text.map(|t| (t, style)), priority })
                 }
                 (_, Some(text)) => {
                     let anchor = match layout_str("text-anchor").as_deref() {

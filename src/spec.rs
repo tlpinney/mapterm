@@ -23,10 +23,12 @@
 //! | fill | `fill-color`, `fill-opacity`, `fill-outline-color` | `visibility` |
 //! | line | `line-color`, `line-opacity` | `visibility` |
 //! | circle | `circle-color`, `circle-opacity` | `visibility`, `mapterm:glyph` |
-//! | symbol | `text-color`, `text-opacity` | `visibility`, `text-field`, `text-font` (bold, italic), `text-transform`, `text-anchor`, `symbol-placement`, `symbol-sort-key`, `mapterm:glyph` |
+//! | symbol | `text-color`, `text-opacity`, `icon-color`, `icon-opacity` | `visibility`, `text-field`, `text-font` (bold, italic), `text-transform`, `text-anchor`, `symbol-placement`, `symbol-sort-key`, `icon-image` (as a glyph), `mapterm:glyph` |
 //!
 //! `mapterm:glyph` is a mapterm extension: the character drawn for a point (`●` by default
-//! for circles; symbols draw it before their text, like a marker).
+//! for circles; symbols draw it before their text, like a marker). Without it, a point's
+//! `icon-image` becomes a one-cell symbol when [`crate::icons`] knows the icon (✚ hospital,
+//! ✈ airport, ⋔ restaurant, ...).
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::Value as Json;
@@ -84,7 +86,7 @@ impl Kind {
 }
 
 /// Properties mapterm reads; others are kept out so lookups stay short.
-const USED_PAINT: [&str; 11] = [
+const USED_PAINT: [&str; 13] = [
     "background-color",
     "background-opacity",
     "fill-color",
@@ -96,9 +98,11 @@ const USED_PAINT: [&str; 11] = [
     "circle-opacity",
     "text-color",
     "text-opacity",
+    "icon-color",
+    "icon-opacity",
 ];
-const USED_LAYOUT: [&str; 8] =
-    ["text-field", "text-font", "text-transform", "text-anchor", "symbol-placement", "symbol-sort-key", "mapterm:glyph", "visibility"];
+const USED_LAYOUT: [&str; 9] =
+    ["text-field", "text-font", "text-transform", "text-anchor", "symbol-placement", "symbol-sort-key", "mapterm:glyph", "icon-image", "visibility"];
 
 /// One style layer.
 #[derive(Clone, Debug)]

@@ -24,6 +24,7 @@ pub mod export;
 pub mod expr;
 pub mod geocode;
 pub mod geojson;
+pub mod icons;
 pub mod interact;
 pub mod kitty;
 pub mod layer;

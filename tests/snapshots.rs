@@ -22,9 +22,12 @@ fn map_for(style: &serde_json::Value, source: &str) -> Map {
 }
 
 fn snapshot(map: &Map) -> String {
-    let area = Rect::new(0, 0, 100, 36);
     // The tile's center, overzoomed a little so the view stays inside it.
-    let cam = Camera::new(-77.025146484375, 38.882481197550796, 14.6);
+    snapshot_at(map, Camera::new(-77.025146484375, 38.882481197550796, 14.6))
+}
+
+fn snapshot_at(map: &Map, cam: Camera) -> String {
+    let area = Rect::new(0, 0, 100, 36);
     let mut buf = Buffer::empty(area);
     map.view(&cam).render(area, &mut buf);
     let mut out = String::new();
@@ -68,4 +71,7 @@ fn terminal_styles() {
         let doc = stylejson::terminal_style(stylejson::Schema::OpenMapTiles, dark);
         check(name, snapshot(&map_for(&doc, stylejson::BASEMAP)));
     }
+    // Close in near L'Enfant Plaza, where points of interest show as icon glyphs with names.
+    let doc = stylejson::terminal_style(stylejson::Schema::OpenMapTiles, true);
+    check("mapterm-dark-z16", snapshot_at(&map_for(&doc, stylejson::BASEMAP), Camera::new(-77.0282, 38.8843, 16.3)));
 }

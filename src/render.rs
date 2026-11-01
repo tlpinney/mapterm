@@ -300,6 +300,21 @@ impl Canvas {
     }
 
     /// Place text starting at cell (col,row) if it fits and the cells are free (with 1-cell padding).
+    /// Whether `s` would fit at cell (col,row) without overlapping placed text.
+    pub(crate) fn fits(&self, col: i64, row: i64, s: &str, pad: bool) -> bool {
+        let wdt = s.width() as i64;
+        if row < 0 || row >= self.h as i64 || col < 0 || col + wdt > self.w as i64 || wdt == 0 {
+            return false;
+        }
+        let (lo, hi) = if pad { ((col - 1).max(0), (col + wdt + 1).min(self.w as i64)) } else { (col, col + wdt) };
+        let base = row as usize * self.w;
+        !(lo..hi).any(|c| self.used[base + c as usize])
+    }
+
+    pub(crate) fn width(&self) -> usize {
+        self.w
+    }
+
     pub(crate) fn text_at(&mut self, col: i64, row: i64, s: &str, st: TStyle, pad: bool) -> bool {
         let wdt = s.width() as i64;
         if row < 0 || row >= self.h as i64 || col < 0 || col + wdt > self.w as i64 || wdt == 0 {

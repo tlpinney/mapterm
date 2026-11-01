@@ -169,32 +169,79 @@ pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: i
     draw(&mut ctx);
     let DrawContext { mut markers, mut labels, .. } = ctx;
 
-    // Markers claim space first, then labels, highest priority first.
-    let inside = |p: (f64, f64)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < vw && p.1 < vh;
-    markers.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, p, glyph, st, label) in markers {
-        if !inside(p) {
-            continue;
-        }
-        let (col, row) = ((p.0 / 2.0) as i64, (p.1 / 4.0) as i64);
-        if canvas.text_at(col, row, &glyph, st, false)
-            && let Some((l, ls)) = label
-        {
-            canvas.text_at(col + glyph.width() as i64 + 1, row, &l, ls, true);
-        }
+    // Markers and labels in one order, highest priority first (higher layers, then lower
+    // sort keys), as MapLibre places symbols. A marker with a label shows both or neither,
+    // unless the label would only run off the edge of the map.
+    enum Sym {
+        Marker((f64, f64), String, TStyle, Option<(String, TStyle)>),
+        Label(String, TStyle, (f64, f64)),
     }
-    labels.sort_by(|a, b| b.0.cmp(&a.0));
+    let inside = |p: (f64, f64)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < vw && p.1 < vh;
+    let mut syms: Vec<(i32, usize, Sym)> = Vec::with_capacity(markers.len() + labels.len());
+    for (pri, p, g, st, l) in markers.drain(..) {
+        syms.push((pri, syms.len(), Sym::Marker(p, g, st, l)));
+    }
+    for (pri, t, st, p) in labels.drain(..) {
+        syms.push((pri, syms.len(), Sym::Label(t, st, p)));
+    }
+    // Stable among equal priorities: markers before labels, then in the order added.
+    syms.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let mut placed = HashSet::new();
-    for (_, text, st, p) in labels {
-        if placed.contains(&text) {
-            continue;
-        }
-        let col = (p.0 / 2.0) as i64 - text.width() as i64 / 2;
-        if canvas.text_at(col, (p.1 / 4.0) as i64, &text, st, true) {
-            placed.insert(text);
+    for (_, _, sym) in syms {
+        match sym {
+            Sym::Marker(p, glyph, st, label) => {
+                if !inside(p) {
+                    continue;
+                }
+                let (col, row) = ((p.0 / 2.0) as i64, (p.1 / 4.0) as i64);
+                let lcol = col + glyph.width() as i64 + 1;
+                // A label running off the right edge is cut short with "…", as a browser
+                // map clips it; with no room for a few characters the marker shows alone.
+                let room = canvas.width() as i64 - lcol;
+                let label = label.and_then(|(l, ls)| match l.width() as i64 {
+                    w if w <= room => Some((l, ls)),
+                    _ if room >= 4 => Some((clip(&l, room as usize - 1) + "…", ls)),
+                    _ => None,
+                });
+                match label {
+                    Some((l, ls)) => {
+                        if canvas.fits(col, row, &glyph, false) && canvas.fits(lcol, row, &l, true) {
+                            canvas.text_at(col, row, &glyph, st, false);
+                            canvas.text_at(lcol, row, &l, ls, true);
+                        }
+                    }
+                    None => {
+                        canvas.text_at(col, row, &glyph, st, false);
+                    }
+                }
+            }
+            Sym::Label(text, st, p) => {
+                if placed.contains(&text) {
+                    continue;
+                }
+                let col = (p.0 / 2.0) as i64 - text.width() as i64 / 2;
+                if canvas.text_at(col, (p.1 / 4.0) as i64, &text, st, true) {
+                    placed.insert(text);
+                }
+            }
         }
     }
     canvas.flush(area, buf);
+}
+
+/// The longest start of `s` at most `cols` cells wide.
+fn clip(s: &str, cols: usize) -> String {
+    let mut out = String::new();
+    let mut w = 0;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > cols {
+            break;
+        }
+        w += cw;
+        out.push(ch);
+    }
+    out
 }
 
 /// A list of [`Overlay`] markers and lines as a custom layer.

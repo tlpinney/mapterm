@@ -243,6 +243,7 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
     let rail = c("#736e8c", "#786e96");
     let boundary = c("#9669aa", "#8c5aa0");
     let place = c("#e1e1e1", "#191919");
+    let poi = c("#c8a2e0", "#7b3fa0");
     // (name, color, first zoom drawn, first zoom labelled, label sort key)
     let roads = [
         ("path", c("#464646", "#b9b9b9"), 16, 15, 0),
@@ -299,6 +300,15 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
                 l["minzoom"] = json!(min_label);
                 layers.push(l);
             }
+            // Points of interest as icon glyphs with names: the most important from z15
+            // (OpenMapTiles ranks them per tile, 1 first), more as you zoom in.
+            layers.push(json!({"id": "poi", "type": "symbol", "source": BASEMAP, "source-layer": "poi", "minzoom": 15,
+                "filter": ["all", ["==", ["geometry-type"], "Point"], ["<=", ["coalesce", ["get", "rank"], 99], ["step", ["zoom"], 4, 16, 14, 17, 99]]],
+                "layout": {"icon-image": ["get", "class"], "text-field": ["get", "name"], "symbol-sort-key": ["coalesce", ["get", "rank"], 99]},
+                "paint": {"text-color": poi}}));
+            layers.push(json!({"id": "airport", "type": "symbol", "source": BASEMAP, "source-layer": "aerodrome_label", "minzoom": 10,
+                "layout": {"icon-image": "airport", "text-field": ["coalesce", ["get", "iata"], ["get", "name"]]},
+                "paint": {"text-color": poi}}));
             layers.push(json!({"id": "place", "type": "symbol", "source": BASEMAP, "source-layer": "place",
                 "layout": {"text-field": ["get", "name"],
                            "symbol-sort-key": ["-", ["coalesce", ["get", "rank"], 10],
@@ -337,6 +347,11 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
                 l["minzoom"] = json!(min_label);
                 layers.push(l);
             }
+            // Points of interest: Protomaps gives each a zoom to appear from.
+            layers.push(json!({"id": "poi", "type": "symbol", "source": BASEMAP, "source-layer": "pois", "minzoom": 14,
+                "filter": ["all", ["==", ["geometry-type"], "Point"], ["<=", ["coalesce", ["get", "min_zoom"], 16], ["+", ["zoom"], 0.5]]],
+                "layout": {"icon-image": ["get", "kind"], "text-field": ["get", "name"], "symbol-sort-key": ["coalesce", ["get", "min_zoom"], 16]},
+                "paint": {"text-color": poi}}));
             layers.push(json!({"id": "place", "type": "symbol", "source": BASEMAP, "source-layer": "places",
                 "filter": ["<=", ["coalesce", ["get", "min_zoom"], 0], ["+", ["zoom"], 0.5]],
                 "layout": {"text-field": ["get", "name"],
