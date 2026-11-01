@@ -141,32 +141,45 @@ sharper tiles load, lower-zoom tiles stand in for them.
 
 ## Use it in your own app
 
-mapterm is also a library, built like Leaflet: a map is a camera plus a stack of
-layers, and anything can be a layer.
+mapterm is also a library that works like MapLibre GL: a `Map` holds named
+sources and an ordered list of style layers that say how to draw them.
 
 ```rust
-let tiles = VectorTiles::new(&store, src.min_zoom, src.max_zoom);   // the basemap
-let sites = mapterm::geojson::load("sites.geojson", PALETTE[0]).await?;
-let pins = Markers(&[Overlay::Marker { lon, lat, glyph: "◆".into(), .. }]);
-let layers: [&dyn Layer; 3] = [&tiles, &sites, &pins];               // bottom to top
+let mut map = Map::from_style("liberty").await?;          // any MapLibre style
+map.add_source("sites", MapSource::geojson(&sites)?)?;
+map.add_layer(StyleLayer::fill("sites", "sites").color("#204060"))?;
+map.add_layer(StyleLayer::symbol("pins", "sites")
+    .filter(json!(["==", ["geometry-type"], "Point"]))
+    .glyph("◆").text(json!(["get", "name"])).color("cyan"))?;
 
-frame.render_widget(MapView { camera: &ctl.cam, layers: &layers }, area);
-let under = pick_all(&layers, &ctl.cam, area, dot);                  // top layer first
+map.load_tiles(&ctl.cam, area).await?;
+frame.render_widget(map.view(&ctl.cam), area);
+let under = map.query_rendered_features(&ctl.cam, area, dot, Some(&["pins"]));
 ```
 
-- `Layer` is three methods: `draw` (lines, fills, markers and labels through a
-  `DrawContext`, in lon/lat or world coordinates), `pick` (features under a
-  spot) and `bounds` (for fitting the view). Markers and labels from every
-  layer are placed together, so they never overlap.
-- Built in: `VectorTiles` (PMTiles, OpenFreeMap or any MVT source), `GeoJson`,
-  and `Markers`. Raster layers draw as terminal images outside the text grid
-  and are handled by the app for now (see `src/bin/mapterm.rs`).
+- Styles: `Map::from_style` takes an OpenFreeMap name (`liberty`, `positron`,
+  `bright`, `dark`, `fiord`), a style URL or file, or `mapterm-dark` /
+  `mapterm-light`, built-in styles tuned for terminal cells. Style layers can
+  also be built in Rust with `StyleLayer`.
+- Change the map with `set_data`, `set_paint`, `set_layout`, `set_filter`,
+  `set_visibility` and `move_layer`. Filters and paint values are MapLibre
+  expressions (`get`, `match`, `case`, `interpolate`, `step`, ... and the legacy
+  filter syntax).
+- A terminal cell can't show line widths, blur or fonts, so only colors,
+  opacity (blended with the background), filters, zoom ranges, `text-field`,
+  bold and italic fonts, `text-anchor` and `symbol-sort-key` are used. The
+  `mapterm:glyph` layout property sets the character drawn at points.
+- Anything else is a `CustomLayer`: `draw` (lines, fills, markers and labels
+  through a `DrawContext`) and `pick`. Markers and labels from every layer are
+  placed together, so they never overlap.
 - `Controller` gives MapLibre-style mouse and keyboard handling;
   `take_click` reports clicks for your own popups and panels.
 
-[`examples/hello_map.rs`](examples/hello_map.rs) is a complete pan-and-zoom map
-with a marker in about 50 lines (`cargo run --release --example hello_map`), and
-`src/bin/mapterm.rs` is the full viewer.
+[`examples/hello_map.rs`](examples/hello_map.rs) builds a basemap from a few
+style layers and adds a pin in about 50 lines, and
+[`examples/style.rs`](examples/style.rs) shows any style
+(`cargo run --release --example style -- dark`). `src/bin/mapterm.rs` is the
+full viewer; it still uses the older `LayerStack` API and moves onto `Map` next.
 
 ## Experimental: smooth scrolling
 

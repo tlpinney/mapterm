@@ -34,6 +34,7 @@ pub mod smooth;
 pub mod source;
 pub mod spec;
 pub mod store;
+pub mod stylejson;
 pub mod style;
 
 pub use interact::{Click, Controller};

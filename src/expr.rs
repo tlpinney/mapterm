@@ -269,6 +269,7 @@ pub enum Expr {
     ToBool(Box<Expr>),
     ToColor(Vec<Expr>),
     Length(Box<Expr>),
+    TypeOf(Box<Expr>),
     Assert(Assert, Vec<Expr>),
     /// A legacy `"{name}"` text template.
     Template(Vec<Part>),
@@ -519,6 +520,7 @@ impl Expr {
             "to-boolean" => Expr::ToBool(one(a, op)?),
             "to-color" => Expr::ToColor(args(a)?),
             "length" => Expr::Length(one(a, op)?),
+            "typeof" => Expr::TypeOf(one(a, op)?),
             "string" => Expr::Assert(Assert::Str, args(a)?),
             "number" => Expr::Assert(Assert::Num, args(a)?),
             "boolean" => Expr::Assert(Assert::Bool, args(a)?),
@@ -532,7 +534,7 @@ impl Expr {
             Expr::Lit(_) => true,
             Expr::Get(_) | Expr::Has(_) | Expr::Zoom | Expr::GeomType | Expr::Template(_) => false,
             Expr::Cmp(_, a, b) | Expr::In(a, b) => a.is_constant() && b.is_constant(),
-            Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) => a.is_constant(),
+            Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) | Expr::TypeOf(a) => a.is_constant(),
             Expr::InList(a, _) => a.is_constant(),
             Expr::All(v) | Expr::Any(v) | Expr::Coalesce(v) | Expr::Math(_, v) | Expr::Concat(v) | Expr::ToNum(v) | Expr::ToColor(v) | Expr::Assert(_, v) => {
                 v.iter().all(Expr::is_constant)
@@ -629,6 +631,17 @@ impl Expr {
                 Val::Array(a) => Val::Num(a.len() as f64),
                 _ => Val::Null,
             },
+            Expr::TypeOf(e) => Val::Str(
+                match e.eval(c) {
+                    Val::Null => "null",
+                    Val::Bool(_) => "boolean",
+                    Val::Num(_) => "number",
+                    Val::Str(_) => "string",
+                    Val::Color(_) => "color",
+                    Val::Array(_) => "array",
+                }
+                .into(),
+            ),
             Expr::Assert(kind, v) => v
                 .iter()
                 .map(|e| e.eval(c))
@@ -757,6 +770,7 @@ mod tests {
         assert_eq!(e(json!(["concat", ["upcase", ["get", "name"]], "!"])), Val::Str("MALL!".into()));
         assert_eq!(e(json!(["format", ["get", "name"], {"font-scale": 1.2}])), Val::Str("Mall".into()));
         assert_eq!(e(json!(["to-number", "x", "7"])), Val::Num(7.0));
+        assert_eq!(e(json!(["typeof", ["get", "rank"]])), Val::Str("number".into()));
         let c = e(json!(["interpolate", ["linear"], ["zoom"], 10, "#000000", 14, "#ffffff"])).as_color().unwrap();
         assert_eq!(c.to_u8(), (128, 128, 128));
         assert!(Expr::parse(&json!(["distance", 1])).is_err());

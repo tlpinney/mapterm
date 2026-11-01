@@ -424,6 +424,10 @@ impl Map {
         &self.warnings
     }
 
+    pub(crate) fn warn(&mut self, w: String) {
+        self.warnings.push(w);
+    }
+
     fn index(&self, id: &str) -> Option<usize> {
         self.layers.iter().position(|e| e.id() == id)
     }
@@ -642,9 +646,12 @@ fn resolve(l: &StyleLayer, c: &Ctx, bg: Option<Rgba>) -> Option<Resolved> {
         Kind::Symbol => {
             let fg = color("text-color", "text-opacity", Some(BLACK))?;
             let mut style = TStyle::new().fg(fg);
-            let bold = l.layout_expr("text-font").is_some_and(|e| e.eval(c).to_text().to_lowercase().contains("bold"));
-            if bold {
+            let font = l.layout_expr("text-font").map(|e| e.eval(c).to_text().to_lowercase()).unwrap_or_default();
+            if font.contains("bold") {
                 style = style.add_modifier(Modifier::BOLD);
+            }
+            if font.contains("italic") {
+                style = style.add_modifier(Modifier::ITALIC);
             }
             // Terminal labels are one line: the first non-empty line of the text.
             let text = layout_str("text-field")

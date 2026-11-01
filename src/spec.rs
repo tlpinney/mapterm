@@ -23,7 +23,7 @@
 //! | fill | `fill-color`, `fill-opacity`, `fill-outline-color` | `visibility` |
 //! | line | `line-color`, `line-opacity` | `visibility` |
 //! | circle | `circle-color`, `circle-opacity` | `visibility`, `mapterm:glyph` |
-//! | symbol | `text-color`, `text-opacity` | `visibility`, `text-field`, `text-font` (bold), `text-transform`, `text-anchor`, `symbol-placement`, `symbol-sort-key`, `mapterm:glyph` |
+//! | symbol | `text-color`, `text-opacity` | `visibility`, `text-field`, `text-font` (bold, italic), `text-transform`, `text-anchor`, `symbol-placement`, `symbol-sort-key`, `mapterm:glyph` |
 //!
 //! `mapterm:glyph` is a mapterm extension: the character drawn for a point (`●` by default
 //! for circles; symbols draw it before their text, like a marker).
@@ -277,7 +277,14 @@ impl StyleLayer {
 }
 
 fn set(props: &mut Vec<(String, Expr)>, name: &str, v: &Json) -> Result<()> {
-    let e = if name == "text-field" { Expr::parse_text(v)? } else { Expr::parse(v)? };
+    let e = match (name, v) {
+        ("text-field", _) => Expr::parse_text(v)?,
+        // An array of font names is a literal, not an expression.
+        ("text-font", Json::Array(a)) if a.iter().all(Json::is_string) => Expr::Lit(crate::expr::Val::Array(
+            a.iter().filter_map(Json::as_str).map(|s| crate::expr::Val::Str(s.to_string())).collect(),
+        )),
+        _ => Expr::parse(v)?,
+    };
     if name.ends_with("-color") && let Expr::Lit(crate::expr::Val::Str(s)) = &e && crate::expr::parse_color(s).is_none() {
         bail!("not a color: {s}");
     }
