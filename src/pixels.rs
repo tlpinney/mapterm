@@ -170,11 +170,28 @@ impl Pix {
         (PixImage { id, width, height, rgba: std::sync::Arc::new(rgba) }, self.map)
     }
 
+    /// Fill the whole image with one color (a stand-in's base: the map's background, so
+    /// nothing in it is see-through).
+    pub(crate) fn clear(&mut self, c: (u8, u8, u8)) {
+        self.map.fill(tiny_skia::Color::from_rgba8(c.0, c.1, c.2, 255));
+    }
+
     /// Draw `src` (another tile's pixmap) scaled by `k` with its top-left at (`x`, `y`)
-    /// pixels, smoothly filtered: a stand-in from another zoom.
+    /// pixels, smoothly filtered: a stand-in from another zoom. Its edge pixels are carried
+    /// out to the rectangle's hard edges (no fading border), so neighbouring tiles meet
+    /// without a see-through seam.
     pub(crate) fn blit(&mut self, src: &Pixmap, x: f32, y: f32, k: f32) {
-        let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bilinear, ..Default::default() };
-        self.map.draw_pixmap(0, 0, src.as_ref(), &paint, Transform::from_row(k, 0.0, 0.0, k, x, y), None);
+        let (w, h) = (src.width() as f32 * k, src.height() as f32 * k);
+        let Some(rect) = tiny_skia::Rect::from_xywh(x, y, w, h) else { return };
+        let shader = tiny_skia::Pattern::new(
+            src.as_ref(),
+            tiny_skia::SpreadMode::Pad,
+            tiny_skia::FilterQuality::Bilinear,
+            1.0,
+            Transform::from_row(k, 0.0, 0.0, k, x, y),
+        );
+        let paint = Paint { shader, anti_alias: false, ..Paint::default() };
+        self.map.fill_rect(rect, &paint, Transform::identity(), None);
     }
 
     /// Whether anything was drawn (a stand-in with no overlapping tiles stays blank).
@@ -194,6 +211,18 @@ mod tests {
         let (_, pm) = src.finish(1);
         let mut dst = Pix::sized(20, 20, (10.0, 20.0)).unwrap();
         dst.blit(&pm, 0.0, 0.0, 1.414);
+        // A tile's own edge pixels reach the edge of where it lands: no see-through fringe.
+        let mut full = Pix::sized(10, 10, (10.0, 20.0)).unwrap();
+        full.clear((200, 100, 50));
+        let (_, fpm) = full.finish(3);
+        let mut d2 = Pix::sized(30, 30, (10.0, 20.0)).unwrap();
+        d2.blit(&fpm, 0.0, 0.0, 1.7);
+        let (f2, _) = d2.finish(4);
+        for i in 0..17usize {
+            for j in 0..17usize {
+                assert_eq!(f2.rgba[(j * 30 + i) * 4 + 3], 255, "opaque at {i},{j}");
+            }
+        }
         let (f, _) = dst.finish(2);
         let px = |x: usize, y: usize| f.rgba[(y * 20 + x) * 4..(y * 20 + x) * 4 + 4].to_vec();
         assert_eq!(px(0, 0), vec![0, 0, 255, 255], "corner");

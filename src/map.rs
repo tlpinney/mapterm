@@ -600,6 +600,8 @@ impl Map {
         let temp = std::mem::take(&mut cache.temp);
         frame.freed.extend(temp);
         let zoom = cam.zoom;
+        let imagery = self.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(zoom)));
+        let bg_rgb = if imagery { None } else { self.background(zoom).map(|c| c.to_u8()) };
         // A grid fine enough that each tile is about 512 pixels across (braille's tiles would
         // be thousands of pixels wide on a Retina screen).
         let gz = (cam.zoom + (sx / 2.0).log2()).floor().clamp(0.0, 24.0) as u8;
@@ -657,6 +659,12 @@ impl Map {
                             continue;
                         }
                         let Some(mut pix) = Pix::sized(w, h, cpx) else { continue };
+                        // On the map's background, so gaps between what stands in aren't
+                        // see-through (the terminal's own background would show darker).
+                        // Over imagery the background isn't drawn, so neither is this.
+                        if let Some(bg) = bg_rgb {
+                            pix.clear(bg);
+                        }
                         for (_, (oz, ox, oy), ozoom, pm) in &others {
                             let on = (1u64 << oz) as f64;
                             // Its world square, and whether it overlaps this tile's.
@@ -667,7 +675,7 @@ impl Map {
                             let k = 2f64.powf(zoom - ozoom);
                             pix.blit(pm, ((sx0 - x0) * s * sx) as f32, ((sy0 - y0) * s * sy) as f32, k as f32);
                         }
-                        if pix.is_empty() {
+                        if bg_rgb.is_none() && pix.is_empty() {
                             continue;
                         }
                         let (img, _) = pix.finish(next_image_id());
@@ -2314,6 +2322,10 @@ mod tests {
             let f = map.take_pixels().unwrap();
             assert!(f.pending > 0 && f.new.len() == f.placed.len(), "z{z}: all stand-ins");
             assert_eq!(blue_at_center(&f), Some(vec![0, 0, 255, 255]), "z{z}: the square, scaled");
+            // Nothing see-through: the terminal's background would show darker.
+            for img in &f.new {
+                assert!(img.rgba.chunks(4).all(|p| p[3] == 255), "z{z}: stand-in {} has see-through pixels", img.id);
+            }
             // Stand-ins last one frame: the next frame frees them.
             map.view(&Camera::new(0.0, 0.0, z)).render(area, &mut buf);
             let next = map.take_pixels().unwrap();
