@@ -85,6 +85,7 @@ pub mod map;
 pub mod mvt;
 pub mod pbf;
 pub mod pick;
+pub mod pixels;
 pub mod pmtiles;
 pub mod raster;
 pub mod render;

@@ -681,8 +681,19 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        // MAPTERM_PIXELS_PNG=FILE: also save pixel mode's image (fills and lines; labels are
+        // text) for a Retina-sized terminal, to check the drawing without one.
+        let png = std::env::var("MAPTERM_PIXELS_PNG").ok();
+        if png.is_some() {
+            map.pixel_mode = Some((16.0, 34.0));
+        }
         let mut buf = Buffer::empty(area);
+        let t = Instant::now();
         map.view(&cam).render(area, &mut buf);
+        if let (Some(path), Some(f)) = (png, map.take_pixels()) {
+            image::save_buffer(&path, &f.rgba, f.width, f.height, image::ExtendedColorType::Rgba8)?;
+            eprintln!("pixels: {}x{} in {:.1} ms -> {path}", f.width, f.height, t.elapsed().as_secs_f64() * 1000.0);
+        }
         let out = match a.format.as_str() {
             "ansi" => mapterm::export::to_ansi(&buf),
             "html" => mapterm::export::to_html(&buf),
@@ -695,6 +706,11 @@ async fn main() -> Result<()> {
     // Raster drawing: real images with kitty graphics, else cell background colors.
     let has_raster = map.sources().any(|(_, s)| matches!(s, MapSource::Raster(_)));
     let kitty = has_raster && mapterm::kitty::supported();
+    // Experimental pixel mode: fills and lines as an image, labels as text (MAPTERM_PIXELS=1).
+    let pixels_on = std::env::var("MAPTERM_PIXELS").is_ok_and(|v| !v.is_empty() && v != "0") && mapterm::kitty::supported();
+    // Through shared memory when the terminal runs here; inline (compressed) over SSH.
+    let pixels_shm = std::env::var_os("SSH_CONNECTION").is_none();
+    let mut pixels_shown: Option<u32> = None;
     let mut kstate = KittyState::default();
     // Terminal image memory to stay within (herdr keeps 64 MiB per pane).
     if let Some(mb) = std::env::var("MAPTERM_KITTY_BUDGET_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
@@ -703,6 +719,9 @@ async fn main() -> Result<()> {
     let mut cpx = cell_px().unwrap_or((9.0, 20.0));
     if kitty {
         map.raster_mode = RasterMode::Kitty { cell_px: cpx };
+    }
+    if pixels_on {
+        map.pixel_mode = Some(cpx);
     }
 
     let mut term = ratatui::init();
@@ -782,7 +801,7 @@ async fn main() -> Result<()> {
         loop {
             ctl.tick(Instant::now());
             // One synchronized update per frame when escape sequences follow the cells.
-            let sync = smooth_on || kitty;
+            let sync = smooth_on || kitty || pixels_on;
             if sync {
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
@@ -936,6 +955,18 @@ async fn main() -> Result<()> {
                     let cmds = map.kitty_commands(&draw_cam, map_area, &mut kstate);
                     dlog(|| format!("frame: kitty cmds {} bytes, {} KiB of images held, cell_px={cpx:?} map={map_area:?}", cmds.len(), kstate.bytes() >> 10));
                     out.write_all(cmds.as_bytes())?;
+                }
+                if pixels_on && let Some(f) = map.take_pixels() {
+                    // Above the imagery (-1000 and up), under the text. Two ids in turn: the new
+                    // frame goes up before the old one is dropped, so nothing flickers.
+                    let id = if pixels_shown == Some(0x7f00_0001) { 0x7f00_0002 } else { 0x7f00_0001 };
+                    let t = Instant::now();
+                    let cmds = mapterm::kitty::show_rgba(id, f.width, f.height, &f.rgba, map_area.x, map_area.y, map_area.width, map_area.height, -500, pixels_shm);
+                    out.write_all(cmds.as_bytes())?;
+                    if let Some(old) = pixels_shown.replace(id) {
+                        out.write_all(mapterm::kitty::free(old).as_bytes())?;
+                    }
+                    dlog(|| format!("pixels: {}x{} frame, {} bytes of commands, {:.1} ms to send, draw {frame_ms:.1} ms", f.width, f.height, cmds.len(), t.elapsed().as_secs_f64() * 1000.0));
                 }
                 crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;
             }
@@ -1247,6 +1278,9 @@ async fn main() -> Result<()> {
                                 if kitty {
                                     map.raster_mode = RasterMode::Kitty { cell_px: cpx };
                                 }
+                                if pixels_on {
+                                    map.pixel_mode = Some(cpx);
+                                }
                                 if ctl.pixel_mouse.is_some() {
                                     ctl.pixel_mouse = cell_px();
                                 }
@@ -1335,7 +1369,7 @@ async fn main() -> Result<()> {
     }
     let _ = set_pixel_mouse(false);
     let _ = set_pointer("default");
-    if kitty {
+    if kitty || pixels_on {
         let _ = std::io::stdout().write_all(mapterm::kitty::FREE_ALL.as_bytes());
     }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);

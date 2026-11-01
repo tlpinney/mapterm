@@ -47,7 +47,7 @@ use crate::{
     raster::{RasterSource, RasterStore, RasterTile},
     expr::{Ctx, Rgba, Val},
     geojson,
-    layer::{CustomLayer, DrawContext, PickContext, render_with},
+    layer::{CustomLayer, DrawContext, PickContext},
     mvt::GeomType,
     pick::{Pick, hit, stats},
     render::{Camera, Viewport, to_lonlat, to_world},
@@ -308,8 +308,8 @@ impl GeoJsonSource {
 #[derive(Clone, Debug)]
 enum Resolved {
     Fill { color: Option<Color>, outline: Option<Color> },
-    /// `width` in dots (1 to 3); `dash` is on/off lengths in dots.
-    Line { color: Color, width: u8, dash: Option<Vec<f64>> },
+    /// `width` in CSS pixels; `dash` is `line-dasharray`: on/off lengths in line widths.
+    Line { color: Color, width: f64, dash: Option<Vec<f64>> },
     /// A glyph at each point, with an optional label beside it.
     Point { glyph: String, style: TStyle, label: Option<(String, TStyle)>, priority: i32 },
     /// `anchors` are tried in order (`text-variable-anchor`); `offset` is `text-offset` in
@@ -474,6 +474,12 @@ pub struct Map {
     warnings: Vec<String>,
     /// How raster layers draw (cell colors unless set to kitty images).
     pub raster_mode: RasterMode,
+    /// Pixel mode: the terminal's cell size in pixels, to draw fills and lines as an image
+    /// (take each frame with [`Map::take_pixels`] and show it with kitty graphics) instead of
+    /// braille. Labels and markers stay text. None (the default) draws braille.
+    pub pixel_mode: Option<(f64, f64)>,
+    /// The last frame drawn in pixel mode, until taken.
+    pixels: std::sync::Mutex<Option<crate::pixels::PixFrame>>,
     /// The starting view (lon, lat, zoom) a style suggests.
     pub center: Option<(f64, f64, f64)>,
     /// When to ask again for tiles that failed to load.
@@ -539,6 +545,13 @@ impl Map {
     /// An empty map.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The last frame drawn in [`Map::pixel_mode`]: fills and lines as an image the size of
+    /// the map's area, to show under the text with kitty graphics. None until a frame is
+    /// drawn in pixel mode, and after it was taken.
+    pub fn take_pixels(&self) -> Option<crate::pixels::PixFrame> {
+        self.pixels.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     // ---- sources ----
@@ -1417,18 +1430,16 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
             if px <= 0.0 {
                 return None;
             }
-            let width = if px < 6.0 { 1 } else if px < 14.0 { 2 } else { 3 };
-            // Dash lengths are in line widths; at least a dot each so the pattern shows. All
-            // gaps zero means a solid line.
+            // Dash lengths are in line widths. All gaps zero means a solid line.
             let dash = match l.paint_expr("line-dasharray").map(|e| e.eval(&cp)) {
                 Some(crate::expr::Val::Array(a)) => {
-                    let v: Vec<f64> = a.iter().filter_map(|x| x.as_num()).map(|n| (n * px.max(1.0) / 4.0).max(1.0)).collect();
+                    let v: Vec<f64> = a.iter().filter_map(|x| x.as_num()).collect();
                     let gaps = a.iter().skip(1).step_by(2).any(|x| x.as_num().is_some_and(|n| n > 0.0));
                     (v.len() >= 2 && gaps).then_some(v)
                 }
                 _ => None,
             };
-            Some(Resolved::Line { color, width, dash })
+            Some(Resolved::Line { color, width: px, dash })
         }
         Kind::Circle if c.geom == GeomType::Point => {
             let fg = color("circle-color", "circle-opacity", Some(BLACK))?;
@@ -1503,7 +1514,7 @@ fn draw_resolved(ctx: &mut DrawContext, r: &Resolved, geom: GeomType, dots: &[Ve
         }
         Resolved::Line { color, width, dash } => {
             for part in dots {
-                ctx.line_styled(part, *color, *width, dash.as_deref());
+                ctx.line_px(part, *color, *width, dash.as_deref());
             }
         }
         Resolved::Point { glyph, style, label, priority } => {
@@ -1643,7 +1654,11 @@ impl Widget for MapView<'_> {
                 _ => None,
             })
             .collect();
-        render_with(cam, area, buf, |ctx| {
+        let mut pix = map.pixel_mode.and_then(|cpx| crate::pixels::Pix::new(area.width, area.height, cpx));
+        // Imagery under the map shows through the image, so the background isn't painted.
+        let imagery = map.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(cam.zoom)));
+        let skip_bg = pix.is_some() && imagery;
+        crate::layer::render_into(cam, area, buf, pix.as_mut(), |ctx| {
             for (i, entry) in map.layers.iter().enumerate() {
                 ctx.base = i as i32 * LAYER_PRIORITY;
                 let l = match entry {
@@ -1657,6 +1672,9 @@ impl Widget for MapView<'_> {
                     continue;
                 }
                 if l.kind == Kind::Background {
+                    if skip_bg {
+                        continue;
+                    }
                     if let Some(c) = l.paint_expr("background-color").and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_color())
                         && let Some(c) = term_color(c, l.paint_expr("background-opacity").and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_num()).unwrap_or(1.0), None)
                     {
@@ -1728,6 +1746,9 @@ impl Widget for MapView<'_> {
                 }
             }
         });
+        if let Some(p) = pix {
+            *map.pixels.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.finish());
+        }
     }
 }
 
