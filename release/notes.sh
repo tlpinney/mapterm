@@ -21,7 +21,6 @@ cat <<NOTES
 
 | platform | file |
 |---|---|
-| macOS, Apple silicon | \`mapterm-$version-aarch64-apple-darwin.tar.gz\` |
 | Linux, x86-64 (glibc) | \`mapterm-$version-x86_64-unknown-linux-gnu.tar.gz\` |
 
 \`SHA256SUMS\` lists every archive's checksum, and \`SHA256SUMS.sig\` is the maintainer's SSH
@@ -44,6 +43,5 @@ Or build it with Cargo (Rust 1.89 or newer):
 cargo install --git https://github.com/tlpinney/mapterm --tag $tag
 \`\`\`
 
-The macOS binary isn't notarized: files downloaded with a browser need
-\`xattr -d com.apple.quarantine mapterm\` once (\`gh\` and \`curl\` downloads don't).
+macOS: install with Cargo (above) until there are notarized macOS binaries.
 NOTES

@@ -55,9 +55,9 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
+        # Linux only for now: macOS binaries wait for Apple code signing and notarization
+        # (macOS users install with Cargo).
         include:
-          - target: aarch64-apple-darwin
-            os: macos-15
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
     steps:
