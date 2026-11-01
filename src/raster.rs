@@ -32,6 +32,24 @@ pub struct RasterSource {
     cache_dir: std::path::PathBuf,
     pub max_zoom: u8,
     pub name: String,
+    /// Credit to show for the imagery (known providers are filled in automatically).
+    pub attribution: String,
+}
+
+/// The credit that well-known tile providers ask for, from the tile URL's host.
+pub fn known_attribution(template: &str) -> Option<&'static str> {
+    let host = template.split('/').nth(2).unwrap_or("");
+    if host.ends_with("arcgisonline.com") || host.ends_with("arcgis.com") {
+        Some("Esri, Maxar, Earthstar Geographics")
+    } else if host.ends_with("nationalmap.gov") {
+        Some("USGS The National Map")
+    } else if host.ends_with("openstreetmap.org") || host.ends_with("openstreetmap.fr") {
+        Some("© OpenStreetMap contributors")
+    } else if host.ends_with("s2maps-tiles.eu") {
+        Some("Sentinel-2 cloudless by EOX")
+    } else {
+        None
+    }
 }
 
 impl RasterSource {
@@ -51,6 +69,7 @@ impl RasterSource {
             cache_dir: cache_root().join("raster").join(hash(template)),
             max_zoom,
             name: template.split('/').nth(2).unwrap_or(template).to_string(),
+            attribution: known_attribution(template).unwrap_or_default().to_string(),
         })
     }
 
@@ -316,6 +335,9 @@ mod tests {
         assert_eq!(flag.url(3, 2, 1), "https://t.example/3/2/6.png");
         assert!(RasterSource::new("https://t.example/{z}/{x}.png", false, 19).is_err());
         assert!(RasterSource::new("file:///x/{z}/{x}/{y}.png", false, 19).is_err());
+        let esri = RasterSource::new("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", false, 19).unwrap();
+        assert_eq!(esri.url(15, 9372, 12536), "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/15/12536/9372");
+        assert_eq!(esri.attribution, "Esri, Maxar, Earthstar Geographics");
     }
 
     #[test]

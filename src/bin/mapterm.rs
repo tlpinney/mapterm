@@ -39,6 +39,8 @@ usage: mapterm [SOURCE] [--raster URL [--tms]] [--at LAT,LON] [-z ZOOM] [--light
                 real images with kitty graphics (Ghostty, kitty, WezTerm, herdr), cell colors
                 elsewhere (MAPTERM_GRAPHICS=kitty|cells overrides)
   --tms         count raster rows from the bottom (TMS) even with a plain {y}
+  --raster-attribution TEXT
+                credit for the raster layer (Esri, USGS, OSM and EOX are known already)
   --light       light theme
   --snapshot    render one frame to stdout as text and exit
   --pick        with --snapshot: print the features under that cell as JSON lines instead
@@ -64,6 +66,7 @@ struct Args {
     pick: Option<(u16, u16)>,
     raster: Option<String>,
     tms: bool,
+    raster_attribution: Option<String>,
     /// Experimental smooth scrolling, from MAPTERM_SMOOTH only (no flag): `1` pans the wheel
     /// smoothly, `shift` makes dragging pixel-exact (smooth protocol v3).
     smooth: bool,
@@ -77,7 +80,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, smooth, shift };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, raster_attribution: None, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -90,6 +93,7 @@ fn args() -> Result<Args> {
             "--light" => a.light = true,
             "--raster" => a.raster = Some(it.next().context("--raster URL")?),
             "--tms" => a.tms = true,
+            "--raster-attribution" => a.raster_attribution = Some(it.next().context("--raster-attribution TEXT")?),
             "--snapshot" => {
                 let v = it.next().context("--snapshot COLSxROWS")?;
                 let (c, r) = v.split_once('x').context("--snapshot COLSxROWS")?;
@@ -291,7 +295,13 @@ async fn main() -> Result<()> {
     let mut store = TileStore::default();
     // Optional raster layer under the vector map.
     let raster = match &a.raster {
-        Some(u) => Some(Arc::new(mapterm::raster::RasterSource::new(u, a.tms, 19)?)),
+        Some(u) => {
+            let mut r = mapterm::raster::RasterSource::new(u, a.tms, 19)?;
+            if let Some(t) = &a.raster_attribution {
+                r.attribution = t.clone();
+            }
+            Some(Arc::new(r))
+        }
         None => None,
     };
     let mut rstore = mapterm::raster::RasterStore::default();
@@ -497,7 +507,8 @@ async fn main() -> Result<()> {
                 if let Some(r) = &raster {
                     let mode = ["", "· labels ", "· raster only "][vector as usize];
                     let how = if kitty { "" } else { "(cells) " };
-                    spans.push(Span::styled(format!("{} {how}{mode}", r.name), TStyle::new().fg(Color::LightBlue)));
+                    let credit = if r.attribution.is_empty() { r.name.clone() } else { format!("imagery {}", r.attribution) };
+                    spans.push(Span::styled(format!("{credit} {how}{mode}"), TStyle::new().fg(Color::LightBlue)));
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
                 spans.push(Span::styled(format!("· {} · © OpenStreetMap · q quit", src.name), dim));

@@ -34,8 +34,13 @@ They follow the MapLibre GL / Mapbox GL defaults:
 mapterm --raster 'https://tile.openstreetmap.org/{z}/{x}/{y}.png' --at 38.8895,-77.0353 -z 15
 ```
 
-- URLs use `{z}`, `{x}` and `{y}`; for TMS services (rows counted from the
-  bottom) use `{-y}` or add `--tms`.
+- URLs use `{z}`, `{x}` and `{y}` in any order; for TMS services (rows counted
+  from the bottom) use `{-y}` or add `--tms`.
+- Satellite imagery, e.g. Esri World Imagery (`…/World_Imagery/MapServer/tile/{z}/{y}/{x}`
+  on server.arcgisonline.com) or USGS imagery for the US
+  (`…/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}` on basemap.nationalmap.gov).
+- The status bar credits the imagery: Esri, USGS, OpenStreetMap and EOX are
+  known; give anything else with `--raster-attribution TEXT`.
 - On terminals with the kitty graphics protocol (Ghostty, kitty, WezTerm, and
   through herdr) tiles are real images underneath the text, so vector labels,
   lines, markers and inspect draw on top. Each tile is sent once; panning and
