@@ -33,9 +33,29 @@ The same code is a library: a [ratatui](https://ratatui.rs) widget with a MapLib
 style API (sources, style layers, expressions, events and feature state, feature
 queries) that you can drop into your own terminal apps.
 
-```sh
-cargo install mapterm         # installs the `mapterm` command
+## Install
 
+With [Homebrew](https://brew.sh) on macOS or Linux:
+
+```sh
+brew tap tlpinney/tap
+brew trust --formula tlpinney/tap/mapterm
+brew install tlpinney/tap/mapterm
+```
+
+With Cargo (Rust 1.89 or newer, from [rustup.rs](https://rustup.rs)):
+
+```sh
+cargo install mapterm
+```
+
+On Linux (x86-64) you can also download a signed binary from
+[Releases](https://github.com/tlpinney/mapterm/releases); the release notes show how to
+verify it. To use the library in your own app: `cargo add mapterm`.
+
+## Try it
+
+```sh
 mapterm                                                # OpenFreeMap planet, no key needed
 mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lon) at zoom 13
 mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over HTTP range requests
