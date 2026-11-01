@@ -98,7 +98,7 @@ pub mod stylejson;
 pub use interact::{Click, Controller};
 pub use pick::Pick;
 pub use layer::{CustomLayer, DrawContext, Markers, PickContext};
-pub use map::{KittyState, Map, MapSource, MapView, RasterMode, TileRequest};
+pub use map::{KittyState, LabelPlacement, Map, MapSource, MapView, RasterMode, TileRequest};
 pub use spec::StyleLayer;
 pub use render::{Camera, Overlay, Viewport};
 pub use source::Source;

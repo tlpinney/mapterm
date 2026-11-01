@@ -47,7 +47,7 @@ use crate::{
     raster::{RasterSource, RasterStore, RasterTile},
     expr::{Ctx, Rgba, Val},
     geojson,
-    layer::{CustomLayer, DrawContext, PickContext, render_with},
+    layer::{CustomLayer, DrawContext, PickContext},
     mvt::GeomType,
     pick::{Pick, hit, stats},
     render::{Camera, Viewport, to_lonlat, to_world},
@@ -142,6 +142,17 @@ pub struct RasterTiles {
     /// Credit set with [`Map::set_attribution`], over the source's own (which can't change
     /// once the source is shared).
     credit: Option<String>,
+}
+
+/// How labels and markers are placed from one frame to the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LabelPlacement {
+    /// Symbols shown last frame are placed first and keep their spot when it still fits, so
+    /// labels don't flicker or hop between spots while the map moves (as in MapLibre).
+    #[default]
+    Sticky,
+    /// Every frame is placed from scratch, by priority alone.
+    Fresh,
 }
 
 /// How raster layers are drawn.
@@ -474,6 +485,10 @@ pub struct Map {
     warnings: Vec<String>,
     /// How raster layers draw (cell colors unless set to kitty images).
     pub raster_mode: RasterMode,
+    /// How labels and markers are placed frame to frame (sticky by default).
+    pub label_placement: LabelPlacement,
+    /// Where symbols were placed last frame.
+    label_memory: std::sync::Mutex<crate::layer::LabelMemory>,
     /// The starting view (lon, lat, zoom) a style suggests.
     pub center: Option<(f64, f64, f64)>,
     /// When to ask again for tiles that failed to load.
@@ -539,6 +554,19 @@ impl Map {
     /// An empty map.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The labels and markers placed in the last frame drawn: (text, or glyph and label, with
+    /// lon, lat). For tests and measuring how labels move between frames.
+    #[doc(hidden)]
+    pub fn placed_labels(&self) -> Vec<(String, f64, f64)> {
+        self.label_memory.lock().unwrap_or_else(|e| e.into_inner()).placed.clone()
+    }
+
+    /// The label and marker keys offered for placement in the last frame (placed or not).
+    #[doc(hidden)]
+    pub fn offered_labels(&self) -> Vec<String> {
+        self.label_memory.lock().unwrap_or_else(|e| e.into_inner()).offered.clone()
     }
 
     // ---- sources ----
@@ -1643,7 +1671,7 @@ impl Widget for MapView<'_> {
                 _ => None,
             })
             .collect();
-        render_with(cam, area, buf, |ctx| {
+        crate::layer::render_labelled(cam, area, buf, Some(&map.label_memory), map.label_placement == LabelPlacement::Sticky, |ctx| {
             for (i, entry) in map.layers.iter().enumerate() {
                 ctx.base = i as i32 * LAYER_PRIORITY;
                 let l = match entry {

@@ -193,9 +193,42 @@ pub struct PickContext<'a> {
     pub target: (f64, f64),
 }
 
+/// Where labels and markers were placed last frame, in (lon, lat), so the next frame can
+/// keep them where they were (see [`crate::Map::sticky_labels`]).
+#[derive(Default)]
+pub(crate) struct LabelMemory {
+    /// (key, lon, lat): a label's text, or a marker's glyph and label.
+    pub(crate) placed: Vec<(String, f64, f64)>,
+    /// Keys offered for placement last frame (placed or not), for measuring.
+    pub(crate) offered: Vec<String>,
+    /// Symbols that lost a collision last frame: (key, lon, lat) of their first spot.
+    pub(crate) lost: Vec<(String, f64, f64)>,
+}
+
 /// Set up a canvas for `area`, let `draw` fill it, then place markers and labels (highest
 /// priority first, never overlapping) and write the cells into `buf`.
-pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: impl FnOnce(&mut DrawContext)) {
+#[cfg(test)]
+pub(crate) fn render_with(
+    camera: &Camera,
+    area: Rect,
+    buf: &mut Buffer,
+    draw: impl FnOnce(&mut DrawContext),
+) {
+    render_labelled(camera, area, buf, None, false, draw)
+}
+
+/// [`render_with`], remembering where symbols went in `memory`. With `sticky`, symbols placed
+/// last frame are placed first (in their priority order) and each tries the spot nearest
+/// where it was, so labels don't trade places or hop between spots as the map moves:
+/// MapLibre's placement keeps shown labels the same way.
+pub(crate) fn render_labelled(
+    camera: &Camera,
+    area: Rect,
+    buf: &mut Buffer,
+    memory: Option<&std::sync::Mutex<LabelMemory>>,
+    sticky: bool,
+    draw: impl FnOnce(&mut DrawContext),
+) {
     if area.width < 2 || area.height < 2 {
         return;
     }
@@ -218,7 +251,38 @@ pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: i
         base: 0,
     };
     draw(&mut ctx);
-    let DrawContext { mut markers, mut labels, .. } = ctx;
+    let DrawContext {
+        mut markers,
+        mut labels,
+        viewport: vp,
+        ..
+    } = ctx;
+    // Last frame's symbols, in this frame's dots.
+    let (before, lost_before): (Spots, Spots) = match memory.filter(|_| sticky) {
+        Some(m) => {
+            let m = m.lock().unwrap_or_else(|e| e.into_inner());
+            let dots = |v: &[(String, f64, f64)]| {
+                v.iter()
+                    .map(|(k, lon, lat)| (k.clone(), vp.dot_ll(*lon, *lat)))
+                    .collect()
+            };
+            (dots(&m.placed), dots(&m.lost))
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    // How far a symbol may have drifted and still count as the same one: a few cells.
+    const NEAR: f64 = 12.0;
+    let near_in = |list: &[(String, (f64, f64))], key: &str, p: (f64, f64)| -> Option<f64> {
+        list.iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, q)| (p.0 - q.0).hypot(p.1 - q.1))
+            .filter(|d| *d < NEAR)
+            .reduce(f64::min)
+    };
+    let nearest = |key: &str, p: (f64, f64)| near_in(&before, key, p);
+    let lost_last = |key: &str, p: (f64, f64)| near_in(&lost_before, key, p).is_some();
+    let mut shown: Spots = Vec::new();
+    let mut lost: Spots = Vec::new();
 
     // Markers and labels in one order, highest priority first (higher layers, then lower
     // sort keys), as MapLibre places symbols. A marker with a label shows both or neither,
@@ -228,22 +292,51 @@ pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: i
         Label(String, TStyle, Vec<(f64, f64)>, f64),
     }
     let inside = |p: (f64, f64)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < vw && p.1 < vh;
-    let mut syms: Vec<(i32, usize, Sym)> = Vec::with_capacity(markers.len() + labels.len());
+    let marker_key = |g: &str, l: &Option<(String, TStyle)>| {
+        format!(
+            "\u{1}{g}\u{1}{}",
+            l.as_ref().map_or("", |(t, _)| t.as_str())
+        )
+    };
+    // (was shown last frame, priority, order added, symbol)
+    let mut syms: Vec<(bool, i32, usize, Sym)> = Vec::with_capacity(markers.len() + labels.len());
     for (pri, p, g, st, l) in markers.drain(..) {
-        syms.push((pri, syms.len(), Sym::Marker(p, g, st, l)));
+        let kept = nearest(&marker_key(&g, &l), p).is_some();
+        syms.push((kept, pri, syms.len(), Sym::Marker(p, g, st, l)));
     }
-    for (pri, t, st, p, repeat) in labels.drain(..) {
-        syms.push((pri, syms.len(), Sym::Label(t, st, p, repeat)));
+    for (pri, t, st, mut p, repeat) in labels.drain(..) {
+        // Try the spot nearest where this text was first.
+        let d = |c: &(f64, f64)| nearest(&t, *c).unwrap_or(f64::MAX);
+        let kept = p.iter().any(|c| d(c) < f64::MAX);
+        if kept {
+            p.sort_by(|a, b| d(a).total_cmp(&d(b)));
+        }
+        syms.push((kept, pri, syms.len(), Sym::Label(t, st, p, repeat)));
     }
-    // Stable among equal priorities: markers before labels, then in the order added.
-    syms.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    let offered: Vec<String> = syms
+        .iter()
+        .map(|(_, _, _, s)| match s {
+            Sym::Marker(_, g, _, l) => marker_key(g, l),
+            Sym::Label(t, ..) => t.clone(),
+        })
+        .collect();
+    // Shown last frame first, then by priority; stable among equals: markers before labels,
+    // then in the order added.
+    syms.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
     let mut placed: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
-    for (_, _, sym) in syms {
+    // Hysteresis: a symbol that wasn't showing needs room around it to appear (two columns
+    // each side, one more than labels keep anyway, and the rows above and below), so two
+    // labels drifting by fractions of a cell don't take turns from frame to frame.
+    const HYSTERESIS: i64 = 2;
+    for (kept, _, _, sym) in syms {
         match sym {
             Sym::Marker(p, glyph, st, label) => {
                 if !inside(p) {
                     continue;
                 }
+                // Keyed by the whole label: near the edge it's cut short by however much room
+                // is left, which changes as the map moves.
+                let key = marker_key(&glyph, &label);
                 let (col, row) = ((p.0 / 2.0) as i64, (p.1 / 4.0) as i64);
                 let lcol = col + glyph.width() as i64 + 1;
                 // A label running off the right edge is cut short with "…", as a browser
@@ -254,15 +347,28 @@ pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: i
                     _ if room >= 4 => Some((clip(&l, room as usize - 1) + "…", ls)),
                     _ => None,
                 });
+                let flapping = !kept && lost_last(&key, p);
+                let room = |w: i64| !flapping || canvas.clear_around(col, row, w, HYSTERESIS);
                 match label {
                     Some((l, ls)) => {
-                        if canvas.fits(col, row, &glyph, false) && canvas.fits(lcol, row, &l, true) {
+                        if room(lcol - col + l.width() as i64)
+                            && canvas.fits(col, row, &glyph, false)
+                            && canvas.fits(lcol, row, &l, true)
+                        {
                             canvas.text_at(col, row, &glyph, st, false);
                             canvas.text_at(lcol, row, &l, ls, true);
+                            shown.push((key, p));
+                        } else {
+                            lost.push((key, p));
                         }
                     }
                     None => {
-                        canvas.text_at(col, row, &glyph, st, false);
+                        if room(glyph.width() as i64) && canvas.text_at(col, row, &glyph, st, false)
+                        {
+                            shown.push((key, p));
+                        } else {
+                            lost.push((key, p));
+                        }
                     }
                 }
             }
@@ -271,18 +377,47 @@ pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: i
                 if cands.first().is_none_or(|p| near(*p)) {
                     continue;
                 }
+                let first = cands[0];
+                let flapping = !kept && lost_last(&text, first);
+                let mut done = false;
                 for p in cands {
                     let col = (p.0 / 2.0) as i64 - text.width() as i64 / 2;
-                    if canvas.text_at(col, (p.1 / 4.0) as i64, &text, st, true) {
-                        placed.entry(text).or_default().push(p);
+                    let row = (p.1 / 4.0) as i64;
+                    if flapping && !canvas.clear_around(col, row, text.width() as i64, HYSTERESIS) {
+                        continue;
+                    }
+                    if canvas.text_at(col, row, &text, st, true) {
+                        shown.push((text.clone(), p));
+                        placed.entry(text.clone()).or_default().push(p);
+                        done = true;
                         break;
                     }
+                }
+                if !done {
+                    lost.push((text, first));
                 }
             }
         }
     }
+    if let Some(m) = memory {
+        let ll = |v: Spots| -> Vec<(String, f64, f64)> {
+            v.into_iter()
+                .map(|(k, p)| {
+                    let (lon, lat) = vp.dot_to_lonlat(p.0, p.1);
+                    (k, lon, lat)
+                })
+                .collect()
+        };
+        let mut m = m.lock().unwrap_or_else(|e| e.into_inner());
+        m.lost = ll(lost);
+        m.offered = offered;
+        m.placed = ll(shown);
+    }
     canvas.flush(area, buf);
 }
+
+/// Symbols by key, at dot positions in this frame.
+type Spots = Vec<(String, (f64, f64))>;
 
 /// The longest start of `s` at most `cols` cells wide.
 fn clip(s: &str, cols: usize) -> String {
@@ -323,6 +458,81 @@ impl CustomLayer for Markers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Labels placed in a frame, as (text, row) pairs read from the buffer.
+    fn frame(
+        mem: &std::sync::Mutex<LabelMemory>,
+        sticky: bool,
+        labels: &[(&str, (f64, f64), i32)],
+    ) -> Vec<String> {
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_labelled(
+            &Camera::new(0.0, 0.0, 3.0),
+            area,
+            &mut buf,
+            Some(mem),
+            sticky,
+            |ctx| {
+                for (t, p, pri) in labels {
+                    ctx.label_dot(*p, t, TStyle::new(), *pri);
+                }
+            },
+        );
+        let text: String = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect();
+        labels
+            .iter()
+            .filter(|(t, ..)| text.contains(t))
+            .map(|(t, ..)| t.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn sticky_labels_keep_their_place() {
+        let (a, b) = ("AAAAAA", "BBBBBB");
+        for sticky in [false, true] {
+            let mem = std::sync::Mutex::new(LabelMemory::default());
+            assert_eq!(frame(&mem, sticky, &[(a, (30.0, 18.0), 1)]), vec![a]);
+            // A higher-priority label now overlaps the one showing.
+            let shown = frame(&mem, sticky, &[(a, (30.0, 18.0), 1), (b, (34.0, 18.0), 5)]);
+            assert_eq!(
+                shown,
+                if sticky { vec![a] } else { vec![b] },
+                "sticky={sticky}"
+            );
+        }
+        // Hysteresis: the hidden label doesn't come back while it would only just fit beside
+        // the shown one (a cell away), but does once there's room.
+        let mem = std::sync::Mutex::new(LabelMemory::default());
+        frame(&mem, true, &[(a, (30.0, 18.0), 1)]);
+        frame(&mem, true, &[(a, (30.0, 18.0), 1), (b, (36.0, 18.0), 5)]);
+        assert_eq!(
+            frame(&mem, true, &[(a, (30.0, 18.0), 1), (b, (46.0, 18.0), 5)]),
+            vec![a],
+            "just fits: still hidden"
+        );
+        // ...but a brand-new label in the same spot shows: only labels that just lost wait.
+        let fresh = std::sync::Mutex::new(LabelMemory::default());
+        frame(&fresh, true, &[(a, (30.0, 18.0), 1)]);
+        assert_eq!(
+            frame(&fresh, true, &[(a, (30.0, 18.0), 1), (b, (46.0, 18.0), 5)]),
+            vec![a, b],
+            "new label, normal rules"
+        );
+        assert_eq!(
+            frame(&mem, true, &[(a, (30.0, 18.0), 1), (b, (60.0, 18.0), 5)]),
+            vec![a, b],
+            "room: back"
+        );
+    }
+
     use crate::render::Camera;
 
     /// Draw with `f` into a 30x5 map at zoom 0 and return the rows as text.
