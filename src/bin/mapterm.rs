@@ -564,6 +564,10 @@ async fn main() -> Result<()> {
     let has_raster = map.sources().any(|(_, s)| matches!(s, MapSource::Raster(_)));
     let kitty = has_raster && mapterm::kitty::supported();
     let mut kstate = KittyState::default();
+    // Terminal image memory to stay within (herdr keeps 64 MiB per pane).
+    if let Some(mb) = std::env::var("MAPTERM_KITTY_BUDGET_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
+        kstate.budget = mb.max(1) << 20;
+    }
     let mut cpx = cell_px().unwrap_or((9.0, 20.0));
     if kitty {
         map.raster_mode = RasterMode::Kitty { cell_px: cpx };
@@ -735,7 +739,7 @@ async fn main() -> Result<()> {
                     // Re-place the raster images under the text: images are sent once, then
                     // each frame only moves placements.
                     let cmds = map.kitty_commands(&draw_cam, map_area, &mut kstate);
-                    dlog(|| format!("frame: kitty cmds {} bytes, cell_px={cpx:?} map={map_area:?}", cmds.len()));
+                    dlog(|| format!("frame: kitty cmds {} bytes, {} KiB of images held, cell_px={cpx:?} map={map_area:?}", cmds.len(), kstate.bytes() >> 10));
                     out.write_all(cmds.as_bytes())?;
                 }
                 crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;

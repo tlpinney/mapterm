@@ -141,10 +141,32 @@ impl TileRequest {
     }
 }
 
-/// Image ids already sent to the terminal, for [`Map::kitty_commands`].
-#[derive(Default)]
+/// The images [`Map::kitty_commands`] has sent to the terminal: their decoded size and the
+/// last frame that used each.
+///
+/// Terminals keep a limited amount of image memory, counted in decoded RGBA bytes (herdr: 64
+/// MiB per pane; Ghostty: 320 MB) and evict on their own when it runs out, which can drop a
+/// tile still on screen that mapterm believes is loaded. So mapterm keeps under `budget`
+/// itself, freeing the least recently used images first.
 pub struct KittyState {
-    sent: HashSet<u32>,
+    sent: HashMap<u32, (usize, u64)>,
+    frame: u64,
+    /// Most decoded image bytes to keep in the terminal (default 48 MiB, under herdr's 64 MiB;
+    /// `MAPTERM_KITTY_BUDGET_MB` overrides it in the viewer).
+    pub budget: usize,
+}
+
+impl Default for KittyState {
+    fn default() -> Self {
+        Self { sent: HashMap::new(), frame: 0, budget: 48 << 20 }
+    }
+}
+
+impl KittyState {
+    /// Decoded bytes currently held by the terminal.
+    pub fn bytes(&self) -> usize {
+        self.sent.values().map(|(b, _)| b).sum()
+    }
 }
 
 impl From<geojson::GeoJson> for MapSource {
@@ -427,20 +449,21 @@ impl Map {
     pub fn kitty_commands(&mut self, cam: &Camera, area: Rect, state: &mut KittyState) -> String {
         use crate::kitty;
         let RasterMode::Kitty { .. } = self.raster_mode else { return String::new() };
+        state.frame += 1;
         let mut cmds = String::new();
-        if !state.sent.is_empty() || self.sources.iter().any(|(_, s)| matches!(s, MapSource::Raster(_))) {
-            cmds.push_str(kitty::CLEAR_PLACEMENTS);
-        }
+        // Images the store dropped are freed from the terminal too.
         for (_, s) in &mut self.sources {
             if let MapSource::Raster(r) = s {
                 for id in r.tiles.take_evicted() {
-                    if state.sent.remove(&id) {
+                    if state.sent.remove(&id).is_some() {
                         cmds.push_str(&kitty::free(id));
                     }
                 }
             }
         }
-        let mut placement = 1u32;
+        // This frame's pieces, bottom layer first. Pieces no bigger than 32x16 cells, which
+        // herdr relays (it drops placements stretched over very large areas).
+        let mut pieces = Vec::new();
         for (i, e) in self.layers.iter().enumerate() {
             let Entry::Style(l) = e else { continue };
             if l.kind != Kind::Raster || !l.shown_at(cam.zoom) {
@@ -448,16 +471,49 @@ impl Map {
             }
             let Some(MapSource::Raster(r)) = l.source.as_deref().and_then(|s| self.source(s)) else { continue };
             let rz = self.raster_zoom(&r.src, cam);
-            // Pieces no bigger than 32x16 cells, which herdr relays (it drops placements
-            // stretched over very large areas). Higher layers stack above lower ones, all
-            // under the text.
-            for b in crate::raster::layout_max(&r.tiles, cam, area, rz, (32, 16)) {
-                if state.sent.insert(b.tile.id) {
+            pieces.extend(crate::raster::layout_max(&r.tiles, cam, area, rz, (32, 16)).into_iter().map(|b| (i, b)));
+        }
+        if pieces.is_empty() && state.sent.is_empty() {
+            return cmds;
+        }
+        // Stay under the budget before sending anything new: free the least recently used
+        // images this frame doesn't show, so the terminal never evicts one it does.
+        let needed: HashSet<u32> = pieces.iter().map(|(_, b)| b.tile.id).collect();
+        let mut new_bytes = 0;
+        let mut counted = HashSet::new();
+        for (_, b) in &pieces {
+            if !state.sent.contains_key(&b.tile.id) && counted.insert(b.tile.id) {
+                let (w, h) = b.tile.size();
+                new_bytes += w as usize * h as usize * 4;
+            }
+        }
+        let mut total = state.bytes();
+        if total + new_bytes > state.budget {
+            let mut old: Vec<(u64, u32, usize)> =
+                state.sent.iter().filter(|(id, _)| !needed.contains(id)).map(|(id, (b, f))| (*f, *id, *b)).collect();
+            old.sort_unstable();
+            for (_, id, b) in old {
+                if total + new_bytes <= state.budget {
+                    break;
+                }
+                state.sent.remove(&id);
+                cmds.push_str(&kitty::free(id));
+                total -= b;
+            }
+        }
+        cmds.push_str(kitty::CLEAR_PLACEMENTS);
+        // Higher layers stack above lower ones, all under the text.
+        for (placement, (i, b)) in pieces.iter().enumerate() {
+            let (w, h) = b.tile.size();
+            let frame = state.frame;
+            match state.sent.get_mut(&b.tile.id) {
+                Some(entry) => entry.1 = frame,
+                None => {
+                    state.sent.insert(b.tile.id, (w as usize * h as usize * 4, frame));
                     cmds.push_str(&kitty::transmit(b.tile.id, &b.tile.png));
                 }
-                cmds.push_str(&kitty::place(b.tile.id, placement, b.cells.x, b.cells.y, b.src, b.cells.width, b.cells.height, -1000 + i as i32));
-                placement += 1;
             }
+            cmds.push_str(&kitty::place(b.tile.id, placement as u32 + 1, b.cells.x, b.cells.y, b.src, b.cells.width, b.cells.height, -1000 + *i as i32));
         }
         cmds
     }
@@ -1283,6 +1339,37 @@ mod tests {
         assert!(!second.contains("a=t,") && second.contains("a=p,"));
         map.set_visibility("img", false).unwrap();
         assert!(!map.kitty_commands(&cam, area, &mut k).contains("a=p,"), "hidden layers aren't placed");
+    }
+
+    #[test]
+    fn kitty_images_stay_under_the_budget() {
+        let mut map = raster_map();
+        map.raster_mode = RasterMode::Kitty { cell_px: (10.0, 20.0) };
+        let area = Rect::new(0, 0, 40, 20);
+        // Four zoom 1 tiles, each 256 KiB decoded; room for only two at a time.
+        for (i, id) in [(1, 0, 0), (1, 1, 0), (1, 0, 1), (1, 1, 1)].into_iter().enumerate() {
+            let mut t = solid_tile(10, 20, 30);
+            t.id = 9000 + i as u32;
+            map.insert_loaded("img", id, Ok(Loaded(LoadedTile::Raster(Some(t))))).unwrap();
+        }
+        let mut k = KittyState { budget: 2 * 256 * 1024, ..KittyState::default() };
+        // Zoomed in on the north-west quarter: one tile shown, sent.
+        let nw = Camera::new(-90.0, 45.0, 3.0);
+        let c1 = map.kitty_commands(&nw, area, &mut k);
+        assert_eq!(c1.matches("a=t,").count(), 1);
+        // Pan to the north-east: a second image fits without freeing anything.
+        let ne = Camera::new(90.0, 45.0, 3.0);
+        let c2 = map.kitty_commands(&ne, area, &mut k);
+        assert!(c2.matches("a=t,").count() == 1 && !c2.contains("a=d,d=I"));
+        // A third doesn't fit: the least recently used (north-west, not on screen) is freed
+        // before the new one is sent, and the budget holds.
+        let sw = Camera::new(-90.0, -45.0, 3.0);
+        let c3 = map.kitty_commands(&sw, area, &mut k);
+        assert!(c3.contains("a=d,d=I,i=9000,"), "{c3}");
+        assert!(c3.find("a=d,d=I").unwrap() < c3.find("a=t,").unwrap(), "freed before sending");
+        assert!(k.bytes() <= k.budget);
+        // Back to the north-west: it is sent again rather than assumed loaded.
+        assert_eq!(map.kitty_commands(&nw, area, &mut k).matches("a=t,").count(), 1);
     }
 
     #[test]

@@ -105,6 +105,9 @@ layer (JPEG layers at 250 m).
   lines, markers and inspect draw on top. Each tile is sent once; panning and
   zooming only move it. Elsewhere the layer becomes cell background colors.
   `MAPTERM_GRAPHICS=kitty` or `cells` overrides the guess.
+- mapterm keeps at most 48 MiB of decoded images in the terminal (herdr allows
+  64 MiB per pane), freeing tiles that are off screen first, so the terminal never
+  drops one that is showing. `MAPTERM_KITTY_BUDGET_MB` changes it.
 - **`v`** cycles the vector overlay: lines and labels, labels only, off. Area
   fills are always off over a raster layer.
 - Tiles are cached on disk for 30 days and fetched at most two at a time.
