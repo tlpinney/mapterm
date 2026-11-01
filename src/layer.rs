@@ -54,7 +54,9 @@ pub const REPEAT_DOTS: f64 = 40.0;
 /// Lines and fills draw immediately, in layer order; markers and labels are collected and
 /// placed after every layer, highest priority first, so they never overlap.
 pub struct DrawContext<'a> {
+    /// The camera being drawn.
     pub camera: &'a Camera,
+    /// Maps world and lon/lat coordinates to dots.
     pub viewport: Viewport,
     canvas: &'a mut Canvas,
     /// [min_x, min_y, max_x, max_y] of the view in world coordinates.
@@ -181,9 +183,13 @@ impl DrawContext<'_> {
 
 /// Where to look for features: `target` is a dot position relative to `area`.
 pub struct PickContext<'a> {
+    /// The camera.
     pub camera: &'a Camera,
+    /// The map's area on screen.
     pub area: Rect,
+    /// Maps world and lon/lat coordinates to dots.
     pub viewport: Viewport,
+    /// The spot to look under, in dots relative to `area`.
     pub target: (f64, f64),
 }
 

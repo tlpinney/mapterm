@@ -22,6 +22,7 @@ const MAX_FETCH: usize = 8 << 20;
 const MAX_INFLATE: usize = 32 << 20;
 const DISK_TTL: Duration = Duration::from_secs(30 * 86400);
 
+/// An HTTP client with mapterm's user agent and timeouts.
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("mapterm/", env!("CARGO_PKG_VERSION")))
@@ -115,8 +116,10 @@ enum Backend {
     Http(String),
 }
 
+/// A PMTiles v3 archive, local or remote (HTTP range requests), with cached leaf directories.
 pub struct PmArchive {
     backend: Backend,
+    /// The archive's header.
     pub header: Header,
     /// The archive's credit from its metadata (`attribution`), as given (often HTML).
     pub attribution: Option<String>,
@@ -146,6 +149,7 @@ impl PmArchive {
         }
     }
 
+    /// Open an archive of vector tiles from a path or URL.
     pub async fn open(spec: &str, http: &reqwest::Client) -> Result<Self> {
         Self::open_kind(spec, http, false).await
     }
@@ -195,6 +199,7 @@ impl PmArchive {
         Ok(Self { backend, header, attribution, root, leaves: Mutex::new(HashMap::new()) })
     }
 
+    /// A tile's bytes (decompressed), or `None` if the archive has none there.
     pub async fn tile(&self, http: &reqwest::Client, z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>> {
         let id = pmtiles::tile_id(z, x, y);
         let mut dir: Arc<Vec<Entry>> = Arc::new(self.root.clone());
@@ -229,12 +234,16 @@ enum Kind {
     Xyz(String),
 }
 
+/// A vector tile source: PMTiles (file or URL), an XYZ URL template, or TileJSON; tiles are cached on disk for 30 days when fetched over HTTP.
 pub struct Source {
     kind: Kind,
     http: reqwest::Client,
     cache_dir: Option<PathBuf>,
+    /// A short name (the file name or URL).
     pub name: String,
+    /// Lowest zoom with tiles.
     pub min_zoom: u8,
+    /// Highest zoom with tiles.
     pub max_zoom: u8,
     /// (lon, lat, zoom) suggested by the source.
     pub center: Option<(f64, f64, f64)>,

@@ -25,6 +25,7 @@ use crate::{
     store::TileId,
 };
 
+/// An image tile source: an XYZ/TMS URL template (with optional key, headers and parameters) or a PMTiles archive of images, with a disk cache.
 pub struct RasterSource {
     template: String,
     tms: bool,
@@ -43,7 +44,9 @@ pub struct RasterSource {
     params: Vec<(String, String)>,
     /// A PMTiles archive of images instead of a URL template.
     pm: Option<Arc<PmArchive>>,
+    /// Highest zoom with tiles.
     pub max_zoom: u8,
+    /// A short name for the status bar.
     pub name: String,
     /// Credit to show for the imagery (known providers are filled in automatically).
     pub attribution: String,
@@ -52,8 +55,11 @@ pub struct RasterSource {
 /// A named raster provider: `--raster vantor` instead of a URL.
 #[derive(Clone, Copy, Debug)]
 pub struct Preset {
+    /// The name used with `--raster`.
     pub name: &'static str,
+    /// What it is.
     pub about: &'static str,
+    /// The tile URL template.
     pub template: &'static str,
     /// Request headers, with `{key}` where the key goes.
     pub headers: &'static [(&'static str, &'static str)],
@@ -62,12 +68,17 @@ pub struct Preset {
     /// Other `{name}` placeholders in the URL: (name, environment variable, default). An empty
     /// default means it must be given; "yesterday" means the previous UTC day.
     pub params: &'static [(&'static str, &'static str, &'static str)],
+    /// Credit to show.
     pub attribution: &'static str,
+    /// Tile size in pixels.
     pub tile_px: u32,
+    /// Highest zoom with tiles.
     pub max_zoom: u8,
+    /// Whether tiles may be kept on disk.
     pub cache: bool,
 }
 
+/// The named providers (`--raster NAME`).
 pub const PRESETS: &[Preset] = &[
     Preset {
         name: "osm",
@@ -203,6 +214,7 @@ pub const PRESETS: &[Preset] = &[
     },
 ];
 
+/// A provider by name (any case).
 pub fn preset(name: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| p.name.eq_ignore_ascii_case(name) || (name.eq_ignore_ascii_case("maxar") && p.name == "vantor"))
 }
@@ -347,6 +359,7 @@ impl RasterSource {
         Ok(())
     }
 
+    /// Set (or clear) the API key for `{key}`.
     pub fn set_key(&mut self, key: Option<String>) {
         self.key = key;
     }
@@ -439,10 +452,12 @@ pub struct RasterTile {
     pub id: u32,
     /// PNG bytes (re-encoded if the source was JPEG), for the kitty graphics protocol.
     pub png: Vec<u8>,
+    /// Decoded pixels, for cell colors.
     pub rgba: image::RgbaImage,
 }
 
 impl RasterTile {
+    /// Width and height in pixels.
     pub fn size(&self) -> (u32, u32) {
         self.rgba.dimensions()
     }
@@ -505,10 +520,12 @@ impl Default for RasterStore {
 }
 
 impl RasterStore {
+    /// Whether the tile is loaded (or known to be missing).
     pub fn contains(&self, id: &TileId) -> bool {
         self.tiles.contains_key(id)
     }
 
+    /// Store a tile (`None`: none there, stored so it isn't fetched again).
     pub fn insert(&mut self, id: TileId, t: Option<RasterTile>) {
         // A missing tile is remembered as a 1x1 transparent image so it isn't fetched again.
         let t = t.unwrap_or_else(|| RasterTile {
@@ -535,6 +552,7 @@ impl RasterStore {
         std::mem::take(&mut self.evicted)
     }
 
+    /// The tile, or the nearest loaded ancestor (up to 6 levels up) to stand in.
     pub fn get_or_ancestor(&self, id: TileId) -> Option<(TileId, Arc<RasterTile>)> {
         let (z, x, y) = id;
         (0..=6u8.min(z)).find_map(|k| {
@@ -571,6 +589,7 @@ pub fn tiles_for(cam: &Camera, area: Rect, rz: u8) -> Vec<TileId> {
 
 /// A rectangle of screen cells drawn from one tile's source rectangle.
 pub struct Block {
+    /// The tile drawn.
     pub tile: Arc<RasterTile>,
     /// Absolute screen cells.
     pub cells: Rect,
@@ -644,6 +663,7 @@ pub fn layout_max(store: &RasterStore, cam: &Camera, area: Rect, rz: u8, max: (u
 /// Draws raster blocks as cell background colors: works in any terminal, one color per cell.
 /// Draw the vector map on top without fills to keep the colors.
 pub struct RasterCells<'a> {
+    /// The blocks to draw.
     pub blocks: &'a [Block],
 }
 

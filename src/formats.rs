@@ -9,10 +9,15 @@ use serde_json::{Map, Value as Json, json};
 /// A data format mapterm reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
+    /// GeoJSON.
     GeoJson,
+    /// CSV or TSV with lat/lon or WKT columns.
     Csv,
+    /// GPX.
     Gpx,
+    /// KML.
     Kml,
+    /// FlatGeobuf.
     FlatGeobuf,
 }
 

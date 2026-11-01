@@ -2,10 +2,14 @@
 //! `url`, `tiles` templates, PMTiles), GeoJSON sources (inline or by URL) and the layers.
 //! Sprites, glyphs, terrain and light don't apply in a terminal and are ignored.
 //!
-//! ```ignore
+//! ```no_run
+//! # use mapterm::Map;
+//! # async fn demo() -> anyhow::Result<()> {
 //! let map = Map::from_style("liberty").await?;            // OpenFreeMap by name
 //! let map = Map::from_style("https://example.com/style.json").await?;
 //! let map = Map::from_style("./my-style.json").await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::{Context, Result, bail};

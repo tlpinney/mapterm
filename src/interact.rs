@@ -48,6 +48,7 @@ pub struct Bezier {
 }
 
 impl Bezier {
+    /// A curve through (0,0), (p1x,p1y), (p2x,p2y), (1,1), as CSS `cubic-bezier()`.
     pub const fn new(p1x: f64, p1y: f64, p2x: f64, p2y: f64) -> Self {
         let cx = 3.0 * p1x;
         let bx = 3.0 * (p2x - p1x) - cx;
@@ -68,6 +69,7 @@ impl Bezier {
         (3.0 * self.ax * t + 2.0 * self.bx) * t + self.cx
     }
 
+    /// The eased value at `x` (0..1).
     pub fn ease(&self, x: f64) -> f64 {
         let x = x.clamp(0.0, 1.0);
         let mut t = x;
@@ -96,7 +98,9 @@ impl Bezier {
     }
 }
 
+/// MapLibre's default easing for camera moves.
 pub const DEFAULT_EASING: Bezier = Bezier::new(0.25, 0.1, 0.25, 1.0);
+/// MapLibre's easing for drag inertia.
 pub const INERTIA_EASING: Bezier = Bezier::new(0.0, 0.0, 0.3, 1.0);
 
 #[derive(Clone, Copy, Debug)]
@@ -187,16 +191,23 @@ struct Drag {
 /// the feature under it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Click {
+    /// Longitude of the click.
     pub lon: f64,
+    /// Latitude of the click.
     pub lat: f64,
     /// Absolute terminal cell.
     pub col: u16,
+    /// Absolute terminal row.
     pub row: u16,
 }
 
+/// Mouse and keyboard handling for a map, MapLibre style. Feed it events, call [`Controller::tick`] each frame, and draw with `cam`. See the [module docs](self).
 pub struct Controller {
+    /// The camera it moves.
     pub cam: Camera,
+    /// Lowest zoom it allows.
     pub min_zoom: f64,
+    /// Highest zoom it allows.
     pub max_zoom: f64,
     /// Cell size in pixels when mouse reports are in pixels (SGR-pixels mode).
     pub pixel_mouse: Option<(f64, f64)>,
@@ -215,6 +226,7 @@ pub struct Controller {
 }
 
 impl Controller {
+    /// A controller for `cam`, limited to `min_zoom..=max_zoom`.
     pub fn new(cam: Camera, min_zoom: f64, max_zoom: f64) -> Self {
         Self {
             cam,
@@ -237,6 +249,7 @@ impl Controller {
         self.area = area;
     }
 
+    /// Whether a move is in flight (draw again soon, at about 60 fps).
     pub fn animating(&self) -> bool {
         self.anim.is_some()
     }

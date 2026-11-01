@@ -3,7 +3,10 @@
 //! changes the map with `set_data`, `set_paint`, `set_filter` and friends, draws it with
 //! [`Map::view`], and asks what's under the pointer with [`Map::query_rendered_features`].
 //!
-//! ```ignore
+//! ```no_run
+//! # use mapterm::{Camera, Map, MapSource, Source, StyleLayer, source::OPENFREEMAP};
+//! # async fn demo(mut term: ratatui::DefaultTerminal, route_json: serde_json::Value) -> anyhow::Result<()> {
+//! # let cam = Camera::new(-77.03, 38.89, 13.0);
 //! let mut map = Map::new();
 //! map.add_source("basemap", MapSource::vector(Source::open(OPENFREEMAP).await?))?;
 //! map.add_source("route", MapSource::geojson(&route_json)?)?;
@@ -11,10 +14,17 @@
 //! map.add_layer(StyleLayer::line("roads", "basemap").source_layer("transportation").color("#666"))?;
 //! map.add_layer(StyleLayer::line("route", "route").color("#00e5ff"))?;
 //! loop {
-//!     map.load_tiles(&cam, area).await;
-//!     frame.render_widget(map.view(&cam), area);
-//!     for f in map.query_rendered_features(&cam, area, dot, Some(&["route"])) { .. }
+//!     let area = term.get_frame().area();
+//!     map.load_tiles(&cam, area).await?;
+//!     term.draw(|frame| frame.render_widget(map.view(&cam), area))?;
+//!     // What's under a spot: braille dots in the map area (2 per column, 4 per row).
+//!     for f in map.query_rendered_features(&cam, area, (40.0, 40.0), Some(&["route"])) {
+//!         println!("{}", f.title());
+//!     }
+//! #   break;
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::{
@@ -54,8 +64,11 @@ const LAYER_PRIORITY: i32 = 10_000;
 
 /// A source of features for style layers.
 pub enum MapSource {
+    /// Vector tiles (MVT), from PMTiles, XYZ or TileJSON.
     Vector(VectorSource),
+    /// GeoJSON (or CSV, GPX, KML, FlatGeobuf turned into GeoJSON).
     GeoJson(GeoJsonSource),
+    /// Image tiles for raster layers.
     Raster(RasterTiles),
 }
 
@@ -123,6 +136,7 @@ impl MapSource {
 
 /// A raster source and its decoded tiles.
 pub struct RasterTiles {
+    /// Where the tiles come from.
     pub src: Arc<RasterSource>,
     tiles: RasterStore,
 }
@@ -135,13 +149,18 @@ pub enum RasterMode {
     Cells,
     /// Real images with the kitty graphics protocol, placed under the text by
     /// [`Map::kitty_commands`]. `cell_px` is the cell size in pixels.
-    Kitty { cell_px: (f64, f64) },
+    Kitty {
+        /// Cell width and height in pixels.
+        cell_px: (f64, f64),
+    },
 }
 
 /// A tile a view needs, to load in the background with [`TileRequest::load`] and hand back
 /// with [`Map::insert_loaded`].
 pub struct TileRequest {
+    /// The source id.
     pub source: String,
+    /// The tile.
     pub id: TileId,
     fetch: Fetch,
 }
@@ -215,8 +234,11 @@ impl From<geojson::GeoJson> for MapSource {
     }
 }
 
+/// A vector tile source and its loaded tiles.
 pub struct VectorSource {
+    /// Lowest zoom with tiles.
     pub min_zoom: u8,
+    /// Highest zoom with tiles (higher zooms reuse these).
     pub max_zoom: u8,
     /// A property to use as the feature id (MapLibre's `promoteId`), for feature state.
     pub promote_id: Option<String>,
@@ -226,6 +248,7 @@ pub struct VectorSource {
     tiles: Tiles,
 }
 
+/// A GeoJSON source: features, a spatial index, and clusters when on.
 pub struct GeoJsonSource {
     /// The features, with a spatial index so drawing and picking look only at those in view.
     data: crate::cluster::Level,
@@ -240,10 +263,12 @@ pub struct GeoJsonSource {
 }
 
 impl GeoJsonSource {
+    /// A source of these features (`bbox` in world coordinates).
     pub fn new(features: Vec<geojson::Feature>, bbox: [f64; 4]) -> Self {
         Self { data: crate::cluster::Level::new(features), bbox, attribution: None, promote_id: None, clusters: None }
     }
 
+    /// Parse a GeoJSON document.
     pub fn parse(doc: &Json) -> Result<Self> {
         let (features, bbox) = geojson::features(doc)?;
         Ok(Self::new(features, bbox))
@@ -439,6 +464,7 @@ impl Entry {
 }
 
 #[derive(Default)]
+/// A map: sources, style and custom layers, feature state, and how raster layers draw. See the [module docs](self).
 pub struct Map {
     sources: Vec<(String, MapSource)>,
     layers: Vec<Entry>,
@@ -501,12 +527,14 @@ impl Default for RetryPolicy {
 }
 
 impl Map {
+    /// An empty map.
     pub fn new() -> Self {
         Self::default()
     }
 
     // ---- sources ----
 
+    /// Add a source under `id` (an error if the id is taken).
     pub fn add_source(&mut self, id: impl Into<String>, src: MapSource) -> Result<()> {
         let id = id.into();
         if self.source(&id).is_some() {
@@ -559,6 +587,7 @@ impl Map {
         self.sources.iter().map(|(id, s)| (id.as_str(), s))
     }
 
+    /// A source by id.
     pub fn source(&self, id: &str) -> Option<&MapSource> {
         self.sources.iter().find(|(s, _)| s == id).map(|(_, s)| s)
     }
@@ -975,6 +1004,7 @@ impl Map {
         Ok(())
     }
 
+    /// Remove a layer; false if there was none.
     pub fn remove_layer(&mut self, id: &str) -> bool {
         let Some(i) = self.index(id) else { return false };
         self.layers.remove(i);
@@ -1006,6 +1036,7 @@ impl Map {
         self.layers.iter().map(Entry::id).collect()
     }
 
+    /// A style layer by id (`None` for custom layers).
     pub fn layer(&self, id: &str) -> Option<&StyleLayer> {
         match &self.layers[self.index(id)?] {
             Entry::Style(l) => Some(l),
@@ -1022,12 +1053,14 @@ impl Map {
         }
     }
 
+    /// Set a paint property of a style layer (MapLibre's `setPaintProperty`).
     pub fn set_paint(&mut self, id: &str, name: &str, v: &Json) -> Result<()> {
         self.style_mut(id)?.set_paint(name, v)?;
         self.restyle();
         Ok(())
     }
 
+    /// Set a layout property of a style layer (MapLibre's `setLayoutProperty`).
     pub fn set_layout(&mut self, id: &str, name: &str, v: &Json) -> Result<()> {
         self.style_mut(id)?.set_layout(name, v)?;
         self.restyle();
@@ -1042,11 +1075,13 @@ impl Map {
         Ok(())
     }
 
+    /// Show or hide a layer.
     pub fn set_visibility(&mut self, id: &str, visible: bool) -> Result<()> {
         self.style_mut(id)?.visible = visible;
         Ok(())
     }
 
+    /// Draw a layer only from `min` up to (not including) `max` zoom.
     pub fn set_zoom_range(&mut self, id: &str, min: f64, max: f64) -> Result<()> {
         let l = self.style_mut(id)?;
         (l.min_zoom, l.max_zoom) = (min, max);
@@ -1577,7 +1612,9 @@ fn val_json(v: &Val) -> Json {
 
 /// Draws a [`Map`] with a camera. Make one with [`Map::view`].
 pub struct MapView<'a> {
+    /// The map.
     pub map: &'a Map,
+    /// The camera to draw with.
     pub camera: &'a Camera,
 }
 

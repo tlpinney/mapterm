@@ -4,13 +4,16 @@
 //!
 //! Build them in Rust:
 //!
-//! ```ignore
-//! StyleLayer::line("route", "osrm").color("#00e5ff")
-//! StyleLayer::fill("parks", "basemap").source_layer("park").color("#1a3220")
-//! StyleLayer::symbol("towns", "basemap").source_layer("place")
+//! ```
+//! # use mapterm::StyleLayer;
+//! # use serde_json::json;
+//! let route = StyleLayer::line("route", "osrm").color("#00e5ff");
+//! let parks = StyleLayer::fill("parks", "basemap").source_layer("park").color("#1a3220");
+//! let towns = StyleLayer::symbol("towns", "basemap").source_layer("place")
 //!     .filter(json!(["==", ["get", "class"], "town"]))
 //!     .text(json!(["get", "name"]))
-//!     .color("#ddd")
+//!     .color("#ddd");
+//! # assert!(towns.filter.is_some() && route.visible && parks.source_layer.is_some());
 //! ```
 //!
 //! or parse them from style JSON with [`StyleLayer::from_json`].
@@ -37,12 +40,19 @@ use serde_json::Value as Json;
 use crate::expr::Expr;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A style layer's type.
 pub enum Kind {
+    /// A solid color behind everything.
     Background,
+    /// Filled polygons.
     Fill,
+    /// Lines (and polygon outlines).
     Line,
+    /// A glyph at each point.
     Circle,
+    /// Text labels and icons.
     Symbol,
+    /// Image tiles.
     Raster,
     /// A layer type mapterm doesn't draw (hillshade, heatmap, fill-extrusion, ...).
     Other(String),
@@ -61,6 +71,7 @@ impl Kind {
         }
     }
 
+    /// The type's name in style JSON.
     pub fn name(&self) -> &str {
         match self {
             Kind::Background => "background",
@@ -123,39 +134,53 @@ const USED_LAYOUT: [&str; 12] = [
 /// One style layer.
 #[derive(Clone, Debug)]
 pub struct StyleLayer {
+    /// The layer's id.
     pub id: String,
+    /// Its type.
     pub kind: Kind,
+    /// The source it draws from (none for backgrounds).
     pub source: Option<String>,
+    /// The vector source's layer it draws from.
     pub source_layer: Option<String>,
+    /// Drawn from this zoom.
     pub min_zoom: f64,
+    /// Drawn below this zoom.
     pub max_zoom: f64,
+    /// Which features it draws.
     pub filter: Option<Expr>,
+    /// Shown (layout `visibility`).
     pub visible: bool,
     paint: Vec<(String, Expr)>,
     layout: Vec<(String, Expr)>,
 }
 
 impl StyleLayer {
+    /// A layer of type `kind` drawing from `source`.
     pub fn new(id: impl Into<String>, kind: Kind, source: Option<String>) -> Self {
         Self { id: id.into(), kind, source, source_layer: None, min_zoom: 0.0, max_zoom: 24.0, filter: None, visible: true, paint: Vec::new(), layout: Vec::new() }
     }
 
+    /// A background layer.
     pub fn background(id: impl Into<String>) -> Self {
         Self::new(id, Kind::Background, None)
     }
 
+    /// A fill layer drawing polygons of `source`.
     pub fn fill(id: impl Into<String>, source: impl Into<String>) -> Self {
         Self::new(id, Kind::Fill, Some(source.into()))
     }
 
+    /// A line layer.
     pub fn line(id: impl Into<String>, source: impl Into<String>) -> Self {
         Self::new(id, Kind::Line, Some(source.into()))
     }
 
+    /// A circle layer (a glyph at each point).
     pub fn circle(id: impl Into<String>, source: impl Into<String>) -> Self {
         Self::new(id, Kind::Circle, Some(source.into()))
     }
 
+    /// A symbol layer (labels and icons).
     pub fn symbol(id: impl Into<String>, source: impl Into<String>) -> Self {
         Self::new(id, Kind::Symbol, Some(source.into()))
     }
@@ -192,6 +217,7 @@ impl StyleLayer {
         self.try_filter(f).unwrap_or_else(|e| panic!("bad filter: {e}"))
     }
 
+    /// Like [`StyleLayer::filter`], with an error for unsupported expressions.
     pub fn try_filter(mut self, f: Json) -> Result<Self> {
         self.filter = Some(Expr::parse(&f)?);
         Ok(self)
@@ -241,10 +267,12 @@ impl StyleLayer {
         self
     }
 
+    /// Set a paint property (an error for an unsupported expression).
     pub fn set_paint(&mut self, name: &str, v: &Json) -> Result<()> {
         set(&mut self.paint, name, v)
     }
 
+    /// Set a layout property (an error for an unsupported expression).
     pub fn set_layout(&mut self, name: &str, v: &Json) -> Result<()> {
         if name == "visibility" {
             self.visible = v.as_str() != Some("none");
@@ -253,10 +281,12 @@ impl StyleLayer {
         set(&mut self.layout, name, v)
     }
 
+    /// A paint property's expression.
     pub fn paint_expr(&self, name: &str) -> Option<&Expr> {
         self.paint.iter().find(|(k, _)| k == name).map(|(_, e)| e)
     }
 
+    /// A layout property's expression.
     pub fn layout_expr(&self, name: &str) -> Option<&Expr> {
         self.layout.iter().find(|(k, _)| k == name).map(|(_, e)| e)
     }

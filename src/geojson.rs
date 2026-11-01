@@ -28,22 +28,29 @@ pub const PALETTE: [Color; 8] = [
 ];
 
 #[derive(Clone, Debug)]
+/// A feature of a GeoJSON layer (geometry in Web Mercator world coordinates).
 pub struct Feature {
     /// The feature's `id` (also kept in `props` for inspecting).
     pub id: Option<Value>,
+    /// Points, lines or polygons.
     pub geom: GeomType,
     /// Parts in Web Mercator world coordinates 0..1 (points, lines, or polygon rings).
     pub parts: Vec<Vec<(f64, f64)>>,
     /// [min_x, min_y, max_x, max_y] in world coordinates.
     pub bbox: [f64; 4],
+    /// Its properties (`id` first when the feature has one).
     pub props: Vec<(String, Value)>,
     /// Text for an on-map label (the `name` property, or `title`/`label`).
     pub label: Option<String>,
 }
 
+/// A GeoJSON file loaded as a layer: its features and how `--geojson` shows them.
 pub struct GeoJson {
+    /// The layer's name (the file name without its extension).
     pub name: String,
+    /// Its color.
     pub color: Color,
+    /// Its features.
     pub features: Vec<Feature>,
     /// Tint polygon interiors (turn off over a raster layer to keep it visible).
     pub fill: bool,

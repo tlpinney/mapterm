@@ -2,7 +2,10 @@
 //! `mouseleave`, plus the usual hover highlight with feature state. Rust apps poll instead of
 //! registering callbacks: feed [`Events`] the pointer and clicks, and act on what it returns.
 //!
-//! ```ignore
+//! ```no_run
+//! # use mapterm::{Controller, Map, StyleLayer, events::{Events, MapEvent}};
+//! # use serde_json::json;
+//! # fn demo(mut map: Map, mut ctl: Controller, area: ratatui::layout::Rect) -> anyhow::Result<()> {
 //! let mut events = Events::new(&["sites", "route"]).hover_state("hover");
 //! // A layer that lights up under the pointer:
 //! map.add_layer(StyleLayer::fill("sites", "sites")
@@ -15,7 +18,10 @@
 //!             if let MapEvent::Click { layer, features, .. } = e { /* open a popup */ }
 //!         }
 //!     }
+//! #   break;
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Feature state needs feature ids: GeoJSON `id`s, vector tile ids, or a source's
@@ -29,11 +35,30 @@ use crate::{interact::Click, map::Map, mvt::Value, pick::Pick, render::{Camera, 
 #[derive(Clone, Debug)]
 pub enum MapEvent {
     /// A click on the layer's features: all of them under the click, top first.
-    Click { layer: String, features: Vec<Pick>, lon: f64, lat: f64 },
+    Click {
+        /// The layer clicked.
+        layer: String,
+        /// Its features under the click, top first.
+        features: Vec<Pick>,
+        /// Longitude of the click.
+        lon: f64,
+        /// Latitude of the click.
+        lat: f64,
+    },
     /// The pointer moved onto a feature of the layer (the top one under it).
-    Enter { layer: String, feature: Pick },
+    Enter {
+        /// The layer.
+        layer: String,
+        /// The feature now under the pointer.
+        feature: Pick,
+    },
     /// The pointer left that feature.
-    Leave { layer: String, feature: Pick },
+    Leave {
+        /// The layer.
+        layer: String,
+        /// The feature the pointer left.
+        feature: Pick,
+    },
 }
 
 /// Layer events for a set of layers. See the [module docs](self).

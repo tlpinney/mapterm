@@ -5,34 +5,56 @@ use anyhow::{Result, bail};
 
 use crate::pbf::Reader;
 
+/// Size of the fixed PMTiles v3 header in bytes.
 pub const HEADER_LEN: usize = 127;
 
 #[derive(Clone, Debug)]
+/// The PMTiles v3 header: where each section is, how tiles are compressed and typed, and the zoom range.
 pub struct Header {
+    /// Offset of the root directory.
     pub root_off: u64,
+    /// Length of the root directory.
     pub root_len: u64,
+    /// Offset of the JSON metadata.
     pub meta_off: u64,
+    /// Length of the JSON metadata.
     pub meta_len: u64,
+    /// Offset of the leaf directories.
     pub leaf_off: u64,
+    /// Length of the leaf directories.
     pub leaf_len: u64,
+    /// Offset of the tile data.
     pub data_off: u64,
+    /// Length of the tile data.
     pub data_len: u64,
+    /// Compression of directories and metadata (a `COMPRESSION_*` value).
     pub internal_compression: u8,
+    /// Compression of tiles (a `COMPRESSION_*` value).
     pub tile_compression: u8,
+    /// What the tiles are (a `TILE_TYPE_*` value).
     pub tile_type: u8,
+    /// Lowest zoom with tiles.
     pub min_zoom: u8,
+    /// Highest zoom with tiles.
     pub max_zoom: u8,
     /// (lon, lat, zoom)
     pub center: (f64, f64, u8),
 }
 
+/// Not compressed.
 pub const COMPRESSION_NONE: u8 = 1;
+/// Gzip.
 pub const COMPRESSION_GZIP: u8 = 2;
+/// Mapbox Vector Tiles.
 pub const TILE_TYPE_MVT: u8 = 1;
+/// PNG images.
 pub const TILE_TYPE_PNG: u8 = 2;
+/// JPEG images.
 pub const TILE_TYPE_JPEG: u8 = 3;
+/// WebP images.
 pub const TILE_TYPE_WEBP: u8 = 4;
 
+/// Parse the header from the first bytes of an archive.
 pub fn parse_header(b: &[u8]) -> Result<Header> {
     if b.len() < HEADER_LEN || &b[0..7] != b"PMTiles" {
         bail!("not a PMTiles archive");
@@ -61,9 +83,13 @@ pub fn parse_header(b: &[u8]) -> Result<Header> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A directory entry: a run of tiles, or a pointer to a leaf directory (`run_length` 0).
 pub struct Entry {
+    /// The first tile's id (Hilbert order across zooms).
     pub tile_id: u64,
+    /// Offset in the tile data (or the leaf directories).
     pub offset: u64,
+    /// Length in bytes.
     pub length: u32,
     /// 0 means this entry points at a leaf directory.
     pub run_length: u32,

@@ -16,13 +16,18 @@ use crate::mvt::{GeomType, Value};
 /// An RGBA color, channels 0..1.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgba {
+    /// Red.
     pub r: f64,
+    /// Green.
     pub g: f64,
+    /// Blue.
     pub b: f64,
+    /// Alpha (opacity).
     pub a: f64,
 }
 
 impl Rgba {
+    /// An opaque color from 8-bit channels.
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self { r: r as f64 / 255.0, g: g as f64 / 255.0, b: b as f64 / 255.0, a: 1.0 }
     }
@@ -129,11 +134,17 @@ pub fn parse_color(s: &str) -> Option<Rgba> {
 /// A value an expression produces.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Val {
+    /// No value (a missing property, say).
     Null,
+    /// true or false.
     Bool(bool),
+    /// A number.
     Num(f64),
+    /// Text.
     Str(String),
+    /// A color.
     Color(Rgba),
+    /// A list.
     Array(Vec<Val>),
 }
 
@@ -157,6 +168,7 @@ impl Val {
         }
     }
 
+    /// The number, if it is one.
     pub fn as_num(&self) -> Option<f64> {
         match self {
             Val::Num(n) => Some(*n),
@@ -164,6 +176,7 @@ impl Val {
         }
     }
 
+    /// Whether it is `true`.
     pub fn as_bool(&self) -> bool {
         matches!(self, Val::Bool(true))
     }
@@ -200,9 +213,13 @@ impl Val {
 /// What an expression is evaluated against: one feature at one zoom, with its feature state
 /// (see [`crate::Map::set_feature_state`]).
 pub struct Ctx<'a> {
+    /// The zoom level.
     pub zoom: f64,
+    /// The feature's geometry type.
     pub geom: GeomType,
+    /// The feature's properties.
     pub props: &'a [(String, Value)],
+    /// The feature's state (empty when none is set).
     pub state: &'a [(String, Val)],
 }
 
@@ -213,69 +230,139 @@ impl Ctx<'_> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+/// A comparison operator.
 pub enum Cmp {
+    /// `==`
     Eq,
+    /// `!=`
     Ne,
+    /// `<`
     Lt,
+    /// `<=`
     Le,
+    /// `>`
     Gt,
+    /// `>=`
     Ge,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+/// An arithmetic operator.
 pub enum Math {
+    /// `+` (sum of all)
     Add,
+    /// `-` (negation with one argument)
     Sub,
+    /// `*`
     Mul,
+    /// `/`
     Div,
+    /// `%`
     Rem,
+    /// `min`
     Min,
+    /// `max`
     Max,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+/// The type `string`, `number` and `boolean` assert.
 pub enum Assert {
+    /// `string`
     Str,
+    /// `number`
     Num,
+    /// `boolean`
     Bool,
 }
 
-/// A compiled expression.
+/// A compiled expression. Make one with [`Expr::parse`] (or [`Expr::parse_text`] for
+/// `text-field`); each variant is the expression of the same name in the MapLibre spec.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
+    /// A constant (`["literal", ...]` or a plain value).
     Lit(Val),
+    /// `["get", key]`: a property.
     Get(String),
+    /// `["has", key]`: whether the property exists.
     Has(String),
+    /// `["zoom"]`.
     Zoom,
+    /// `["geometry-type"]`: `Point`, `LineString` or `Polygon`.
     GeomType,
+    /// A comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`).
     Cmp(Cmp, Box<Expr>, Box<Expr>),
+    /// `["all", ...]`: every condition holds.
     All(Vec<Expr>),
+    /// `["any", ...]`: some condition holds.
     Any(Vec<Expr>),
+    /// `["!", x]` (or legacy `none`).
     Not(Box<Expr>),
     /// Needle in a list of values (legacy `in`, or modern `in` with a literal list).
     InList(Box<Expr>, Vec<Val>),
     /// Modern `in` with a computed haystack (string or array).
     In(Box<Expr>, Box<Expr>),
-    Match { input: Box<Expr>, arms: Vec<(Vec<Val>, Expr)>, default: Box<Expr> },
-    Case { arms: Vec<(Expr, Expr)>, default: Box<Expr> },
+    /// `["match", input, labels, output, ..., default]`.
+    Match {
+        /// The value matched.
+        input: Box<Expr>,
+        /// Labels (one or a list) and the output for them.
+        arms: Vec<(Vec<Val>, Expr)>,
+        /// The output when no label matches.
+        default: Box<Expr>,
+    },
+    /// `["case", condition, output, ..., default]`.
+    Case {
+        /// Conditions and their outputs, tried in order.
+        arms: Vec<(Expr, Expr)>,
+        /// The output when no condition holds.
+        default: Box<Expr>,
+    },
+    /// `["coalesce", ...]`: the first value that isn't null.
     Coalesce(Vec<Expr>),
-    /// `base` 1 is linear.
-    Interpolate { base: f64, input: Box<Expr>, stops: Vec<(f64, Expr)> },
-    Step { input: Box<Expr>, default: Box<Expr>, stops: Vec<(f64, Expr)> },
+    /// `["interpolate", curve, input, stop, output, ...]` (numbers and colors).
+    Interpolate {
+        /// Exponential base; 1 is linear.
+        base: f64,
+        /// The value interpolated over (usually `["zoom"]`).
+        input: Box<Expr>,
+        /// Stop inputs and their outputs, ascending.
+        stops: Vec<(f64, Expr)>,
+    },
+    /// `["step", input, default, stop, output, ...]`.
+    Step {
+        /// The value stepped over.
+        input: Box<Expr>,
+        /// The output below the first stop.
+        default: Box<Expr>,
+        /// Stop inputs and the outputs from them on, ascending.
+        stops: Vec<(f64, Expr)>,
+    },
+    /// Arithmetic (`+`, `-`, `*`, `/`, `%`, `min`, `max`).
     Math(Math, Vec<Expr>),
+    /// `["concat", ...]` (and `format`, as plain text).
     Concat(Vec<Expr>),
+    /// `["upcase", x]`.
     Upcase(Box<Expr>),
+    /// `["downcase", x]`.
     Downcase(Box<Expr>),
+    /// `["to-string", x]`.
     ToStr(Box<Expr>),
+    /// `["to-number", x, fallback...]`.
     ToNum(Vec<Expr>),
+    /// `["to-boolean", x]`.
     ToBool(Box<Expr>),
+    /// `["to-color", x, fallback...]`.
     ToColor(Vec<Expr>),
+    /// `["length", x]`: characters of a string or items of an array.
     Length(Box<Expr>),
+    /// `["typeof", x]`.
     TypeOf(Box<Expr>),
     /// `["index-of", keyword, input, from?]`: character position, or -1.
     IndexOf(Vec<Expr>),
     /// `["slice", input, start, end?]`: characters (or array items) from start to end.
     Slice(Vec<Expr>),
+    /// `["string", ...]`, `["number", ...]`, `["boolean", ...]`: the first value of that type.
     Assert(Assert, Vec<Expr>),
     /// `["feature-state", key]`: a value the app set on the feature.
     FeatureState(String),
@@ -283,9 +370,12 @@ pub enum Expr {
     Template(Vec<Part>),
 }
 
+/// A piece of a legacy text template.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Part {
+    /// Literal text.
     Text(String),
+    /// A property's value (`{name}`).
     Prop(String),
 }
 
@@ -589,6 +679,7 @@ impl Expr {
         }
     }
 
+    /// Evaluate for one feature at one zoom.
     pub fn eval(&self, c: &Ctx) -> Val {
         match self {
             Expr::Lit(v) => v.clone(),

@@ -21,19 +21,25 @@ pub fn to_world(lon: f64, lat: f64) -> (f64, f64) {
     ((lon + 180.0) / 360.0, (1.0 - (lat.tan() + 1.0 / lat.cos()).ln() / std::f64::consts::PI) / 2.0)
 }
 
+/// Web Mercator world coordinates (0..1) to lon/lat.
 pub fn to_lonlat(x: f64, y: f64) -> (f64, f64) {
     let n = std::f64::consts::PI * (1.0 - 2.0 * y);
     (x * 360.0 - 180.0, n.sinh().atan().to_degrees())
 }
 
 #[derive(Clone, Copy, Debug)]
+/// Where the map looks: a center and a zoom (MapLibre's zoom levels).
 pub struct Camera {
+    /// Longitude of the center.
     pub lon: f64,
+    /// Latitude of the center.
     pub lat: f64,
+    /// Zoom level (0 shows the world).
     pub zoom: f64,
 }
 
 impl Camera {
+    /// A camera at (lon, lat), zoom `zoom`.
     pub fn new(lon: f64, lat: f64, zoom: f64) -> Self {
         Self { lon, lat, zoom }
     }
@@ -52,6 +58,7 @@ impl Camera {
         self.pan_cells(dx / 2.0, dy / 4.0);
     }
 
+    /// Zoom by `dz` levels, at most to `max`.
     pub fn zoom_by(&mut self, dz: f64, max: f64) {
         self.zoom = (self.zoom + dz).clamp(0.0, max);
     }
@@ -101,6 +108,7 @@ impl Camera {
 /// Camera + screen area -> dot transform.
 #[derive(Clone, Copy, Debug)]
 pub struct Viewport {
+    /// The map's area on screen.
     pub area: Rect,
     cx: f64,
     cy: f64,
@@ -110,15 +118,18 @@ pub struct Viewport {
 }
 
 impl Viewport {
+    /// The viewport of `cam` drawn in `area`.
     pub fn new(cam: &Camera, area: Rect) -> Self {
         let (cx, cy) = to_world(cam.lon, cam.lat);
         Self { area, cx, cy, scale: TILE_DOTS * 2f64.powf(cam.zoom), w: area.width as f64 * 2.0, h: area.height as f64 * 4.0 }
     }
 
+    /// World coordinates to braille dots relative to the area.
     pub fn dot(&self, wx: f64, wy: f64) -> (f64, f64) {
         ((wx - self.cx) * self.scale + self.w / 2.0, (wy - self.cy) * self.scale + self.h / 2.0)
     }
 
+    /// Lon/lat to braille dots relative to the area.
     pub fn dot_ll(&self, lon: f64, lat: f64) -> (f64, f64) {
         let (x, y) = to_world(lon, lat);
         self.dot(x, y)
@@ -163,9 +174,27 @@ impl Viewport {
 #[derive(Clone, Debug)]
 pub enum Overlay {
     /// A polyline in (lon, lat).
-    Line { pts: Vec<(f64, f64)>, color: Color },
+    Line {
+        /// The points, (lon, lat).
+        pts: Vec<(f64, f64)>,
+        /// Its color.
+        color: Color,
+    },
     /// A glyph at (lon, lat) with an optional label to its right.
-    Marker { lon: f64, lat: f64, glyph: String, style: TStyle, label: Option<(String, TStyle)>, priority: i32 },
+    Marker {
+        /// Longitude.
+        lon: f64,
+        /// Latitude.
+        lat: f64,
+        /// The character(s) drawn.
+        glyph: String,
+        /// The glyph's style.
+        style: TStyle,
+        /// Text to its right, and its style.
+        label: Option<(String, TStyle)>,
+        /// Higher wins when markers and labels collide.
+        priority: i32,
+    },
 }
 
 pub(crate) struct Canvas {

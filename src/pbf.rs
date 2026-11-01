@@ -2,20 +2,24 @@
 
 use anyhow::{Result, bail};
 
+/// A protobuf wire-format reader over a byte slice (just what MVT decoding needs).
 pub struct Reader<'a> {
     b: &'a [u8],
     i: usize,
 }
 
 impl<'a> Reader<'a> {
+    /// Read from the start of `b`.
     pub fn new(b: &'a [u8]) -> Self {
         Self { b, i: 0 }
     }
 
+    /// Whether everything has been read.
     pub fn done(&self) -> bool {
         self.i >= self.b.len()
     }
 
+    /// A base-128 varint.
     pub fn varint(&mut self) -> Result<u64> {
         let mut v = 0u64;
         let mut shift = 0u32;
@@ -47,19 +51,23 @@ impl<'a> Reader<'a> {
         Ok(s)
     }
 
+    /// A length-delimited field's bytes.
     pub fn bytes(&mut self) -> Result<&'a [u8]> {
         let n = self.varint()?;
         self.take(usize::try_from(n)?)
     }
 
+    /// A fixed 32-bit field.
     pub fn fixed32(&mut self) -> Result<[u8; 4]> {
         Ok(self.take(4)?.try_into()?)
     }
 
+    /// A fixed 64-bit field.
     pub fn fixed64(&mut self) -> Result<[u8; 8]> {
         Ok(self.take(8)?.try_into()?)
     }
 
+    /// Skip a field of wire type `wire`.
     pub fn skip(&mut self, wire: u8) -> Result<()> {
         match wire {
             0 => {
@@ -80,6 +88,7 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// A packed repeated `uint32` field.
 pub fn packed_u32(b: &[u8]) -> Result<Vec<u32>> {
     let mut r = Reader::new(b);
     let mut out = Vec::with_capacity(b.len() / 2);
@@ -89,10 +98,12 @@ pub fn packed_u32(b: &[u8]) -> Result<Vec<u32>> {
     Ok(out)
 }
 
+/// Decode a zigzag-encoded `sint32`.
 pub fn zigzag32(v: u32) -> i32 {
     ((v >> 1) as i32) ^ -((v & 1) as i32)
 }
 
+/// Decode a zigzag-encoded `sint64`.
 pub fn zigzag64(v: u64) -> i64 {
     ((v >> 1) as i64) ^ -((v & 1) as i64)
 }

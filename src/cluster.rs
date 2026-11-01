@@ -30,11 +30,14 @@ impl Default for ClusterOptions {
 /// Features and their index at one zoom level.
 #[derive(Clone, Debug)]
 pub struct Level {
+    /// The features to draw at this zoom.
     pub features: Vec<Feature>,
+    /// Their spatial index.
     pub index: Index,
 }
 
 impl Level {
+    /// Index `features`.
     pub fn new(features: Vec<Feature>) -> Self {
         let boxes: Vec<BBox> = features.iter().map(|f| f.bbox).collect();
         Self { index: Index::new(&boxes), features }
@@ -44,6 +47,7 @@ impl Level {
 /// The clustered levels of a source, zoom 0 to `max_zoom`.
 #[derive(Clone, Debug)]
 pub struct Clusters {
+    /// The settings the clusters were built with.
     pub options: ClusterOptions,
     levels: Vec<Level>,
     /// The zoom each cluster was formed at, by cluster id.

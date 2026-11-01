@@ -7,9 +7,13 @@ use anyhow::Result;
 use crate::pbf::{Reader, packed_u32, zigzag32, zigzag64};
 
 #[derive(Clone, Debug, PartialEq)]
+/// A feature property value.
 pub enum Value {
+    /// Text.
     Str(String),
+    /// A number (every MVT numeric type, as f64).
     Num(f64),
+    /// true or false.
     Bool(bool),
 }
 
@@ -25,6 +29,7 @@ impl std::fmt::Display for Value {
 }
 
 impl Value {
+    /// The text, if it is text.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::Str(s) => Some(s),
@@ -32,6 +37,7 @@ impl Value {
         }
     }
 
+    /// The number, if it is a number.
     pub fn as_f64(&self) -> Option<f64> {
         match self {
             Value::Num(n) => Some(*n),
@@ -41,45 +47,62 @@ impl Value {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A feature's geometry type.
 pub enum GeomType {
+    /// Not given.
     Unknown,
+    /// Points.
     Point,
+    /// Lines.
     Line,
+    /// Polygons (rings).
     Polygon,
 }
 
 #[derive(Clone, Debug)]
+/// A decoded feature.
 pub struct Feature {
     /// The feature's id, when the tile gives one.
     pub id: Option<u64>,
+    /// Points, lines or polygons.
     pub geom_type: GeomType,
+    /// Its properties.
     pub props: HashMap<String, Value>,
     /// Parts (points, lines or rings) in tile coordinates, 0..extent.
     pub geometry: Vec<Vec<[i32; 2]>>,
 }
 
 impl Feature {
+    /// A text property.
     pub fn str(&self, k: &str) -> Option<&str> {
         self.props.get(k).and_then(Value::as_str)
     }
 
+    /// A numeric property.
     pub fn num(&self, k: &str) -> Option<f64> {
         self.props.get(k).and_then(Value::as_f64)
     }
 }
 
 #[derive(Clone, Debug)]
+/// A layer of a tile (`water`, `transportation`, ...).
 pub struct Layer {
+    /// The layer's name.
     pub name: String,
+    /// Coordinates run from 0 to `extent` across the tile.
     pub extent: u32,
+    /// Its features.
     pub features: Vec<Feature>,
 }
 
 #[derive(Clone, Debug, Default)]
+/// A decoded vector tile.
 pub struct Tile {
+    /// Its layers.
     pub layers: Vec<Layer>,
 }
 
+/// Decode MVT bytes (already decompressed).
 pub fn decode(buf: &[u8]) -> Result<Tile> {
     let mut r = Reader::new(buf);
     let mut tile = Tile::default();

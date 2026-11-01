@@ -1,25 +1,72 @@
-//! mapterm: a map in your terminal. This is the library behind the `mapterm` viewer.
+//! mapterm: a map in your terminal, built like MapLibre GL. This is the library behind the
+//! `mapterm` viewer: a [`Map`] holds named sources and an ordered list of style layers, and
+//! draws as a [ratatui](https://ratatui.rs) widget with braille lines, cell-color fills and
+//! collision-free labels.
 //!
-//! - [`source::Source`] reads tiles from PMTiles (file or HTTP range requests), XYZ URLs or
+//! ```
+//! use mapterm::{Camera, Map, MapSource, StyleLayer};
+//! use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+//! use serde_json::json;
+//!
+//! let mut map = Map::new();
+//! map.add_source("sites", MapSource::geojson(&json!({
+//!     "type": "Feature", "properties": {"name": "Washington Monument"},
+//!     "geometry": {"type": "Point", "coordinates": [-77.0353, 38.8895]}
+//! }))?)?;
+//! map.add_layer(StyleLayer::symbol("sites", "sites").glyph("◆").text("{name}").color("cyan"))?;
+//!
+//! // Draw it 60x10 cells, centered on the monument at zoom 15.
+//! let area = Rect::new(0, 0, 60, 10);
+//! let mut buf = Buffer::empty(area);
+//! map.view(&Camera::new(-77.0353, 38.8895, 15.0)).render(area, &mut buf);
+//! let row: String = (0..60).map(|x| buf[(x, 5)].symbol().to_string()).collect();
+//! assert!(row.contains("◆ Washington Monument"));
+//! # Ok::<(), anyhow::Error>(())
+//! ```
+//!
+//! For a basemap, [`Map::from_style`] loads any MapLibre style (`"liberty"` and the other
+//! OpenFreeMap styles by name, a URL or a file), or [`Map::terminal`] draws a vector tile
+//! [`Source`] with mapterm's built-in terminal style. Tiles load with [`Map::load_tiles`], or
+//! in the background with [`Map::tile_requests`] and [`Map::insert_loaded`].
+//! `examples/hello_map.rs` is a complete pan-and-zoom app in about 60 lines.
+//!
+//! ## The map
+//!
+//! - [`map`]: [`Map`], its sources ([`MapSource`]: vector tiles, GeoJSON, raster), style and
+//!   custom layers, feature state, [`Map::query_rendered_features`] and
+//!   [`Map::query_features`] (every feature under a spot, drawn or not, as [`Pick`]s).
+//! - [`spec`]: [`StyleLayer`] and the style properties a terminal can show (a table in its docs).
+//! - [`expr`]: MapLibre expressions and legacy filters.
+//! - [`stylejson`]: MapLibre style documents and the built-in terminal styles.
+//! - [`layer`]: custom layers drawing through a [`DrawContext`]; [`Markers`] is one.
+//! - [`icons`]: style icons as one-cell symbols.
+//!
+//! ## Interaction
+//!
+//! - [`interact`]: [`Controller`], MapLibre-style mouse and keyboard handling (wheel zoom,
+//!   drag with inertia, double-click and box zoom, eased keys, `fly_to`, `fit_bounds`).
+//! - [`events`]: layer click, enter and leave events, and hover highlights with feature state.
+//! - [`geocode`]: place search with Photon or Nominatim.
+//!
+//! ## Data
+//!
+//! - [`source`]: vector tiles from PMTiles (file or HTTP range requests), XYZ URLs or
 //!   TileJSON, with timeouts, size caps and a disk cache.
-//! - [`stylejson`] loads MapLibre style documents and has built-in terminal styles for the
-//!   OpenMapTiles and Protomaps schemas.
-//! - [`map::Map`] a map, MapLibre GL style: named sources (vector tiles, GeoJSON) drawn by an
-//!   ordered list of [`spec::StyleLayer`]s whose paint and filters are [`expr`] expressions,
-//!   plus [`CustomLayer`]s for anything else. [`Map::view`] draws it and
-//!   [`Map::query_rendered_features`] says what's under a spot.
-//! - [`events`] layer events (click, enter, leave) and hover highlights with feature state.
-//! - [`layer`] custom layers: draw anything through a [`DrawContext`]; [`Markers`] is one.
-//! - [`interact::Controller`] MapLibre-style interaction: wheel zoom, drag with inertia,
-//!   double-click and box zoom, eased keyboard moves, and click reporting for inspection.
-//! - [`Map::query_features`] finds every feature under a spot (drawn or not) with its
-//!   properties and measurements ([`Pick`]), for inspection and analysis.
-//! - [`raster`] PNG/JPEG/WebP XYZ, TMS or PMTiles sources for raster layers, drawn as images
-//!   with the [`kitty`] graphics protocol ([`Map::kitty_commands`]) or as cell colors.
-//! - [`geocode`] place search with Photon or Nominatim (OpenStreetMap geocoders).
-//! - [`geojson`] GeoJSON files or URLs, and ready-made overlay style layers for them.
-//! - [`export`] a drawn map as plain text, ANSI-colored text or HTML, for snapshots.
-//! - [`smooth`] opt-in pixel smooth vertical panning for the Ghostty smooth-scroll fork.
+//! - [`raster`]: image tile sources (XYZ, TMS, PMTiles, named providers) for raster layers,
+//!   drawn as [`kitty`] graphics ([`Map::kitty_commands`]) or as cell colors.
+//! - [`geojson`]: GeoJSON files or URLs, and ready-made overlay style layers for them.
+//! - [`formats`]: CSV, GPX, KML and FlatGeobuf ([`fgb`]) as GeoJSON.
+//! - [`index`] and [`cluster`]: the spatial index and point clustering behind GeoJSON sources.
+//!
+//! ## Output and the rest
+//!
+//! - [`export`]: a drawn map as plain text, ANSI-colored text or HTML.
+//! - [`smooth`]: opt-in pixel-smooth panning for the Ghostty smooth-scroll fork.
+//! - [`render`]: [`Camera`], [`Viewport`] and Web Mercator helpers.
+//! - Lower level: [`mvt`] (vector tile decoding), [`pbf`] (protobuf), [`pmtiles`] (the
+//!   archive format), [`store`] (decoded features), [`pick`] (hit testing and measurements).
+
+#![warn(missing_docs)]
 
 pub mod export;
 pub mod cluster;

@@ -11,6 +11,7 @@ const NODE_SIZE: usize = 16;
 pub type BBox = [f64; 4];
 
 #[derive(Clone, Debug, Default)]
+/// A packed Hilbert R-tree over item boxes. See the [module docs](self).
 pub struct Index {
     /// Level 0 holds the items' boxes in Hilbert order; each level above holds one box per
     /// group of `NODE_SIZE` boxes below it. The last level is the root.
@@ -54,10 +55,12 @@ impl Index {
         Self { levels, ids }
     }
 
+    /// How many items it holds.
     pub fn len(&self) -> usize {
         self.ids.len()
     }
 
+    /// Whether it holds no items.
     pub fn is_empty(&self) -> bool {
         self.ids.is_empty()
     }

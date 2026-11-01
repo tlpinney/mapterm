@@ -21,6 +21,7 @@ pub fn supported() -> bool {
     ["ghostty", "kitty", "wezterm", "herdr"].iter().any(|t| term_program.contains(t) || term.contains(t))
 }
 
+/// Standard base64 (RFC 4648), for image data and OSC 52.
 pub fn base64(bytes: &[u8]) -> String {
     const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);

@@ -3,11 +3,15 @@
 //! [Nominatim](https://nominatim.org). Both public servers ask for light use: search when the
 //! user asks (on Enter), not on every keystroke.
 //!
-//! ```ignore
+//! ```no_run
+//! # use mapterm::{Camera, geocode::Geocoder};
+//! # async fn demo(cam: Camera) -> anyhow::Result<()> {
 //! let geo = Geocoder::from_env()?;              // MAPTERM_GEOCODER, else Photon
 //! for p in geo.search("Lincoln Memorial", Some((cam.lon, cam.lat, cam.zoom)), 8).await? {
 //!     println!("{} ({}) {:.4},{:.4}", p.name, p.kind, p.lat, p.lon);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -22,31 +26,40 @@ pub struct Place {
     pub context: String,
     /// What it is: city, monument, restaurant, ...
     pub kind: String,
+    /// Longitude.
     pub lon: f64,
+    /// Latitude.
     pub lat: f64,
     /// Its extent (west, south, east, north), for areas like cities and parks.
     pub bounds: Option<(f64, f64, f64, f64)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which geocoding API a server speaks.
 pub enum Api {
+    /// Photon (komoot), GeoJSON results.
     Photon,
+    /// Nominatim, `jsonv2` results.
     Nominatim,
 }
 
 /// A geocoding server.
 #[derive(Clone, Debug)]
 pub struct Geocoder {
+    /// The API the server speaks.
     pub api: Api,
     /// The search endpoint, e.g. `https://photon.komoot.io/api/`.
     pub url: String,
     http: reqwest::Client,
 }
 
+/// The public Photon server.
 pub const PHOTON: &str = "https://photon.komoot.io/api/";
+/// The public Nominatim server (one request per second at most, by its usage policy).
 pub const NOMINATIM: &str = "https://nominatim.openstreetmap.org/search";
 
 impl Geocoder {
+    /// A geocoder at `url` speaking `api`.
     pub fn new(api: Api, url: impl Into<String>) -> Self {
         Self { api, url: url.into(), http: crate::source::http_client() }
     }

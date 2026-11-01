@@ -6,6 +6,7 @@ use anyhow::Result;
 
 use crate::mvt::{self, GeomType, Value};
 
+/// A tile address: (zoom, x, y).
 pub type TileId = (u8, u32, u32);
 
 /// Feature geometry in tile-relative coordinates 0..1.
@@ -13,12 +14,15 @@ pub type Parts = Arc<Vec<Vec<[f32; 2]>>>;
 
 /// Everything a tile says about one feature, kept for inspection: drawn or not.
 pub struct Feature {
+    /// The source-layer it came from.
     pub layer: Arc<str>,
     /// The tile's id for the feature, if any.
     pub id: Option<Value>,
+    /// Points, lines or polygons.
     pub geom: GeomType,
     /// Properties, with the identifying ones (name, class, kind, ...) first.
     pub props: Vec<(String, Value)>,
+    /// Parts in tile-relative coordinates 0..1.
     pub parts: Parts,
     /// Unused; kept for compatibility (see [`crate::Map::query_features`]).
     pub drawn: bool,
