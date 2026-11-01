@@ -325,7 +325,7 @@ impl Canvas {
             }
             xs.sort_by(|a, b| a.total_cmp(b));
             let cy = row / 4;
-            for pair in xs.chunks_exact(2) {
+            for pair in xs.as_chunks::<2>().0 {
                 let a = (pair[0] - 0.5).ceil().max(0.0);
                 let b = (pair[1] - 0.5).ceil().min(wd);
                 let (mut x, b) = (a as usize, b.max(0.0) as usize);

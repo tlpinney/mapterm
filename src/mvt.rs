@@ -182,7 +182,7 @@ fn feature(b: &[u8], keys: &[String], values: &[Value]) -> Result<Feature> {
         }
     }
     let mut props = HashMap::new();
-    for pair in tags.chunks_exact(2) {
+    for pair in tags.as_chunks::<2>().0 {
         if let (Some(k), Some(v)) = (keys.get(pair[0] as usize), values.get(pair[1] as usize)) {
             props.insert(k.clone(), v.clone());
         }

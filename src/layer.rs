@@ -319,3 +319,79 @@ impl CustomLayer for Markers {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::Camera;
+
+    /// Draw with `f` into a 30x5 map at zoom 0 and return the rows as text.
+    fn draw(f: impl FnOnce(&mut DrawContext)) -> Vec<String> {
+        let area = Rect::new(0, 0, 30, 5);
+        let mut buf = Buffer::empty(area);
+        render_with(&Camera::new(0.0, 0.0, 0.0), area, &mut buf, f);
+        (0..5).map(|y| (0..30).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect()
+    }
+
+    #[test]
+    fn higher_priority_wins_whatever_its_kind() {
+        let st = TStyle::new();
+        // A label outranks a marker at the same spot, and the other way round.
+        let rows = draw(|c| {
+            c.marker_dot((20.0, 8.0), "M", st, 1, None);
+            c.label_dot((20.0, 8.0), "LABEL", st, 5);
+        });
+        assert!(rows[2].contains("LABEL") && !rows[2].contains('M'), "{rows:?}");
+        let rows = draw(|c| {
+            c.marker_dot((20.0, 8.0), "M", st, 5, None);
+            c.label_dot((20.0, 8.0), "LABEL", st, 1);
+        });
+        assert!(rows[2].contains('M') && !rows[2].contains("LABEL"), "{rows:?}");
+    }
+
+    #[test]
+    fn a_marker_shows_with_its_label_or_not_at_all() {
+        let st = TStyle::new();
+        let rows = draw(|c| {
+            c.label_dot((30.0, 8.0), "BLOCK", st, 9);
+            // Its label would land on BLOCK: neither the glyph nor the label shows.
+            c.marker_dot((10.0, 8.0), "◆", st, 1, Some(("name here".into(), st)));
+            // Room for both on another row.
+            c.marker_dot((10.0, 16.0), "◆", st, 1, Some(("ok".into(), st)));
+        });
+        assert!(!rows[2].contains('◆') && rows[2].contains("BLOCK"), "{rows:?}");
+        assert!(rows[4].contains("◆ ok"), "{rows:?}");
+    }
+
+    #[test]
+    fn labels_at_the_edge_are_cut_short() {
+        let st = TStyle::new();
+        let rows = draw(|c| c.marker_dot((48.0, 8.0), "◆", st, 1, Some(("a long name".into(), st))));
+        assert!(rows[2].trim_end().ends_with("◆ a l…"), "{rows:?}");
+        // No room for even a few characters: the glyph alone.
+        let rows = draw(|c| c.marker_dot((56.0, 8.0), "◆", st, 1, Some(("a long name".into(), st))));
+        assert!(rows[2].trim_end().ends_with('◆'), "{rows:?}");
+    }
+
+    #[test]
+    fn same_text_keeps_its_distance() {
+        let st = TStyle::new();
+        let rows = draw(|c| {
+            c.label_dot((10.0, 2.0), "Main", st, 1);
+            c.label_dot((14.0, 18.0), "Main", st, 1); // 16 dots away: too close
+            c.label_dot((54.0, 2.0), "Main", st, 1); // 44 dots away: far enough
+        });
+        assert_eq!(rows.join("\n").matches("Main").count(), 2, "{rows:?}");
+        let rows = draw(|c| {
+            c.label_spaced(vec![(10.0, 2.0)], "Road", st, 1, 60.0);
+            c.label_spaced(vec![(54.0, 2.0)], "Road", st, 1, 60.0);
+        });
+        assert_eq!(rows.join("\n").matches("Road").count(), 1, "a wider repeat distance: {rows:?}");
+        // Candidates are tried in order.
+        let rows = draw(|c| {
+            c.label_dot((20.0, 8.0), "Taken", st, 9);
+            c.label_dots(vec![(20.0, 8.0), (20.0, 16.0)], "Moved", st, 1);
+        });
+        assert!(rows[4].contains("Moved"), "{rows:?}");
+    }
+}

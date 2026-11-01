@@ -201,7 +201,7 @@ pub fn to_geojson(bytes: &[u8]) -> Result<Json> {
 
 /// Pairs from flat x,y doubles.
 fn pairs(xy: &[f64]) -> Vec<Json> {
-    xy.chunks_exact(2).map(|p| json!([p[0], p[1]])).collect()
+    xy.as_chunks::<2>().0.iter().map(|p| json!([p[0], p[1]])).collect()
 }
 
 /// Split points by `ends` (point counts where each part ends); one part when empty.

@@ -116,6 +116,9 @@ enum Backend {
     Http(String),
 }
 
+/// Leaf directories already read, by (offset, length).
+type LeafCache = HashMap<(u64, u64), Arc<Vec<Entry>>>;
+
 /// A PMTiles v3 archive, local or remote (HTTP range requests), with cached leaf directories.
 pub struct PmArchive {
     backend: Backend,
@@ -124,7 +127,7 @@ pub struct PmArchive {
     /// The archive's credit from its metadata (`attribution`), as given (often HTML).
     pub attribution: Option<String>,
     root: Vec<Entry>,
-    leaves: Mutex<HashMap<(u64, u64), Arc<Vec<Entry>>>>,
+    leaves: Mutex<LeafCache>,
 }
 
 impl PmArchive {

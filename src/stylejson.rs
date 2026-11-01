@@ -392,3 +392,80 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
     }
     json!({"version": 8, "name": format!("mapterm {}", if dark { "dark" } else { "light" }), "sources": {}, "layers": layers})
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{cluster::ClusterOptions, map::MapSource};
+    use serde_json::json;
+
+    #[test]
+    fn names_resolve_to_openfreemap() {
+        assert_eq!(style_location("liberty"), "https://tiles.openfreemap.org/styles/liberty");
+        assert_eq!(style_location("./mine.json"), "./mine.json");
+        assert_eq!(style_location("https://x/style.json"), "https://x/style.json");
+    }
+
+    #[tokio::test]
+    async fn a_style_with_inline_sources() {
+        let doc = json!({
+            "version": 8,
+            "center": [-77.03, 38.89], "zoom": 11,
+            "sources": {
+                "sites": {"type": "geojson", "promoteId": "code", "cluster": true, "clusterRadius": 80, "clusterMaxZoom": 12,
+                          "attribution": "<b>Site Data</b>",
+                          "data": {"type": "Feature", "properties": {"code": "A1"}, "geometry": {"type": "Point", "coordinates": [-77.03, 38.89]}}},
+                "imagery": {"type": "raster", "tiles": ["https://tiles.example/{z}/{x}/{y}.png"], "tileSize": 256, "maxzoom": 17,
+                            "attribution": "Example Imagery"},
+                "relief": {"type": "raster-dem", "url": "https://dem.example/tiles.json"}
+            },
+            "layers": [
+                {"id": "bg", "type": "background", "paint": {"background-color": "#000"}},
+                {"id": "img", "type": "raster", "source": "imagery"},
+                {"id": "dots", "type": "circle", "source": "sites", "paint": {"circle-color": "#f00", "circle-blur": 1}},
+                {"id": "odd", "type": "fill", "source": "sites", "filter": ["within", {}]},
+                {"id": "hills", "type": "hillshade", "source": "relief"}
+            ]
+        });
+        let map = Map::from_style_json(&doc).await.unwrap();
+        assert_eq!(map.center, Some((-77.03, 38.89, 11.0)));
+        assert_eq!(map.layer_ids(), vec!["bg", "img", "dots", "odd", "hills"]);
+        // Sources: GeoJSON with its options, raster with its size and credit, raster-dem skipped.
+        let Some(MapSource::GeoJson(g)) = map.source("sites") else { panic!("sites") };
+        assert_eq!(g.promote_id.as_deref(), Some("code"));
+        assert_eq!(g.cluster_options(), Some(ClusterOptions { radius_px: 80.0, max_zoom: 12 }));
+        assert_eq!(g.attribution.as_deref(), Some("Site Data"), "HTML credit as text");
+        let Some(MapSource::Raster(r)) = map.source("imagery") else { panic!("imagery") };
+        assert_eq!((r.src.tile_px, r.src.max_zoom, r.src.attribution.as_str()), (256, 17, "Example Imagery"));
+        assert!(map.source("relief").is_none());
+        // What couldn't be used is reported, and the unusable filter hides its layer.
+        let w = map.warnings().join("\n");
+        assert!(w.contains("relief") && w.contains("raster-dem"), "{w}");
+        assert!(w.contains("odd") && w.contains("hidden"), "{w}");
+        assert!(!map.layer("odd").unwrap().visible);
+        assert_eq!(map.attributions(11.0), vec!["Example Imagery", "Site Data"]);
+    }
+
+    #[tokio::test]
+    async fn bad_styles_fail_clearly() {
+        let no_layers = Map::from_style_json(&json!({"version": 8, "sources": {}})).await;
+        assert!(no_layers.err().expect("an error").to_string().contains("layers"));
+        let no_url = Map::from_style_json(&json!({"version": 8, "sources": {"v": {"type": "vector"}}, "layers": []})).await;
+        assert!(format!("{:#}", no_url.err().expect("an error")).contains("url"));
+        let mapbox = Map::from_style_json(&json!({"version": 8, "sources": {"v": {"type": "vector", "url": "mapbox://mapbox.streets"}}, "layers": []})).await;
+        assert!(format!("{:#}", mapbox.err().expect("an error")).contains("mapbox://"));
+        let missing = read_style("/nonexistent/style.json").await;
+        assert!(missing.is_err());
+    }
+
+    #[tokio::test]
+    async fn read_style_from_a_file() {
+        let path = std::env::temp_dir().join(format!("mapterm-style-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"version": 8, "sources": {}, "layers": [{"id": "bg", "type": "background"}]}"#).unwrap();
+        let map = Map::from_style(path.to_str().unwrap()).await.unwrap();
+        assert_eq!(map.layer_ids(), vec!["bg"]);
+        std::fs::write(&path, "not json").unwrap();
+        assert!(Map::from_style(path.to_str().unwrap()).await.is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+}

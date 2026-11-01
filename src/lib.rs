@@ -1,6 +1,6 @@
-//! mapterm: a map in your terminal, built like MapLibre GL. This is the library behind the
-//! `mapterm` viewer: a [`Map`] holds named sources and an ordered list of style layers, and
-//! draws as a [ratatui](https://ratatui.rs) widget with braille lines, cell-color fills and
+//! mapterm: a map in your terminal. This is the library behind the `mapterm` viewer: a
+//! [`Map`] holds named sources and an ordered list of style layers, and draws as a
+//! [ratatui](https://ratatui.rs) widget with braille lines, cell-color fills and
 //! collision-free labels.
 //!
 //! ```
