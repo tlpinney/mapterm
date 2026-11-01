@@ -1,0 +1,63 @@
+[package]
+name = "mapterm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mapterm = { path = ".." }
+ratatui = "0.30.2"
+serde_json = "1"
+
+# Kept out of the main crate's workspace: build with `cargo +nightly fuzz`.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "mvt"
+path = "fuzz_targets/mvt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pmtiles"
+path = "fuzz_targets/pmtiles.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fgb"
+path = "fuzz_targets/fgb.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "formats"
+path = "fuzz_targets/formats.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raster"
+path = "fuzz_targets/raster.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "style"
+path = "fuzz_targets/style.rs"
+test = false
+doc = false
+bench = false

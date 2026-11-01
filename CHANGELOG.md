@@ -21,6 +21,9 @@ All notable changes to mapterm are listed here. The format follows
   itself out of `ps` and shell history.
 - A style loaded from a URL can only use web sources: a `pmtiles:///path`, file path or
   local GeoJSON in it is an error, so a remote style can't make mapterm read local files.
+- A FlatGeobuf file with part ends out of order no longer crashes mapterm, and huge
+  feature counts or offsets in FlatGeobuf and PMTiles no longer overflow (found by the new
+  fuzz targets in `fuzz/`).
 
 ### Releases
 

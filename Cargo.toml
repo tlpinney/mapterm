@@ -16,7 +16,7 @@ categories = ["command-line-utilities", "science::geo", "visualization"]
 publish = false
 # Kept out of the package: CI and release tooling, and the integration tests with their
 # fixtures (they live in the repository).
-exclude = [".github/", "tests/", "deny.toml", "release/", "signing/"]
+exclude = [".github/", "tests/", "deny.toml", "release/", "signing/", "fuzz/"]
 
 [dependencies]
 anyhow = "1.0.104"

@@ -117,7 +117,7 @@ pub fn parse_directory(b: &[u8]) -> Result<Vec<Entry>> {
     }
     for i in 0..n {
         let v = r.varint()?;
-        e[i].offset = if v == 0 && i > 0 { e[i - 1].offset + e[i - 1].length as u64 } else { v.saturating_sub(1) };
+        e[i].offset = if v == 0 && i > 0 { e[i - 1].offset.saturating_add(e[i - 1].length as u64) } else { v.saturating_sub(1) };
     }
     Ok(e)
 }
@@ -126,7 +126,8 @@ pub fn parse_directory(b: &[u8]) -> Result<Vec<Entry>> {
 pub fn find(entries: &[Entry], id: u64) -> Option<Entry> {
     let i = entries.partition_point(|e| e.tile_id <= id).checked_sub(1)?;
     let e = entries[i];
-    if e.run_length == 0 || id < e.tile_id + e.run_length as u64 { Some(e) } else { None }
+    // partition_point leaves id >= e.tile_id; subtracting can't overflow where adding could.
+    if e.run_length == 0 || id - e.tile_id < e.run_length as u64 { Some(e) } else { None }
 }
 
 /// Hilbert-curve tile id: all tiles of lower zooms come first.
@@ -165,6 +166,14 @@ mod tests {
         assert_eq!(tile_id(1, 1, 0), 4);
         assert_eq!(tile_id(2, 0, 0), 5);
         assert_eq!(tile_id(20, 0, 0), 366503875925);
+    }
+
+    #[test]
+    fn runs_at_the_end_of_the_id_space() {
+        // A run ending past u64::MAX (found by fuzzing: the end overflowed).
+        let e = [Entry { tile_id: u64::MAX - 1, offset: 0, length: 1, run_length: 5 }];
+        assert!(find(&e, u64::MAX).is_some());
+        assert!(find(&e, 3).is_none());
     }
 
     #[test]

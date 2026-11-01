@@ -21,14 +21,19 @@ struct Table<'a> {
     pos: usize,
 }
 
+/// `N` bytes at `p`; offsets come from the file, so `p` may be anything.
+fn bytes_at<const N: usize>(b: &[u8], p: usize) -> Result<[u8; N]> {
+    let end = p.checked_add(N).ok_or_else(|| anyhow!("FlatGeobuf: bad offset"))?;
+    Ok(b.get(p..end).ok_or_else(|| anyhow!("FlatGeobuf: truncated"))?.try_into()?)
+}
 fn u16_at(b: &[u8], p: usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(b.get(p..p + 2).ok_or_else(|| anyhow!("FlatGeobuf: truncated"))?.try_into()?))
+    Ok(u16::from_le_bytes(bytes_at(b, p)?))
 }
 fn u32_at(b: &[u8], p: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(b.get(p..p + 4).ok_or_else(|| anyhow!("FlatGeobuf: truncated"))?.try_into()?))
+    Ok(u32::from_le_bytes(bytes_at(b, p)?))
 }
 fn u64_at(b: &[u8], p: usize) -> Result<u64> {
-    Ok(u64::from_le_bytes(b.get(p..p + 8).ok_or_else(|| anyhow!("FlatGeobuf: truncated"))?.try_into()?))
+    Ok(u64::from_le_bytes(bytes_at(b, p)?))
 }
 fn f64_at(b: &[u8], p: usize) -> Result<f64> {
     Ok(f64::from_bits(u64_at(b, p)?))
@@ -43,7 +48,7 @@ impl<'a> Table<'a> {
     /// Where field `i` is stored, if present.
     fn field(&self, i: usize) -> Result<Option<usize>> {
         let soff = i32::from_le_bytes(self.buf.get(self.pos..self.pos + 4).ok_or_else(|| anyhow!("FlatGeobuf: truncated"))?.try_into()?);
-        let vt = (self.pos as i64 - soff as i64) as usize;
+        let vt = usize::try_from(self.pos as i64 - soff as i64).map_err(|_| anyhow!("FlatGeobuf: bad vtable offset"))?;
         let vt_len = u16_at(self.buf, vt)? as usize;
         if 4 + 2 * i + 2 > vt_len {
             return Ok(None);
@@ -146,12 +151,13 @@ fn index_size(items: u64, node_size: u16) -> u64 {
     let (mut n, mut nodes) = (items, items);
     loop {
         n = n.div_ceil(ns);
-        nodes += n;
+        // The feature count comes from the file: a huge one must not overflow.
+        nodes = nodes.saturating_add(n);
         if n == 1 {
             break;
         }
     }
-    nodes * 40
+    nodes.saturating_mul(40)
 }
 
 /// A whole FlatGeobuf file as a GeoJSON FeatureCollection.
@@ -175,9 +181,10 @@ pub fn to_geojson(bytes: &[u8]) -> Result<Json> {
             bail!("FlatGeobuf in EPSG:{code}; mapterm reads lon/lat (EPSG:4326) only");
         }
     }
-    let mut pos = 12 + hlen + index_size(count, node_size) as usize;
+    let index = usize::try_from(index_size(count, node_size)).unwrap_or(usize::MAX);
+    let mut pos = (12 + hlen).saturating_add(index);
     let mut features = Vec::new();
-    while pos + 4 <= bytes.len() {
+    while pos.saturating_add(4) <= bytes.len() {
         let len = u32_at(bytes, pos)? as usize;
         let fbuf = bytes.get(pos + 4..pos + 4 + len).ok_or_else(|| anyhow!("FlatGeobuf: truncated feature"))?;
         pos += 4 + len;
@@ -212,7 +219,9 @@ fn split(xy: &[f64], ends: &[u32]) -> Vec<Json> {
     let mut out = Vec::new();
     let mut start = 0usize;
     for &e in ends {
-        let e = (e as usize).min(xy.len() / 2);
+        // Ends come from the file: out of order or past the points, they give empty parts
+        // (found by fuzzing: a decreasing end panicked on the slice).
+        let e = (e as usize).clamp(start, xy.len() / 2);
         out.push(Json::Array(pairs(&xy[start * 2..e * 2])));
         start = e;
     }
@@ -301,6 +310,14 @@ mod tests {
         assert_eq!(index_size(10, 0), 0);
         // 179 items, 16 per node: 12 leaves' parents, then 1 root -> 179 + 12 + 1 nodes.
         assert_eq!(index_size(179, 16), (179 + 12 + 1) * 40);
+        // A file can claim any feature count (found by fuzzing: this overflowed).
+        assert_eq!(index_size(u64::MAX, 16), u64::MAX);
+    }
+
+    #[test]
+    fn ends_out_of_order() {
+        let xy = [0.0, 0.0, 1.0, 1.0, 2.0, 2.0];
+        assert_eq!(split(&xy, &[2, 1, 9]), vec![json!([[0.0, 0.0], [1.0, 1.0]]), json!([]), json!([[2.0, 2.0]])]);
     }
 
     #[test]
