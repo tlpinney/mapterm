@@ -94,6 +94,31 @@ impl DrawContext<'_> {
         }
     }
 
+    /// A polyline in dots, `width` dots thick (1 to 3), dashed when `dash` gives on and off
+    /// lengths in dots (the pattern runs on across the polyline's corners).
+    pub fn line_styled(&mut self, pts: &[(f64, f64)], color: Color, width: u8, dash: Option<&[f64]>) {
+        let offsets: &[f64] = match width {
+            0 | 1 => &[0.0],
+            2 => &[-0.5, 0.5],
+            _ => &[-1.0, 0.0, 1.0],
+        };
+        for &k in offsets {
+            let mut phase = 0.0;
+            for s in pts.windows(2) {
+                let (a, b) = (s[0], s[1]);
+                let len = (b.0 - a.0).hypot(b.1 - a.1);
+                // Shift sideways for thickness, along the segment's normal.
+                let (nx, ny) = if len > 0.0 { (-(b.1 - a.1) / len * k, (b.0 - a.0) / len * k) } else { (0.0, 0.0) };
+                let (a, b) = ((a.0 + nx, a.1 + ny), (b.0 + nx, b.1 + ny));
+                match dash {
+                    Some(d) => self.canvas.line_dashed(a, b, color, d, phase),
+                    None => self.canvas.line(a, b, color),
+                }
+                phase += len;
+            }
+        }
+    }
+
     /// A polyline in world coordinates.
     pub fn line(&mut self, pts: &[(f64, f64)], color: Color) {
         let d: Vec<(f64, f64)> = pts.iter().map(|&(x, y)| self.dot(x, y)).collect();

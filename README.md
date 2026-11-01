@@ -22,7 +22,9 @@ Without `--style`, mapterm draws the source with its own terminal style (OpenMap
 or Protomaps schema, detected from the tiles; `--light` or `t` for the light theme).
 MapLibre styles draw what a terminal can show: colors, fills, lines, labels (bold and
 italic fonts), filters and zoom ranges, and point icons as one-cell symbols (✚ hospital,
-✈ airport, ⋔ restaurant, ◡ café, Ⓑ bus stop, ...); line widths and 3D are skipped. The
+✈ airport, ⋔ restaurant, ◡ café, Ⓑ bus stop, ...). Wide lines draw two or three
+braille dots thick and dashed lines dotted; imagery opacity blends with the
+background in cell-color mode; blur, patterns and 3D are skipped. The
 built-in style shows points of interest from zoom 15, more as you zoom in.
 
 ## Controls

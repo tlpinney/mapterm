@@ -214,7 +214,8 @@ impl GeoJsonSource {
 #[derive(Clone, Debug)]
 enum Resolved {
     Fill { color: Option<Color>, outline: Option<Color> },
-    Line(Color),
+    /// `width` in dots (1 to 3); `dash` is on/off lengths in dots.
+    Line { color: Color, width: u8, dash: Option<Vec<f64>> },
     /// A glyph at each point, with an optional label beside it.
     Point { glyph: String, style: TStyle, label: Option<(String, TStyle)>, priority: i32 },
     /// `anchors` are tried in order (`text-variable-anchor`); `offset` is `text-offset` in
@@ -1195,7 +1196,27 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
             let outline = color("fill-outline-color", "fill-opacity", None);
             (fill.is_some() || outline.is_some()).then_some(Resolved::Fill { color: fill, outline })
         }
-        Kind::Line if c.geom != GeomType::Point => color("line-color", "line-opacity", Some(BLACK)).map(Resolved::Line),
+        Kind::Line if c.geom != GeomType::Point => {
+            let color = color("line-color", "line-opacity", Some(BLACK))?;
+            // Pixels to dots: a braille dot is about 4 px, so thin lines stay one dot and wide
+            // roads get two or three (no wider: braille can't show an outline around a fill).
+            let px = l.paint_expr("line-width").and_then(|e| e.eval(&cp).as_num()).unwrap_or(1.0);
+            if px <= 0.0 {
+                return None;
+            }
+            let width = if px < 6.0 { 1 } else if px < 14.0 { 2 } else { 3 };
+            // Dash lengths are in line widths; at least a dot each so the pattern shows. All
+            // gaps zero means a solid line.
+            let dash = match l.paint_expr("line-dasharray").map(|e| e.eval(&cp)) {
+                Some(crate::expr::Val::Array(a)) => {
+                    let v: Vec<f64> = a.iter().filter_map(|x| x.as_num()).map(|n| (n * px.max(1.0) / 4.0).max(1.0)).collect();
+                    let gaps = a.iter().skip(1).step_by(2).any(|x| x.as_num().is_some_and(|n| n > 0.0));
+                    (v.len() >= 2 && gaps).then_some(v)
+                }
+                _ => None,
+            };
+            Some(Resolved::Line { color, width, dash })
+        }
         Kind::Circle if c.geom == GeomType::Point => {
             let fg = color("circle-color", "circle-opacity", Some(BLACK))?;
             let glyph = layout_str("mapterm:glyph").unwrap_or_else(|| "●".into());
@@ -1267,9 +1288,9 @@ fn draw_resolved(ctx: &mut DrawContext, r: &Resolved, geom: GeomType, dots: &[Ve
                 }
             }
         }
-        Resolved::Line(c) => {
+        Resolved::Line { color, width, dash } => {
             for part in dots {
-                ctx.line_dots(part, *c);
+                ctx.line_styled(part, *color, *width, dash.as_deref());
             }
         }
         Resolved::Point { glyph, style, label, priority } => {
@@ -1434,6 +1455,23 @@ impl Widget for MapView<'_> {
                         }
                     }
                     Some(MapSource::Raster(r)) if map.raster_mode == RasterMode::Cells => {
+                        // raster-opacity: blended with the style's background (the terminal's
+                        // own background color isn't known); nearly transparent isn't drawn.
+                        let opacity = l
+                            .paint_expr("raster-opacity")
+                            .and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[] }).as_num())
+                            .unwrap_or(1.0)
+                            .clamp(0.0, 1.0);
+                        if opacity <= 0.05 {
+                            continue;
+                        }
+                        let blend = |c: Color| match (c, bg) {
+                            (Color::Rgb(r, g, b), Some(under)) if opacity < 0.999 => {
+                                let (r, g, b) = Rgba::rgb(r, g, b).over(under, opacity).to_u8();
+                                Color::Rgb(r, g, b)
+                            }
+                            (c, _) => c,
+                        };
                         let rz = map.raster_zoom(&r.src, cam);
                         for b in crate::raster::layout(&r.tiles, cam, area, rz) {
                             let (sx, sy, sw, sh) = b.src;
@@ -1442,7 +1480,7 @@ impl Widget for MapView<'_> {
                                 for col in 0..b.cells.width {
                                     let (x, y) = (sx + (col as f64 * cw) as u32, sy + (row as f64 * ch) as u32);
                                     let c = b.tile.average(x, y, cw.ceil() as u32, ch.ceil() as u32);
-                                    ctx.cell_bg(b.cells.x - area.x + col, b.cells.y - area.y + row, c);
+                                    ctx.cell_bg(b.cells.x - area.x + col, b.cells.y - area.y + row, blend(c));
                                 }
                             }
                         }
@@ -1867,5 +1905,58 @@ mod tests {
         map.set_layout("here", "text-offset", &json!([0, 2])).unwrap();
         let rows = text_rows(&render(&map, &Camera::new(0.0, 0.0, 5.0), area));
         assert!(rows[7].contains("Here"), "{rows:#?}");
+    }
+
+    /// How many braille dots a buffer shows.
+    fn dot_count(buf: &Buffer) -> u32 {
+        let a = buf.area;
+        let mut n = 0;
+        for y in a.y..a.bottom() {
+            for x in a.x..a.right() {
+                if let Some(ch) = buf[(x, y)].symbol().chars().next()
+                    && ('\u{2800}'..='\u{28FF}').contains(&ch)
+                {
+                    n += (ch as u32 - 0x2800).count_ones();
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn line_widths_and_dashes() {
+        let line_map = |layer: StyleLayer| {
+            let mut map = Map::new();
+            map.add_source("l", MapSource::geojson(&json!({"type": "LineString", "coordinates": [[-0.2, 0], [0.2, 0]]})).unwrap()).unwrap();
+            map.add_layer(layer).unwrap();
+            dot_count(&render(&map, &Camera::new(0.0, 0.0, 9.0), Rect::new(0, 0, 80, 10)))
+        };
+        let solid = line_map(StyleLayer::line("l", "l").color("#fff"));
+        assert!(solid > 100, "{solid}");
+        let dashed = line_map(StyleLayer::line("l", "l").color("#fff").paint("line-dasharray", json!([4, 4])));
+        assert!(dashed * 10 > solid * 4 && dashed * 10 < solid * 6, "about half the dots: {dashed} of {solid}");
+        let no_gaps = line_map(StyleLayer::line("l", "l").color("#fff").paint("line-dasharray", json!([12, 0])));
+        assert_eq!(no_gaps, solid, "no gaps is a solid line");
+        let thick = line_map(StyleLayer::line("l", "l").color("#fff").paint("line-width", 10));
+        assert!(thick >= solid * 2 - 4, "two dots thick: {thick} vs {solid}");
+        let thicker = line_map(StyleLayer::line("l", "l").color("#fff").paint("line-width", 40));
+        assert!(thicker >= solid * 3 - 6 && thicker <= solid * 3 + 6, "three at most: {thicker}");
+        assert_eq!(line_map(StyleLayer::line("l", "l").color("#fff").paint("line-width", 0)), 0, "zero width draws nothing");
+        // Widths don't make a layer re-evaluate as the zoom changes.
+        assert!(!StyleLayer::line("l", "l").paint("line-width", json!(["interpolate", ["linear"], ["zoom"], 5, 1, 15, 8])).uses_zoom());
+    }
+
+    #[test]
+    fn raster_opacity_blends_with_the_background() {
+        let mut map = raster_map();
+        map.add_layer_before(StyleLayer::background("bg").color("#000000"), "img").unwrap();
+        map.insert_loaded("img", (0, 0, 0), Ok(Loaded(LoadedTile::Raster(Some(solid_tile(200, 100, 0)))))).unwrap();
+        let cam = Camera::new(0.0, 0.0, 0.0);
+        let area = Rect::new(0, 0, 40, 20);
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(200, 100, 0));
+        map.set_paint("img", "raster-opacity", &json!(0.5)).unwrap();
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(100, 50, 0));
+        map.set_paint("img", "raster-opacity", &json!(0.0)).unwrap();
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(0, 0, 0), "invisible: the background shows");
     }
 }

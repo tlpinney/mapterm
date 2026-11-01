@@ -211,6 +211,30 @@ impl Canvas {
     }
 
     pub(crate) fn line(&mut self, a: (f64, f64), b: (f64, f64), c: Color) {
+        self.line_where(a, b, c, |_| true);
+    }
+
+    /// A dashed segment: `dash` alternates on and off lengths in dots, and `phase` is how far
+    /// into the pattern `a` is, so a dashed polyline continues its pattern across segments.
+    pub(crate) fn line_dashed(&mut self, a: (f64, f64), b: (f64, f64), c: Color, dash: &[f64], phase: f64) {
+        let period: f64 = dash.iter().sum();
+        if period <= 0.0 {
+            return self.line(a, b, c);
+        }
+        self.line_where(a, b, c, |d| {
+            let mut t = (phase + d).rem_euclid(period);
+            for (i, len) in dash.iter().enumerate() {
+                if t < *len {
+                    return i % 2 == 0;
+                }
+                t -= len;
+            }
+            false
+        });
+    }
+
+    /// Draw the dots of a segment for which `on(distance from a)` holds.
+    fn line_where(&mut self, a: (f64, f64), b: (f64, f64), c: Color, on: impl Fn(f64) -> bool) {
         let v = [0.0, 0.0, self.w as f64 * 2.0 - 0.001, self.h as f64 * 4.0 - 0.001];
         let Some((x0, y0, x1, y1)) = clip(a, b, v) else { return };
         let (mut x, mut y) = (x0.floor() as i64, y0.floor() as i64);
@@ -219,7 +243,9 @@ impl Canvas {
         let (sx, sy) = (if x < xe { 1 } else { -1 }, if y < ye { 1 } else { -1 });
         let mut err = dx + dy;
         for _ in 0..(dx - dy + 2) {
-            self.dot(x, y, c);
+            if on((x as f64 + 0.5 - a.0).hypot(y as f64 + 0.5 - a.1)) {
+                self.dot(x, y, c);
+            }
             if x == xe && y == ye {
                 break;
             }

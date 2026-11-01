@@ -20,8 +20,9 @@
 //! | layer | paint | layout |
 //! |---|---|---|
 //! | background | `background-color`, `background-opacity` | `visibility` |
+//! | raster | `raster-opacity` (with cell colors, blended with the background) | `visibility` |
 //! | fill | `fill-color`, `fill-opacity`, `fill-outline-color` | `visibility` |
-//! | line | `line-color`, `line-opacity` | `visibility` |
+//! | line | `line-color`, `line-opacity`, `line-width` (1 to 3 dots thick), `line-dasharray` (dotted) | `visibility` |
 //! | circle | `circle-color`, `circle-opacity` | `visibility`, `mapterm:glyph` |
 //! | symbol | `text-color`, `text-opacity`, `icon-color`, `icon-opacity` | `visibility`, `text-field`, `text-font` (bold, italic), `text-transform`, `text-anchor`, `text-variable-anchor`, `text-offset`, `symbol-placement`, `symbol-spacing`, `symbol-sort-key`, `icon-image` (as a glyph), `mapterm:glyph` |
 //!
@@ -86,7 +87,7 @@ impl Kind {
 }
 
 /// Properties mapterm reads; others are kept out so lookups stay short.
-const USED_PAINT: [&str; 13] = [
+const USED_PAINT: [&str; 16] = [
     "background-color",
     "background-opacity",
     "fill-color",
@@ -100,6 +101,9 @@ const USED_PAINT: [&str; 13] = [
     "text-opacity",
     "icon-color",
     "icon-opacity",
+    "line-width",
+    "line-dasharray",
+    "raster-opacity",
 ];
 const USED_LAYOUT: [&str; 12] = [
     "text-field",
@@ -257,10 +261,12 @@ impl StyleLayer {
         self.layout.iter().find(|(k, _)| k == name).map(|(_, e)| e)
     }
 
-    /// Whether the filter or any property used depends on the zoom level.
+    /// Whether the filter or any property used depends on the zoom level. Line widths and
+    /// dash patterns don't count: in whole braille dots they change only between zoom levels,
+    /// so the tile's zoom is close enough (and liberty interpolates nearly every width).
     pub fn uses_zoom(&self) -> bool {
         self.filter.as_ref().is_some_and(Expr::uses_zoom)
-            || self.paint.iter().chain(&self.layout).any(|(_, e)| e.uses_zoom())
+            || self.paint.iter().chain(&self.layout).any(|(k, e)| !matches!(k.as_str(), "line-width" | "line-dasharray") && e.uses_zoom())
     }
 
     /// Whether the layer draws at this zoom.
@@ -350,13 +356,13 @@ mod tests {
             "id": "roads", "type": "line", "source": "openmaptiles", "source-layer": "transportation",
             "minzoom": 5, "filter": ["==", "class", "motorway"],
             "layout": {"line-cap": "round", "visibility": "visible"},
-            "paint": {"line-color": "#e96", "line-width": {"stops": [[5, 1], [14, 4]]}, "line-opacity": ["distance", 1]}
+            "paint": {"line-color": "#e96", "line-blur": {"stops": [[5, 1], [14, 4]]}, "line-opacity": ["distance", 1]}
         }))
         .unwrap();
         assert_eq!(l.source_layer.as_deref(), Some("transportation"));
         assert!(l.filter.is_some() && l.visible && l.min_zoom == 5.0);
         assert!(l.paint_expr("line-color").is_some());
-        assert!(l.paint_expr("line-width").is_none(), "unused properties are skipped");
+        assert!(l.paint_expr("line-blur").is_none(), "unused properties are skipped");
         assert_eq!(w.len(), 1, "{w:?}");
         let (hidden, w) = StyleLayer::from_json(&json!({"id": "x", "type": "fill", "source": "s", "filter": ["within", {}]})).unwrap();
         assert!(!hidden.visible && w[0].contains("hidden"));
