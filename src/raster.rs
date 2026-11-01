@@ -21,7 +21,7 @@ use ratatui::{
 
 use crate::{
     render::{Camera, to_world},
-    source::{cache_root, get_with, hash, http_client, read_fresh},
+    source::{PmArchive, cache_root, get_with, hash, http_client, read_fresh},
     store::TileId,
 };
 
@@ -41,6 +41,8 @@ pub struct RasterSource {
     pub tile_px: u32,
     /// Values for other `{name}` placeholders in the URL (e.g. a Planet mosaic).
     params: Vec<(String, String)>,
+    /// A PMTiles archive of images instead of a URL template.
+    pm: Option<Arc<PmArchive>>,
     pub max_zoom: u8,
     pub name: String,
     /// Credit to show for the imagery (known providers are filled in automatically).
@@ -57,8 +59,9 @@ pub struct Preset {
     pub headers: &'static [(&'static str, &'static str)],
     /// Environment variables checked for the key, in order (none: no key needed).
     pub key_env: &'static [&'static str],
-    /// Other `{name}` placeholders in the URL, with the environment variable that fills each.
-    pub params: &'static [(&'static str, &'static str)],
+    /// Other `{name}` placeholders in the URL: (name, environment variable, default). An empty
+    /// default means it must be given; "yesterday" means the previous UTC day.
+    pub params: &'static [(&'static str, &'static str, &'static str)],
     pub attribution: &'static str,
     pub tile_px: u32,
     pub max_zoom: u8,
@@ -115,6 +118,42 @@ pub const PRESETS: &[Preset] = &[
         cache: true,
     },
     Preset {
+        name: "esri-light",
+        about: "Esri Light Gray Canvas, a quiet light background for overlays (Esri's terms apply)",
+        template: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        headers: &[],
+        key_env: &[],
+        params: &[],
+        attribution: "Esri, HERE, Garmin, © OpenStreetMap contributors",
+        tile_px: 256,
+        max_zoom: 16,
+        cache: true,
+    },
+    Preset {
+        name: "esri-dark",
+        about: "Esri Dark Gray Canvas, a quiet dark background for overlays (Esri's terms apply)",
+        template: "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+        headers: &[],
+        key_env: &[],
+        params: &[],
+        attribution: "Esri, HERE, Garmin, © OpenStreetMap contributors",
+        tile_px: 256,
+        max_zoom: 16,
+        cache: true,
+    },
+    Preset {
+        name: "gibs",
+        about: "NASA GIBS daily satellite imagery, ~250 m (MODIS true color; --date, layer=...)",
+        template: "https://gibs.earthdata.nasa.gov/wmts/epsg3857/best/{layer}/default/{date}/GoogleMapsCompatible_Level9/{z}/{y}/{x}.jpg",
+        headers: &[],
+        key_env: &[],
+        params: &[("layer", "GIBS_LAYER", "MODIS_Terra_CorrectedReflectance_TrueColor"), ("date", "GIBS_DATE", "yesterday")],
+        attribution: "NASA EOSDIS GIBS",
+        tile_px: 256,
+        max_zoom: 9,
+        cache: true,
+    },
+    Preset {
         name: "vantor",
         about: "Vantor (Maxar) Vivid basemap via the Vantor Hub API, needs an API key",
         template: "https://api.maxar.com/basemaps/v1/ogc/gwc/service/wmts?service=WMTS&request=GetTile&version=1.0.0&layer=Maxar:Imagery&tileMatrixSet=EPSG:3857&tileMatrix=EPSG:3857:{z}&tileRow={y}&tileCol={x}&format=image/jpeg",
@@ -132,7 +171,7 @@ pub const PRESETS: &[Preset] = &[
         template: "https://tiles.planet.com/basemaps/v1/planet-tiles/{mosaic}/gmap/{z}/{x}/{y}.png?api_key={key}",
         headers: &[],
         key_env: &["PL_API_KEY", "PLANET_API_KEY"],
-        params: &[("mosaic", "PLANET_MOSAIC")],
+        params: &[("mosaic", "PLANET_MOSAIC", "")],
         attribution: "Imagery © Planet Labs PBC",
         tile_px: 256,
         max_zoom: 18,
@@ -168,6 +207,23 @@ pub fn preset(name: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| p.name.eq_ignore_ascii_case(name) || (name.eq_ignore_ascii_case("maxar") && p.name == "vantor"))
 }
 
+/// The previous day in UTC as YYYY-MM-DD (GIBS's newest complete day).
+pub fn yesterday_utc() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let days = (secs / 86400) as i64 - 1;
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Find a provider's key: a command's output (e.g. `pass show vantor/api-key`) if given,
 /// else the first of `env` that is set.
 pub fn find_key(key_cmd: Option<&str>, env: &[&str]) -> Result<Option<String>> {
@@ -194,6 +250,8 @@ pub fn known_attribution(template: &str) -> Option<&'static str> {
         Some("USGS The National Map")
     } else if host.ends_with("openstreetmap.org") || host.ends_with("openstreetmap.fr") {
         Some("© OpenStreetMap contributors")
+    } else if host.ends_with("earthdata.nasa.gov") {
+        Some("NASA EOSDIS GIBS")
     } else if host.ends_with("s2maps-tiles.eu") {
         Some("Sentinel-2 cloudless by EOX")
     } else {
@@ -222,6 +280,7 @@ impl RasterSource {
             cache: true,
             tile_px: 256,
             params: Vec::new(),
+            pm: None,
             max_zoom,
             name: template.split('/').nth(2).unwrap_or(template).to_string(),
             attribution: known_attribution(template).unwrap_or_default().to_string(),
@@ -238,9 +297,14 @@ impl RasterSource {
             );
         }
         let mut s = Self::new(p.template, false, p.max_zoom)?;
-        for (name, env) in p.params {
-            if let Some(v) = std::env::var(env).ok().filter(|v| !v.trim().is_empty()) {
-                s.params.push((name.to_string(), v.trim().to_string()));
+        for (name, env, default) in p.params {
+            let value = std::env::var(env).ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).or_else(|| match *default {
+                "" => None,
+                "yesterday" => Some(yesterday_utc()),
+                d => Some(d.to_string()),
+            });
+            if let Some(v) = value {
+                s.params.push((name.to_string(), v));
             }
         }
         s.headers = p.headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
@@ -250,6 +314,29 @@ impl RasterSource {
         s.name = p.name.to_string();
         s.attribution = p.attribution.to_string();
         Ok(s)
+    }
+
+    /// A layer from a PMTiles archive of PNG, JPEG or WebP tiles (a file or an http(s) URL).
+    pub async fn from_pmtiles(spec: &str) -> Result<Self> {
+        let http = http_client();
+        let pm = PmArchive::open_raster(spec, &http).await?;
+        let name = spec.rsplit('/').next().unwrap_or(spec).to_string();
+        Ok(Self {
+            template: String::new(),
+            tms: false,
+            http,
+            cache_dir: cache_root().join("raster").join(hash(spec)),
+            headers: Vec::new(),
+            key: None,
+            // Local files need no cache; remote archives are read with range requests.
+            cache: false,
+            tile_px: 256,
+            params: Vec::new(),
+            max_zoom: pm.header.max_zoom,
+            pm: Some(Arc::new(pm)),
+            name,
+            attribution: String::new(),
+        })
     }
 
     /// Add a request header (`Name: value`; `{key}` in the value is replaced by the key).
@@ -321,6 +408,9 @@ impl RasterSource {
 
     /// The tile's image bytes (PNG or JPEG), from the 30-day disk cache or the network.
     pub async fn tile(&self, z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>> {
+        if let Some(pm) = &self.pm {
+            return pm.tile(&self.http, z, x, y).await;
+        }
         let path = self.cache_dir.join(format!("{z}/{x}/{y}.img"));
         if self.cache
             && let Some(b) = read_fresh(&path)
@@ -609,6 +699,13 @@ mod tests {
             "https://tiles.planet.com/basemaps/v1/planet-tiles/global_monthly_2025_09_mosaic/gmap/12/1171/1566.png?api_key=PLAK123456"
         );
         assert!(!pl.redact(anyhow::anyhow!("GET ...?api_key=PLAK123456 failed")).to_string().contains("PLAK"));
+        // GIBS fills its layer and a date by default.
+        let g = RasterSource::from_preset(preset("gibs").unwrap(), None).unwrap();
+        assert!(g.missing_params().is_empty());
+        let u = g.url(6, 18, 24);
+        assert!(u.contains("/MODIS_Terra_CorrectedReflectance_TrueColor/default/") && u.ends_with("/GoogleMapsCompatible_Level9/6/24/18.jpg"), "{u}");
+        let y = yesterday_utc();
+        assert!(u.contains(&y) && y.len() == 10 && &y[4..5] == "-", "{y}");
         let osm = RasterSource::from_preset(preset("osm").unwrap(), None).unwrap();
         assert!(osm.cache && !osm.wants_key());
         assert_eq!(RasterSource::from_preset(preset("mapbox").unwrap(), Some("t".into())).unwrap().tile_px, 512);
@@ -634,5 +731,35 @@ mod tests {
             }
         }
         assert!(covered.iter().all(|&n| n == 1), "every cell drawn exactly once");
+    }
+}
+
+#[cfg(test)]
+mod pm_pipeline_tests {
+    use super::*;
+
+    /// End to end for a local raster PMTiles named by MAPTERM_TEST_PMTILES (skipped when unset).
+    #[tokio::test]
+    async fn pmtiles_layer_lays_out_blocks() {
+        let Ok(path) = std::env::var("MAPTERM_TEST_PMTILES") else { return };
+        let src = RasterSource::from_pmtiles(&path).await.expect("open");
+        let cam = Camera::new(-77.0353, 38.8895, 15.0);
+        let area = Rect::new(0, 0, 150, 45);
+        let rz = raster_zoom(&cam, src.tile_px, 2.0 / 10.0, src.max_zoom);
+        let ids = tiles_for(&cam, area, rz);
+        let mut store = RasterStore::default();
+        let mut found = 0;
+        for id in &ids {
+            let t = src.tile(id.0, id.1, id.2).await.expect("tile");
+            if let Some(b) = &t {
+                found += 1;
+                store.insert(*id, Some(decode(b).expect("decode")));
+            } else {
+                store.insert(*id, None);
+            }
+        }
+        let blocks = layout(&store, &cam, area, rz);
+        eprintln!("rz {rz} max {} wanted {} found {found} blocks {}", src.max_zoom, ids.len(), blocks.len());
+        assert!(!blocks.is_empty());
     }
 }

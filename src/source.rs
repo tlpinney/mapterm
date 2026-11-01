@@ -129,6 +129,15 @@ impl PmArchive {
     }
 
     pub async fn open(spec: &str, http: &reqwest::Client) -> Result<Self> {
+        Self::open_kind(spec, http, false).await
+    }
+
+    /// Open an archive of image tiles (PNG, JPEG or WebP) instead of vector tiles.
+    pub async fn open_raster(spec: &str, http: &reqwest::Client) -> Result<Self> {
+        Self::open_kind(spec, http, true).await
+    }
+
+    async fn open_kind(spec: &str, http: &reqwest::Client, raster: bool) -> Result<Self> {
         let backend = if spec.starts_with("http://") || spec.starts_with("https://") {
             Backend::Http(spec.to_string())
         } else {
@@ -137,8 +146,13 @@ impl PmArchive {
         // The spec guarantees the header and root directory fit in the first 16 KiB.
         let first = Self::read(&backend, http, 0, 16384).await.with_context(|| format!("opening {spec}"))?;
         let header = pmtiles::parse_header(&first)?;
-        if header.tile_type != pmtiles::TILE_TYPE_MVT {
-            bail!("{spec}: tile type {} is not vector (MVT)", header.tile_type);
+        let is_image = matches!(header.tile_type, pmtiles::TILE_TYPE_PNG | pmtiles::TILE_TYPE_JPEG | pmtiles::TILE_TYPE_WEBP);
+        if raster && !is_image {
+            bail!("{spec}: tile type {} is not PNG, JPEG or WebP images", header.tile_type);
+        }
+        if !raster && header.tile_type != pmtiles::TILE_TYPE_MVT {
+            let hint = if is_image { " (it holds images: use it with --raster)" } else { "" };
+            bail!("{spec}: tile type {} is not vector (MVT){hint}", header.tile_type);
         }
         let (ro, rl) = (header.root_off as usize, header.root_len as usize);
         let raw = match first.get(ro..ro.saturating_add(rl)) {
@@ -298,5 +312,20 @@ mod tests {
         assert!(bomb.len() < 100_000);
         assert!(maybe_gunzip(bomb).is_err());
         assert_eq!(maybe_gunzip(vec![1, 2, 3]).unwrap(), vec![1, 2, 3]);
+    }
+}
+
+#[cfg(test)]
+mod pm_file_tests {
+    /// Reads a local raster PMTiles named by MAPTERM_TEST_PMTILES (skipped when unset).
+    #[tokio::test]
+    async fn reads_local_raster_pmtiles() {
+        let Ok(path) = std::env::var("MAPTERM_TEST_PMTILES") else { return };
+        let http = super::http_client();
+        let pm = super::PmArchive::open_raster(&path, &http).await.expect("open");
+        eprintln!("header: type {} comp {} internal {} zoom {}..{} root {}+{}", pm.header.tile_type, pm.header.tile_compression, pm.header.internal_compression, pm.header.min_zoom, pm.header.max_zoom, pm.header.root_off, pm.header.root_len);
+        let t = pm.tile(&http, 15, 9372, 12536).await.expect("read");
+        eprintln!("tile 15/9372/12536 -> {:?} bytes", t.as_ref().map(|b| b.len()));
+        assert!(t.is_some());
     }
 }

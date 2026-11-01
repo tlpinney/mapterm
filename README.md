@@ -33,8 +33,14 @@ They follow the MapLibre GL / Mapbox GL defaults:
 ```sh
 mapterm --raster esri --at 38.8895,-77.0353 -z 15        # satellite
 mapterm --raster 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+mapterm --raster gibs --date 2026-10-30 -z 6                # NASA daily imagery
+mapterm --raster mall.pmtiles                              # your own imagery, offline
 mapterm --raster-list                                      # providers and the keys they need
 ```
+
+`--raster` also takes a PMTiles archive of PNG, JPEG or WebP tiles, as a local
+file or an `https://` URL read with range requests: a single file of your own
+imagery that works offline.
 
 | Name | Imagery | Key |
 |---|---|---|
@@ -42,6 +48,8 @@ mapterm --raster-list                                      # providers and the k
 | `esri` | Esri World Imagery, global satellite | none |
 | `usgs` | USGS National Map imagery, US only, public domain | none |
 | `eox` | Sentinel-2 cloudless 2024, global, ~10 m (CC BY-NC-SA) | none |
+| `gibs` | NASA GIBS daily satellite imagery, ~250 m (`--date`, default yesterday) | none |
+| `esri-light`, `esri-dark` | Esri Gray Canvas, quiet backgrounds for overlays | none |
 | `vantor` | Vantor (Maxar) Vivid basemap | `VANTOR_API_KEY` |
 | `planet` | Planet basemaps (your subscription's mosaics) | `PL_API_KEY` + a mosaic |
 | `mapbox` | Mapbox Satellite, Retina tiles | `MAPBOX_ACCESS_TOKEN` |
@@ -61,7 +69,9 @@ Planet serves each customer's named mosaics: list the ones your key can use
 with `mapterm --raster-list-mosaics`, then pick one with
 `--raster planet --raster-param mosaic=NAME` (or `PLANET_MOSAIC`). Planet only
 accepts the key in the tile URL; mapterm still never prints it.
-`--raster-param NAME=VALUE` fills any other `{NAME}` in a custom URL.
+`--raster-param NAME=VALUE` fills any other `{NAME}` in a custom URL; for GIBS,
+`--raster-param layer=VIIRS_SNPP_CorrectedReflectance_TrueColor` picks another
+layer (JPEG layers at 250 m).
 
 - URLs use `{z}`, `{x}` and `{y}` in any order; for TMS services (rows counted
   from the bottom) use `{-y}` or add `--tms`.

@@ -35,7 +35,8 @@ usage: mapterm [SOURCE] [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [
   --at          start position (default: the source's center)
   -z            start zoom
   --raster      an image tile layer under the vector map: a provider name (--raster-list),
-                or a URL with {z}/{x}/{y} ({-y} or --tms for TMS rows, {key} for an API key);
+                a URL with {z}/{x}/{y} ({-y} or --tms for TMS rows, {key} for an API key),
+                or a .pmtiles file or URL of PNG/JPEG/WebP tiles;
                 real images with kitty graphics (Ghostty, kitty, WezTerm, herdr), cell colors
                 elsewhere (MAPTERM_GRAPHICS=kitty|cells overrides)
   --raster-list           show the provider names and the keys they need
@@ -43,6 +44,7 @@ usage: mapterm [SOURCE] [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [
                           (otherwise the provider's variable, or MAPTERM_RASTER_KEY for URLs)
   --raster-header 'N: V'  extra request header; {key} in the value is the API key
   --raster-param N=V      fill another {N} in the URL, e.g. mosaic=NAME for Planet
+  --date YYYY-MM-DD       the day to show for dated layers (gibs; default yesterday, UTC)
   --raster-list-mosaics   list the Planet mosaics your key can use, then exit
   --raster-cache / --raster-no-cache
                           keep tiles on disk or not (default: on, off for keyed providers)
@@ -113,13 +115,14 @@ fn args() -> Result<Args> {
                 a.raster_params.push((n.trim().to_string(), val.trim().to_string()));
             }
             "--raster-list-mosaics" => a.list_mosaics = true,
+            "--date" => a.raster_params.push(("date".into(), it.next().context("--date YYYY-MM-DD")?)),
             "--raster-cache" => a.raster_cache = Some(true),
             "--raster-no-cache" => a.raster_cache = Some(false),
             "--raster-list" => {
                 println!("raster providers (--raster NAME):\n");
                 for p in mapterm::raster::PRESETS {
                     let key = if p.key_env.is_empty() { "no key".to_string() } else { format!("key: {}", p.key_env.join(" or ")) };
-                    println!("  {:<9} {}\n            {key}", p.name, p.about);
+                    println!("  {:<11} {}\n              {key}", p.name, p.about);
                 }
                 println!("\nKeys can also come from --raster-key-cmd, e.g. 'pass show vantor/api-key'.");
                 std::process::exit(0);
@@ -147,6 +150,17 @@ fn args() -> Result<Args> {
 }
 
 type Done = (TileId, Result<Prepared>);
+
+/// Debug log for troubleshooting (MAPTERM_LOG=path); a no-op unless set.
+fn dlog(msg: impl FnOnce() -> String) {
+    use std::sync::OnceLock;
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    if let Some(path) = PATH.get_or_init(|| std::env::var("MAPTERM_LOG").ok()).as_deref()
+        && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+    {
+        let _ = writeln!(f, "{}", msg());
+    }
+}
 
 /// Print the Planet basemap mosaics the key can use (name, dates), following pagination.
 /// The key goes in a Basic auth header (Planet's API accepts the key as the user name).
@@ -360,6 +374,7 @@ async fn main() -> Result<()> {
     let raster = match &a.raster {
         Some(spec) => {
             let mut r = match mapterm::raster::preset(spec) {
+                None if spec.ends_with(".pmtiles") => mapterm::raster::RasterSource::from_pmtiles(spec).await?,
                 Some(p) => {
                     let key = mapterm::raster::find_key(a.raster_key_cmd.as_deref(), p.key_env)?;
                     mapterm::raster::RasterSource::from_preset(p, key)?
@@ -627,6 +642,7 @@ async fn main() -> Result<()> {
                     let decl = if shift_mode { smooth::declare_shift(0, map_area, ox, oy) } else { smooth::declare(0, map_area, &cam) };
                     out.write_all(decl.as_bytes())?;
                 }
+                dlog(|| format!("frame: kitty={kitty} rz={rz:?} cell_px={cpx:?} map={map_area:?} stored_pending={}", rpending.len()));
                 if let (true, Some(rz)) = (kitty, rz) {
                     // Re-place the raster blocks under the text: images are sent once, then
                     // each frame only moves placements.
@@ -636,7 +652,9 @@ async fn main() -> Result<()> {
                             cmds.push_str(&mapterm::kitty::free(id));
                         }
                     }
-                    for (i, b) in mapterm::raster::layout(&rstore, &draw_cam, map_area, rz).iter().enumerate() {
+                    let blocks = mapterm::raster::layout(&rstore, &draw_cam, map_area, rz);
+                    dlog(|| format!("  placing {} blocks", blocks.len()));
+                    for (i, b) in blocks.iter().enumerate() {
                         if sent.insert(b.tile.id) {
                             cmds.push_str(&mapterm::kitty::transmit(b.tile.id, &b.tile.png));
                         }
@@ -673,6 +691,7 @@ async fn main() -> Result<()> {
                     }
                     for (id, r) in batch {
                         rpending.remove(&id);
+                        dlog(|| format!("raster tile {id:?}: {}", match &r { Ok(Some(t)) => format!("{}x{} image", t.size().0, t.size().1), Ok(None) => "none".into(), Err(e) => format!("error {e:#}") }));
                         match r {
                             Ok(t) => rstore.insert(id, t),
                             Err(_) => {

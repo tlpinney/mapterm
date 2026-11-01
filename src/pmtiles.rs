@@ -29,6 +29,9 @@ pub struct Header {
 pub const COMPRESSION_NONE: u8 = 1;
 pub const COMPRESSION_GZIP: u8 = 2;
 pub const TILE_TYPE_MVT: u8 = 1;
+pub const TILE_TYPE_PNG: u8 = 2;
+pub const TILE_TYPE_JPEG: u8 = 3;
+pub const TILE_TYPE_WEBP: u8 = 4;
 
 pub fn parse_header(b: &[u8]) -> Result<Header> {
     if b.len() < HEADER_LEN || &b[0..7] != b"PMTiles" {
