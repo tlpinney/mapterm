@@ -57,7 +57,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --date YYYY-MM-DD       the day to show for dated layers (gibs; default yesterday, UTC)
   --raster-list-mosaics   list the Planet mosaics your key can use, then exit
   --raster-cache / --raster-no-cache
-                          keep tiles on disk or not (default: on, off for keyed providers)
+                          keep tiles on disk or not (default: on, off for keyed providers;
+                          Google's on, for as long as each tile's headers allow)
   --raster-limit N|off    at most N imagery tile requests a minute (default 300 for keyed,
                           billed providers, none for free ones; also MAPTERM_RASTER_LIMIT)
   --raster-attribution T  credit for the layer (known providers are filled in)
@@ -603,9 +604,6 @@ async fn main() -> Result<()> {
                 bail!("the raster URL needs {}: use --raster-param NAME=VALUE{hint}", missing.iter().map(|m| format!("{{{m}}}")).collect::<Vec<_>>().join(", "));
             }
             if let Some(c) = a.raster_cache {
-                if c && r.is_google() {
-                    bail!("--raster-cache: Google's terms don't allow storing its tiles");
-                }
                 r.cache = c;
             }
             // Google's credits depend on the view: these are for the start view (about the

@@ -36,8 +36,12 @@ pub struct RasterSource {
     /// API key for `{key}` in the URL or headers. Never shown: it is blanked out of errors.
     key: Option<String>,
     /// Keep tiles on disk (30 days). Off by default for keyed commercial providers, whose
-    /// licenses often limit storing tiles.
+    /// licenses often limit storing tiles; on for Google, whose tiles are kept only as long
+    /// as their `Cache-Control` headers allow.
     pub cache: bool,
+    /// Cache by each response's `Cache-Control` and `ETag` (up to 30 days) instead of a
+    /// flat 30 days: what Google's Map Tiles API terms ask for.
+    by_headers: bool,
     /// Tile width and height in pixels (512 for Retina "@2x" tiles).
     pub tile_px: u32,
     /// Values for other `{name}` placeholders in the URL (e.g. a Planet mosaic).
@@ -222,7 +226,7 @@ pub const PRESETS: &[Preset] = &[
         attribution: "Google Maps",
         tile_px: 256,
         max_zoom: 22,
-        cache: false,
+        cache: true,
     },
     Preset {
         name: "google-roadmap",
@@ -234,7 +238,7 @@ pub const PRESETS: &[Preset] = &[
         attribution: "Google Maps",
         tile_px: 256,
         max_zoom: 22,
-        cache: false,
+        cache: true,
     },
     Preset {
         name: "google-terrain",
@@ -246,7 +250,7 @@ pub const PRESETS: &[Preset] = &[
         attribution: "Google Maps",
         tile_px: 256,
         max_zoom: 22,
-        cache: false,
+        cache: true,
     },
 ];
 
@@ -329,6 +333,7 @@ impl RasterSource {
             headers: Vec::new(),
             key: None,
             cache: true,
+            by_headers: false,
             tile_px: 256,
             params: Vec::new(),
             pm: None,
@@ -364,6 +369,13 @@ impl RasterSource {
         s.tile_px = p.tile_px;
         s.name = p.name.to_string();
         s.attribution = p.attribution.to_string();
+        if s.is_google() {
+            // Kept only as long as each tile's headers say (a day, as of 2026), and apart per
+            // map type: the URL template is the same for all of them.
+            s.by_headers = true;
+            let map_type = s.param("maptype").unwrap_or("satellite").to_string();
+            s.cache_dir = cache_root().join("raster").join(hash(&format!("{}#{map_type}", p.template)));
+        }
         Ok(s)
     }
 
@@ -382,6 +394,7 @@ impl RasterSource {
             key: None,
             // Local files need no cache; remote archives are read with range requests.
             cache: false,
+            by_headers: false,
             tile_px: 256,
             params: Vec::new(),
             max_zoom: pm.header.max_zoom,
@@ -528,6 +541,9 @@ impl RasterSource {
         if let Some(pm) = &self.pm {
             return pm.tile(&self.http, z, x, y).await;
         }
+        if self.by_headers {
+            return self.tile_by_headers(z, x, y).await;
+        }
         let path = self.cache_dir.join(format!("{z}/{x}/{y}.img"));
         if self.cache
             && let Some(b) = read_fresh(&path)
@@ -547,6 +563,66 @@ impl RasterSource {
         }
         Ok(bytes)
     }
+}
+
+impl RasterSource {
+    /// A tile cached by its HTTP headers: used as is until its `max-age` runs out (at most
+    /// 30 days), then asked for again with `If-None-Match`, so an unchanged tile comes back as
+    /// a 304 and is kept. `no-store`/`no-cache` responses aren't kept. Bytes are stored as
+    /// received. Each tile has a `.meta` file beside it: "expires-unix-seconds etag".
+    async fn tile_by_headers(&self, z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>> {
+        let img = self.cache_dir.join(format!("{z}/{x}/{y}.img"));
+        let meta = img.with_extension("meta");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let cached = if self.cache { read_meta(&meta).zip(std::fs::read(&img).ok()) } else { None };
+        if let Some(((expires, _), bytes)) = &cached
+            && now < *expires
+        {
+            return Ok(Some(bytes.clone()));
+        }
+        let url = self.fill_key(&self.url(z, x, y));
+        let headers: Vec<(String, String)> = self.headers.iter().map(|(k, v)| (k.clone(), self.fill_key(v))).collect();
+        let etag = cached.as_ref().and_then(|((_, e), _)| e.clone());
+        let r = crate::source::get_revalidated(crate::source::keyed_client(), &url, &headers, etag.as_deref()).await.map_err(|e| self.redact(e))?;
+        let keep = r.policy.max_age.min(crate::source::DISK_TTL.as_secs());
+        if r.not_modified {
+            let Some(((_, old_etag), bytes)) = cached else { bail!("{z}/{x}/{y}: HTTP 304 without a cached tile") };
+            if self.cache && !r.policy.no_store {
+                let _ = write_meta(&meta, now + keep, r.etag.as_deref().or(old_etag.as_deref()));
+            }
+            return Ok(Some(bytes));
+        }
+        if self.cache {
+            match &r.bytes {
+                Some(b) if !r.policy.no_store && keep > 0 => {
+                    if let Some(d) = img.parent() {
+                        let _ = std::fs::create_dir_all(d);
+                    }
+                    if std::fs::write(&img, b).is_ok() {
+                        let _ = write_meta(&meta, now + keep, r.etag.as_deref());
+                    }
+                }
+                _ => {
+                    // Not to be kept (or no tile): drop any older copy.
+                    let _ = std::fs::remove_file(&img);
+                    let _ = std::fs::remove_file(&meta);
+                }
+            }
+        }
+        Ok(r.bytes)
+    }
+}
+
+/// "expires etag" from a `.meta` file (etag may be absent).
+fn read_meta(p: &std::path::Path) -> Option<(u64, Option<String>)> {
+    let s = std::fs::read_to_string(p).ok()?;
+    let mut it = s.trim().splitn(2, ' ');
+    let expires = it.next()?.parse().ok()?;
+    Some((expires, it.next().map(str::to_string).filter(|e| !e.is_empty())))
+}
+
+fn write_meta(p: &std::path::Path, expires: u64, etag: Option<&str>) -> std::io::Result<()> {
+    std::fs::write(p, format!("{expires} {}", etag.unwrap_or("")))
 }
 
 static NEXT_IMAGE_ID: AtomicU32 = AtomicU32::new(1);
@@ -870,7 +946,7 @@ mod tests {
             let p = preset(name).unwrap();
             assert!(RasterSource::from_preset(p, None).is_err(), "{name} needs a key");
             let s = RasterSource::from_preset(p, Some("AIzaTESTKEY".into())).unwrap();
-            assert!(s.is_google() && !s.cache, "{name}: Google tiles must not be kept on disk");
+            assert!(s.is_google() && s.cache && s.by_headers, "{name}: Google tiles are kept only as their headers allow");
             assert_eq!(s.param("maptype"), Some(map_type));
             // The session comes from start_session; until then it is missing.
             assert_eq!(s.missing_params(), vec!["session".to_string()]);
@@ -880,6 +956,107 @@ mod tests {
         s.set_param("session", "SESS");
         assert_eq!(s.fill_key(&s.url(3, 2, 1)), "https://tile.googleapis.com/v1/2dtiles/3/2/1?session=SESS&key=k3y-123");
         assert!(!RasterSource::from_preset(preset("osm").unwrap(), None).unwrap().is_google());
+    }
+
+    #[test]
+    fn cache_control_and_google_cache_dirs() {
+        use crate::source::cache_policy;
+        let g = cache_policy(Some("private, max-age=86400, must-revalidate, no-transform"));
+        assert_eq!((g.max_age, g.no_store), (86400, false));
+        assert!(cache_policy(Some("no-cache, no-store, max-age=0, must-revalidate")).no_store);
+        assert!(cache_policy(Some("No-Cache")).no_store);
+        assert_eq!(cache_policy(None).max_age, 0, "no header: nothing to keep");
+        // Satellite and road map share a URL template but not a cache.
+        let key = || Some("k".to_string());
+        let sat = RasterSource::from_preset(preset("google").unwrap(), key()).unwrap();
+        let road = RasterSource::from_preset(preset("google-roadmap").unwrap(), key()).unwrap();
+        assert_ne!(sat.cache_dir, road.cache_dir);
+    }
+
+    /// A one-path HTTP server: answers 200 with `cache_control` and an ETag, or 304 when
+    /// asked with that ETag. Returns its port and the request count.
+    fn tile_server(cache_control: &'static str) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = hits.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let h = h.clone();
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        // One request at a time on a kept-alive connection.
+                        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match s.read(&mut chunk) {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                        let end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+                        let req = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+                        buf.drain(..end);
+                        h.fetch_add(1, Ordering::SeqCst);
+                        let resp = if req.contains("if-none-match: \"v1\"") {
+                            format!("HTTP/1.1 304 Not Modified\r\nCache-Control: {cache_control}\r\nETag: \"v1\"\r\nContent-Length: 0\r\n\r\n").into_bytes()
+                        } else {
+                            let mut r = format!("HTTP/1.1 200 OK\r\nCache-Control: {cache_control}\r\nETag: \"v1\"\r\nContent-Length: 4\r\n\r\n").into_bytes();
+                            r.extend_from_slice(b"tile");
+                            r
+                        };
+                        if s.write_all(&resp).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (port, hits)
+    }
+
+    fn header_cached_source(port: u16, dir: &std::path::Path) -> RasterSource {
+        let mut s = RasterSource::new(&format!("http://127.0.0.1:{port}/{{z}}/{{x}}/{{y}}"), false, 19).unwrap();
+        s.by_headers = true;
+        s.cache_dir = dir.to_path_buf();
+        s
+    }
+
+    #[tokio::test]
+    async fn tiles_cached_by_their_headers() {
+        let dir = std::env::temp_dir().join(format!("mapterm-hdrcache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (port, hits) = tile_server("private, max-age=86400, must-revalidate");
+        let s = header_cached_source(port, &dir);
+        assert_eq!(s.tile(3, 2, 1).await.unwrap().as_deref(), Some(&b"tile"[..]));
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        // Within max-age: from disk, no request.
+        assert_eq!(s.tile(3, 2, 1).await.unwrap().as_deref(), Some(&b"tile"[..]));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "served from the cache");
+        let meta = dir.join("3/2/1.meta");
+        let (expires, etag) = read_meta(&meta).unwrap();
+        assert_eq!(etag.as_deref(), Some("\"v1\""));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert!(expires > now + 86000 && expires <= now + 86400, "kept for the header's max-age");
+        // Expired: asked again with If-None-Match, 304 keeps the bytes and renews the expiry.
+        write_meta(&meta, 0, etag.as_deref()).unwrap();
+        assert_eq!(s.tile(3, 2, 1).await.unwrap().as_deref(), Some(&b"tile"[..]));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(read_meta(&meta).unwrap().0 > now, "renewed");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // no-store: nothing kept, every use asks again.
+        let dir2 = dir.with_extension("nostore");
+        let _ = std::fs::remove_dir_all(&dir2);
+        let (port, hits) = tile_server("no-cache, no-store, max-age=0");
+        let s = header_cached_source(port, &dir2);
+        s.tile(3, 2, 1).await.unwrap();
+        s.tile(3, 2, 1).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(!dir2.join("3/2/1.img").exists());
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 
     #[test]

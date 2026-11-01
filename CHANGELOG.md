@@ -14,7 +14,10 @@ All notable changes to mapterm are listed here. The format follows
   session Google needs before the first tile (a no-op for other sources), and
   `RasterSource::google_credits` gives the credits ("Google Maps" plus Google's
   imagery or map data credits) for a view; the viewer asks again whenever the view
-  settles somewhere new. Google tiles are never cached on disk.
+  settles somewhere new. Google tiles are cached by their HTTP headers, as Google's terms
+  ask: kept for the `Cache-Control` `max-age` (a day, at most 30), then revalidated with
+  `If-None-Match`, so an unchanged tile costs a 304 instead of a download; `no-store`
+  responses aren't kept. `--raster-no-cache` turns it off.
 
 ### Changed
 

@@ -20,7 +20,7 @@ use crate::pmtiles::{self, Entry, Header};
 const MAX_FETCH: usize = 8 << 20;
 /// Largest tile after decompression.
 const MAX_INFLATE: usize = 32 << 20;
-const DISK_TTL: Duration = Duration::from_secs(30 * 86400);
+pub(crate) const DISK_TTL: Duration = Duration::from_secs(30 * 86400);
 
 /// An HTTP client with mapterm's user agent and timeouts. It follows redirects (some tile
 /// and archive hosts redirect to storage URLs) but never sends a `Referer`, which would carry
@@ -425,6 +425,75 @@ pub(crate) fn hash(s: &str) -> String {
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+/// A response with what HTTP caching needs (`Cache-Control`, `ETag`), for providers whose
+/// terms say to cache by those headers (Google's Map Tiles API).
+pub(crate) struct Revalidated {
+    /// None for a 304 (the cached copy is still good) or a 404/204 (no tile).
+    pub bytes: Option<Vec<u8>>,
+    pub not_modified: bool,
+    pub policy: CachePolicy,
+    pub etag: Option<String>,
+}
+
+/// What a `Cache-Control` header allows.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub(crate) struct CachePolicy {
+    /// Seconds the response may be used without asking again (0: ask every time).
+    pub max_age: u64,
+    /// `no-store` (or `no-cache`): keep nothing on disk.
+    pub no_store: bool,
+}
+
+/// Parse `Cache-Control`. `private` is fine (this is the user's own cache); `no-cache` and
+/// `no-store` keep nothing; `must-revalidate` is what happens after `max-age` anyway.
+pub(crate) fn cache_policy(header: Option<&str>) -> CachePolicy {
+    let mut p = CachePolicy::default();
+    for d in header.unwrap_or("").split(',').map(|d| d.trim().to_ascii_lowercase()) {
+        if d == "no-store" || d == "no-cache" {
+            p.no_store = true;
+        } else if let Some(v) = d.strip_prefix("max-age=") {
+            p.max_age = v.trim_matches('"').parse().unwrap_or(0);
+        }
+    }
+    p
+}
+
+/// GET with `If-None-Match` when there's a cached `etag`, returning the caching headers.
+/// Same size cap as other fetches.
+pub(crate) async fn get_revalidated(http: &reqwest::Client, url: &str, headers: &[(String, String)], etag: Option<&str>) -> Result<Revalidated> {
+    let mut req = http.get(url);
+    for (k, v) in headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    if let Some(e) = etag {
+        req = req.header("If-None-Match", e);
+    }
+    let mut resp = req.send().await?;
+    let status = resp.status();
+    let h = |n: &str| resp.headers().get(n).and_then(|v| v.to_str().ok()).map(str::to_string);
+    let (policy, etag) = (cache_policy(h("cache-control").as_deref()), h("etag"));
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(Revalidated { bytes: None, not_modified: true, policy, etag });
+    }
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::NO_CONTENT {
+        return Ok(Revalidated { bytes: None, not_modified: false, policy, etag });
+    }
+    if !status.is_success() {
+        bail!("{url}: HTTP {status}");
+    }
+    if resp.content_length().is_some_and(|n| n as usize > MAX_FETCH) {
+        bail!("{url}: response larger than {} MB", MAX_FETCH >> 20);
+    }
+    let mut out = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        out.extend_from_slice(&chunk);
+        if out.len() > MAX_FETCH {
+            bail!("{url}: response larger than {} MB", MAX_FETCH >> 20);
+        }
+    }
+    Ok(Revalidated { bytes: Some(out), not_modified: false, policy, etag })
 }
 
 pub(crate) fn read_fresh(p: &Path) -> Option<Vec<u8>> {
