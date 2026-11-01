@@ -4,6 +4,21 @@ All notable changes to mapterm are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (pre-1.0: a minor version may break the API).
 
+## [0.1.0-alpha.2] - unreleased
+
+### Releases
+
+- Signed binaries: each version tag builds `mapterm` for macOS (Apple silicon) and Linux
+  (x86-64) in CI, attached to the GitHub release with `SHA256SUMS`, which the maintainer
+  signs with an SSH key (`SHA256SUMS.sig`, namespace `mapterm-release`; trusted keys in
+  `signing/allowed_signers`). The release notes say how to verify.
+- Installing with Cargo from the private repository needs
+  `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so Cargo uses git's credentials:
+
+  ```sh
+  CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.2
+  ```
+
 ## [0.1.0-alpha.1] - 2026-11-01
 
 The first alpha, for private testing. Not published to crates.io; install from git:
@@ -45,4 +60,5 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
+[0.1.0-alpha.2]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.1...v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/tlpinney/mapterm/releases/tag/v0.1.0-alpha.1
