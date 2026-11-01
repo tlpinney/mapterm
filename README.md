@@ -33,6 +33,8 @@ The same code is a library: a [ratatui](https://ratatui.rs) widget with a MapLib
 style API (sources, style layers, expressions, events and feature state, feature
 queries) that you can drop into your own terminal apps.
 
+Docs, a tour and the full guide: [mapterm.com](https://mapterm.com)
+
 ## Install
 
 With [Homebrew](https://brew.sh) on macOS or Linux:
