@@ -347,8 +347,9 @@ impl Tiles {
 }
 
 /// A custom layer the map owns, which can be found again by type.
-trait OwnedCustom: CustomLayer + Any {}
-impl<T: CustomLayer + Any> OwnedCustom for T {}
+/// (`Send` so a whole map can be built on another task, e.g. while a style loads.)
+trait OwnedCustom: CustomLayer + Any + Send {}
+impl<T: CustomLayer + Any + Send> OwnedCustom for T {}
 
 enum Entry {
     Style(StyleLayer),
@@ -413,6 +414,36 @@ impl Map {
         self.sources.push((id, src));
         self.restyle();
         Ok(())
+    }
+
+    /// Move another map's sources and layers into this one, its layers just below `before`
+    /// (or on top): e.g. a style loaded with [`Map::from_style`] on another task, swapped in
+    /// under your own layers. Returns the ids of the layers added. Nothing changes if a source
+    /// or layer id is already taken.
+    pub fn add_map(&mut self, other: Map, before: Option<&str>) -> Result<Vec<String>> {
+        for (id, _) in &other.sources {
+            if self.source(id).is_some() {
+                bail!("source \"{id}\" already exists");
+            }
+        }
+        for e in &other.layers {
+            if self.index(e.id()).is_some() {
+                bail!("layer \"{}\" already exists", e.id());
+            }
+        }
+        let at = match before {
+            Some(b) => self.index(b).ok_or_else(|| anyhow!("no layer \"{b}\" to add before"))?,
+            None => self.layers.len(),
+        };
+        if self.layers.len() + other.layers.len() >= u16::MAX as usize {
+            bail!("too many layers");
+        }
+        let ids: Vec<String> = other.layers.iter().map(|e| e.id().to_string()).collect();
+        self.sources.extend(other.sources);
+        self.layers.splice(at..at, other.layers);
+        self.warnings.extend(other.warnings);
+        self.restyle();
+        Ok(ids)
     }
 
     /// Remove a source; layers that use it stay but draw nothing.
@@ -725,7 +756,7 @@ impl Map {
     }
 
     /// Add a custom layer (see [`CustomLayer`]) on top, or below `before`.
-    pub fn add_custom_layer<T: CustomLayer + Any>(&mut self, id: impl Into<String>, layer: T, before: Option<&str>) -> Result<()> {
+    pub fn add_custom_layer<T: CustomLayer + Any + Send>(&mut self, id: impl Into<String>, layer: T, before: Option<&str>) -> Result<()> {
         self.insert_entry(Entry::Custom { id: id.into(), layer: Box::new(layer) }, before)
     }
 
@@ -816,7 +847,7 @@ impl Map {
     }
 
     /// A custom layer by id and type, to change its state.
-    pub fn custom_layer_mut<T: CustomLayer + Any>(&mut self, id: &str) -> Option<&mut T> {
+    pub fn custom_layer_mut<T: CustomLayer + Any + Send>(&mut self, id: &str) -> Option<&mut T> {
         let i = self.index(id)?;
         match &mut self.layers[i] {
             Entry::Custom { layer, .. } => (&mut **layer as &mut dyn Any).downcast_mut::<T>(),
@@ -1696,5 +1727,24 @@ mod tests {
         map.set_data("other", &json!({"type": "Point", "coordinates": [1, 1]})).unwrap();
         assert_eq!(map.attributions(16.0), vec!["Other Data"], "new data keeps the credit");
         assert!(map.set_attribution("nope", "x").is_err());
+    }
+
+    #[test]
+    fn add_map_merges_sources_and_layers_below_before() {
+        let mut map = sample();
+        let mut other = Map::new();
+        other.add_source("v", MapSource::vector_tiles(0, 14)).unwrap();
+        other.add_layer(StyleLayer::fill("land", "v").source_layer("earth").color("#222")).unwrap();
+        other.add_layer(StyleLayer::line("roads", "v").source_layer("roads").color("#888")).unwrap();
+        let added = map.add_map(other, Some("zones")).unwrap();
+        assert_eq!(added, vec!["land", "roads"]);
+        assert_eq!(map.layer_ids(), vec!["bg", "land", "roads", "zones", "pins"]);
+        assert!(map.source("v").is_some());
+        let mut again = Map::new();
+        again.add_source("v", MapSource::vector_tiles(0, 14)).unwrap();
+        assert!(map.add_map(again, None).is_err(), "source id taken");
+        // Map can move to another task (built while a style loads).
+        fn is_send<T: Send>() {}
+        is_send::<Map>();
     }
 }

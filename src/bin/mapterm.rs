@@ -64,8 +64,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · / search · i inspect · v vector overlay · n labels ·
-      t theme · q quit
+      +/- zoom · sideways swipe pans · / search · i inspect · m next style · t theme ·
+      c copy coordinates · v vector overlay · n labels · q quit
 
 search (/): type a place and press enter; one match flies there, several open a list
       (up/down or tab, enter or click to fly); esc clears the marker. Uses Photon
@@ -176,6 +176,25 @@ fn args() -> Result<Args> {
 }
 
 type Done = (String, TileId, Result<Loaded>);
+
+/// The built-in terminal style's entry in the `m` style cycle.
+const BUILTIN: &str = "built-in";
+
+type StyleDone = (String, Result<(Map, Option<(Schema, bool)>, String)>);
+
+/// Load a basemap for the `m` style cycle: the built-in style over `source` (schema detected
+/// from the tile under `cam`), or a MapLibre style. Returns the map, the built-in style's
+/// schema and theme (for `t`), and a name for the status bar.
+async fn load_basemap(spec: &str, source: &str, dark: bool, cam: Camera) -> Result<(Map, Option<(Schema, bool)>, String)> {
+    if spec == BUILTIN {
+        let src = Source::open(source).await?;
+        let name = src.name.clone();
+        let schema = detect_schema(&src, &cam).await;
+        Ok((Map::terminal(src, schema, dark)?, Some((schema, dark)), name))
+    } else {
+        Ok((Map::from_style(spec).await?, None, spec.to_string()))
+    }
+}
 
 /// Ids of the layers the viewer adds.
 const RASTER: &str = "mapterm-raster";
@@ -465,7 +484,7 @@ async fn main() -> Result<()> {
         Some(st) => Map::from_style(st).await.with_context(|| format!("--style {st}"))?,
         None => Map::new(),
     };
-    let basemap_name = match (&a.style, &src) {
+    let mut basemap_name = match (&a.style, &src) {
         (Some(st), _) => st.clone(),
         (None, Some(s)) => s.name.clone(),
         _ => String::new(),
@@ -502,6 +521,16 @@ async fn main() -> Result<()> {
     }
     let style_warnings = map.warnings().len();
     let mut basemap_ids: Vec<String> = map.layer_ids().into_iter().map(str::to_string).collect();
+    let mut basemap_sources: Vec<String> = map.sources().map(|(id, _)| id.to_string()).collect();
+    // The `m` cycle: the --style given, the built-in style, then the OpenFreeMap styles.
+    let builtin_source = a.source.clone().unwrap_or_else(|| OPENFREEMAP.to_string());
+    let mut styles: Vec<String> = a.style.iter().cloned().collect();
+    for s in std::iter::once(BUILTIN).chain(stylejson::OPENFREEMAP_STYLES) {
+        if !styles.iter().any(|x| x == s) {
+            styles.push(s.to_string());
+        }
+    }
+    let mut style_at = 0usize;
 
     // Optional raster layer under the vector map.
     let raster = match &a.raster {
@@ -684,6 +713,10 @@ async fn main() -> Result<()> {
     let mut search = Search::Off;
     let mut found: Option<mapterm::geocode::Place> = None;
     let (gtx, mut grx) = mpsc::unbounded_channel::<(String, Result<Vec<mapterm::geocode::Place>>)>();
+    // Style switching (m) loads on a task; the pointer (dots in the map) is for c.
+    let (stx, mut srx) = mpsc::unbounded_channel::<StyleDone>();
+    let mut style_loading: Option<String> = None;
+    let mut pointer: Option<(f64, f64)> = None;
     let result: Result<()> = async {
         loop {
             ctl.tick(Instant::now());
@@ -863,6 +896,37 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Some((spec, r)) = srx.recv() => {
+                    style_loading = None;
+                    match r {
+                        Ok((new, th, name)) => {
+                            // A source id the new style shares with your own layers would clash.
+                            let clash = new.sources().map(|(id, _)| id.to_string()).find(|id| map.source(id).is_some() && !basemap_sources.contains(id));
+                            if let Some(id) = clash {
+                                note = Some((Instant::now(), format!("style {spec}: source \"{id}\" clashes with a layer of yours")));
+                            } else {
+                                // Swap the basemap's layers and sources; imagery stays under it,
+                                // your layers and markers over it.
+                                let ids: Vec<&str> = basemap_ids.iter().map(String::as_str).collect();
+                                map.remove_layers(&ids);
+                                for id in &basemap_sources {
+                                    map.remove_source(id);
+                                }
+                                basemap_sources = new.sources().map(|(id, _)| id.to_string()).collect();
+                                let warnings = new.warnings().len();
+                                let before = map.layer_ids().into_iter().find(|id| *id != RASTER).map(str::to_string);
+                                basemap_ids = map.add_map(new, before.as_deref())?;
+                                base = base_visibility(&map);
+                                apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                                theme = th;
+                                basemap_name = name;
+                                let more = if warnings > 0 { format!(" ({warnings} properties not drawn)") } else { String::new() };
+                                note = Some((Instant::now(), format!("style: {spec}{more}")));
+                            }
+                        }
+                        Err(e) => note = Some((Instant::now(), format!("style {spec} failed: {e:#}"))),
+                    }
+                }
                 Some((query, r)) = grx.recv() => {
                     // Only the answer to the search still waiting counts.
                     if matches!(&search, Search::Waiting(q) if *q == query) {
@@ -1010,6 +1074,28 @@ async fn main() -> Result<()> {
                                             out.flush()?;
                                         }
                                     }
+                                    KeyCode::Char('m') if style_loading.is_none() => {
+                                        style_at = (style_at + 1) % styles.len();
+                                        let spec = styles[style_at].clone();
+                                        let (source, dark, cam, stx) = (builtin_source.clone(), theme.map_or(!a.light, |t| t.1), ctl.cam, stx.clone());
+                                        let sp = spec.clone();
+                                        tokio::spawn(async move {
+                                            let r = load_basemap(&sp, &source, dark, cam).await;
+                                            let _ = stx.send((sp, r));
+                                        });
+                                        note = Some((Instant::now(), format!("loading style {spec}…")));
+                                        style_loading = Some(spec);
+                                    }
+                                    KeyCode::Char('c') if !k.modifiers.contains(KeyModifiers::CONTROL) => {
+                                        // The pointer's position on the map, else the center.
+                                        let (what, (lon, lat)) = match pointer {
+                                            Some(d) => ("pointer", Viewport::new(&last_cam, map_area).dot_to_lonlat(d.0, d.1)),
+                                            None => ("center", (ctl.cam.lon, ctl.cam.lat)),
+                                        };
+                                        let text = format!("{lat:.6}, {lon:.6}");
+                                        osc52_copy(&text)?;
+                                        note = Some((Instant::now(), format!("copied {text} ({what})")));
+                                    }
                                     KeyCode::Char('t') => match theme {
                                         Some((schema, dark)) => {
                                             // Swap the basemap layers for the other theme's, in place.
@@ -1044,6 +1130,14 @@ async fn main() -> Result<()> {
                                     None => (m.column, m.row),
                                 };
                                 let pos = ratatui::layout::Position::new(cell.0, cell.1);
+                                // Where the pointer is on the map (exact with pixel reports), for c.
+                                pointer = map_area.contains(pos).then(|| {
+                                    let (ax, ay) = (map_area.x as f64, map_area.y as f64);
+                                    match ctl.pixel_mouse {
+                                        Some((cw, ch)) => ((m.column as f64 / cw - ax) * 2.0, (m.row as f64 / ch - ay) * 4.0),
+                                        None => ((cell.0 as f64 - ax) * 2.0 + 1.0, (cell.1 as f64 - ay) * 4.0 + 2.0),
+                                    }
+                                });
                                 // Clicks in the inspector select a feature; the map never sees them.
                                 if panel_area.width > 0 && panel_area.contains(pos) {
                                     if m.kind == event::MouseEventKind::Down(event::MouseButton::Left)

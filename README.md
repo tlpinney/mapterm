@@ -39,6 +39,11 @@ They follow the MapLibre GL / Mapbox GL defaults:
   Esc clears the marker. Searches go to [Photon](https://photon.komoot.io), an
   OpenStreetMap geocoder, only when you press Enter; `MAPTERM_GEOCODER=nominatim`
   or the URL of your own Photon or Nominatim server switches.
+- **`m`** switches the map style: the built-in one, then OpenFreeMap's liberty,
+  positron, bright, dark and fiord (a `--style` you started with comes first).
+  Imagery stays underneath and your GeoJSON layers on top.
+- **`c`** copies the coordinates under the pointer (or the map center) as
+  `lat, lon` to the clipboard (OSC 52).
 - Terminal extras: sideways swipes pan; `i` inspect, `v` vector overlay, `n` labels, `t` light/dark theme (built-in style), `q` quit
 
 ## GeoJSON layers
