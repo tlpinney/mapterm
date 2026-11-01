@@ -28,11 +28,13 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: mapterm [SOURCE] [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
+usage: mapterm [SOURCE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL
                 (default: OpenFreeMap planet)
-  --at          start position (default: the source's center)
+  --geojson     a GeoJSON file or URL drawn as a layer over the map (repeatable; each gets
+                its own color; names from a `name` property; inspect shows properties)
+  --at          start position (default: fit the GeoJSON layers, else the source's center)
   -z            start zoom
   --raster      an image tile layer under the vector map: a provider name (--raster-list),
                 a URL with {z}/{x}/{y} ({-y} or --tms for TMS rows, {key} for an API key),
@@ -75,6 +77,7 @@ struct Args {
     pick: Option<(u16, u16)>,
     raster: Option<String>,
     tms: bool,
+    geojson: Vec<String>,
     raster_attribution: Option<String>,
     raster_key_cmd: Option<String>,
     raster_headers: Vec<String>,
@@ -94,7 +97,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
+    let mut a = Args { source: OPENFREEMAP.into(), at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -107,6 +110,7 @@ fn args() -> Result<Args> {
             "--light" => a.light = true,
             "--raster" => a.raster = Some(it.next().context("--raster URL")?),
             "--tms" => a.tms = true,
+            "--geojson" => a.geojson.push(it.next().context("--geojson FILE|URL")?),
             "--raster-key-cmd" => a.raster_key_cmd = Some(it.next().context("--raster-key-cmd CMD")?),
             "--raster-header" => a.raster_headers.push(it.next().context("--raster-header 'Name: value'")?),
             "--raster-param" => {
@@ -301,7 +305,10 @@ fn draw_inspector(f: &mut ratatui::Frame, area: Rect, picks: &[mapterm::Pick], s
         d.push(Line::from(vec![key("area"), Span::raw(fmt_area(a))]));
     }
     d.push(Line::from(vec![key("vertices"), Span::raw(p.stats.vertices.to_string())]));
-    d.push(Line::from(vec![key("tile"), Span::raw(format!("{}/{}/{}", p.tile.0, p.tile.1, p.tile.2))]));
+    match p.tile {
+        Some(t) => d.push(Line::from(vec![key("tile"), Span::raw(format!("{}/{}/{}", t.0, t.1, t.2))])),
+        None => d.push(Line::from(vec![key("source"), Span::raw("GeoJSON layer")])),
+    }
     d.push(Line::default());
     d.push(Line::from(Span::styled(" properties", TStyle::new().add_modifier(Modifier::BOLD))));
     let mut translations = 0;
@@ -360,7 +367,25 @@ async fn main() -> Result<()> {
         return list_planet_mosaics(a.raster_key_cmd.as_deref()).await;
     }
     let src = Arc::new(Source::open(&a.source).await?);
+    let mut layers = Vec::new();
+    for (i, g) in a.geojson.iter().enumerate() {
+        let color = mapterm::geojson::PALETTE[i % mapterm::geojson::PALETTE.len()];
+        layers.push(mapterm::geojson::load(g, color).await.with_context(|| format!("--geojson {g}"))?);
+    }
+    // With GeoJSON and no --at, start with every layer in view.
+    let fit = (a.at.is_none() && !layers.is_empty())
+        .then(|| {
+            let b = layers.iter().filter_map(|l| l.bounds_lonlat()).reduce(|a, b| (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3)))?;
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
+            let (snap_cols, snap_rows) = a.snapshot.unwrap_or((cols, rows.saturating_sub(1)));
+            Some(mapterm::geojson::fit(b, snap_cols, snap_rows, 18.0))
+        })
+        .flatten();
     let (lon, lat, z) = match (a.at, src.center) {
+        _ if fit.is_some() => {
+            let (lo, la, z) = fit.unwrap();
+            (lo, la, a.zoom.unwrap_or(z))
+        }
         (Some((lo, la)), _) => (lo, la, a.zoom.unwrap_or(12.0)),
         (None, Some((lo, la, z))) => (lo, la, a.zoom.unwrap_or(z)),
         (None, None) => (0.0, 20.0, a.zoom.unwrap_or(2.0)),
@@ -444,13 +469,16 @@ async fn main() -> Result<()> {
             }
         }
         if let Some((c, r)) = a.pick {
-            for p in mapterm::pick(&store, &cam, src.min_zoom, src.max_zoom, area, c, r) {
+            let dot = ((c as f64 - area.x as f64) * 2.0 + 1.0, (r as f64 - area.y as f64) * 4.0 + 2.0);
+            let mut found = mapterm::pick::pick_layers(&layers, &cam, area, dot);
+            found.extend(mapterm::pick(&store, &cam, src.min_zoom, src.max_zoom, area, c, r));
+            for p in found {
                 println!("{}", p.to_json());
             }
             return Ok(());
         }
         let mut buf = Buffer::empty(area);
-        MapWidget { store: &store, camera: &cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &[], fills: true, lines: true, labels: true }
+        MapWidget { store: &store, camera: &cam, min_zoom: src.min_zoom, max_zoom: src.max_zoom, overlays: &[], fills: true, lines: true, labels: true, layers: &layers, layer_fills: true }
             .render(area, &mut buf);
         for y in 0..h {
             let line: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
@@ -578,6 +606,8 @@ async fn main() -> Result<()> {
                         fills: raster.is_none() && vector == 0,
                         lines: vector == 0,
                         labels: labels && vector < 2,
+                        layers: &layers,
+                        layer_fills: raster.is_none(),
                     },
                     m,
                 );
@@ -628,6 +658,10 @@ async fn main() -> Result<()> {
                     let how = if kitty { "" } else { "(cells) " };
                     let credit = if r.attribution.is_empty() { r.name.clone() } else { format!("imagery {}", r.attribution) };
                     spans.push(Span::styled(format!("{credit} {how}{mode}"), TStyle::new().fg(Color::LightBlue)));
+                }
+                for l in &layers {
+                    spans.push(Span::styled("● ", TStyle::new().fg(l.color)));
+                    spans.push(Span::styled(format!("{} ", l.name), dim));
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
                 spans.push(Span::styled(format!("· {} · © OpenStreetMap · q quit", src.name), dim));
@@ -829,7 +863,8 @@ async fn main() -> Result<()> {
                                     hover_dot = Some(dot);
                                     let key = (dot.0.floor() as i32, dot.1.floor() as i32);
                                     if hover.as_ref().is_none_or(|(k, _)| *k != key) {
-                                        let under = mapterm::pick_dot(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, dot);
+                                        let mut under = mapterm::pick::pick_layers(&layers, &last_cam, map_area, dot);
+                                        under.extend(mapterm::pick_dot(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, dot));
                                         hover = Some((key, match under.first() {
                                             Some(p) => {
                                                 let more = if under.len() > 1 { format!(" +{} more", under.len() - 1) } else { String::new() };
@@ -844,7 +879,9 @@ async fn main() -> Result<()> {
                                 if let Some(k) = ctl.take_click()
                                     && inspect
                                 {
-                                    picks = mapterm::pick_lonlat(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, k.lon, k.lat);
+                                    let dot = Viewport::new(&last_cam, map_area).dot_ll(k.lon, k.lat);
+                                    picks = mapterm::pick::pick_layers(&layers, &last_cam, map_area, dot);
+                                    picks.extend(mapterm::pick_lonlat(&store, &last_cam, src.min_zoom, src.max_zoom, map_area, k.lon, k.lat));
                                     sel = 0;
                                     click_at = Some((k.lon, k.lat));
                                     if picks.is_empty() {

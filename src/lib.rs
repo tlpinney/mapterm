@@ -11,8 +11,10 @@
 //!   measurements, for inspection and analysis.
 //! - [`raster`] PNG/JPEG XYZ or TMS layers under the vector map, drawn as images with the
 //!   [`kitty`] graphics protocol or as cell colors in any terminal.
+//! - [`geojson`] GeoJSON files or URLs as overlay layers of points, lines and polygons.
 //! - [`smooth`] opt-in pixel smooth vertical panning for the Ghostty smooth-scroll fork.
 
+pub mod geojson;
 pub mod interact;
 pub mod kitty;
 pub mod mvt;

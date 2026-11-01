@@ -388,6 +388,10 @@ pub struct MapWidget<'a> {
     /// Roads, rivers, boundaries.
     pub lines: bool,
     pub labels: bool,
+    /// GeoJSON overlay layers, drawn over the map in order.
+    pub layers: &'a [crate::geojson::Layer],
+    /// Tint polygon interiors of overlay layers (off over a raster to keep it visible).
+    pub layer_fills: bool,
 }
 
 impl Widget for MapWidget<'_> {
@@ -460,8 +464,73 @@ impl Widget for MapWidget<'_> {
             }
         }
 
-        // Overlays: lines on the map, markers as text with first claim on space.
+        // GeoJSON layers: polygon interiors tinted, outlines and lines in braille, points as
+        // markers, `name` labels. Only features overlapping the view are projected.
         let mut markers = Vec::new();
+        let view = {
+            let (cx, cy) = to_world(self.camera.lon, self.camera.lat);
+            let s = TILE_DOTS * 2f64.powf(self.camera.zoom);
+            let (hw, hh) = (vw / 2.0 / s, vh / 2.0 / s);
+            [cx - hw, cy - hh, cx + hw, cy + hh]
+        };
+        for layer in self.layers {
+            let color = layer.color;
+            let tint = match color {
+                Color::Rgb(r, g, b) => Color::Rgb((r as f32 * 0.32) as u8, (g as f32 * 0.32) as u8, (b as f32 * 0.32) as u8),
+                c => c,
+            };
+            for f in &layer.features {
+                if f.bbox[2] < view[0] || f.bbox[0] > view[2] || f.bbox[3] < view[1] || f.bbox[1] > view[3] {
+                    continue;
+                }
+                let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
+                match f.geom {
+                    crate::mvt::GeomType::Polygon => {
+                        if self.layer_fills {
+                            cv.fill(&dots, tint);
+                        }
+                        for ring in &dots {
+                            for s in ring.windows(2) {
+                                cv.line(s[0], s[1], color);
+                            }
+                        }
+                    }
+                    crate::mvt::GeomType::Line => {
+                        for part in &dots {
+                            for s in part.windows(2) {
+                                cv.line(s[0], s[1], color);
+                            }
+                        }
+                    }
+                    _ => {
+                        for &p in dots.iter().flatten() {
+                            markers.push((50, p, "●".to_string(), TStyle::new().fg(color), None));
+                        }
+                    }
+                }
+                if self.labels
+                    && let Some(text) = &f.label
+                {
+                    // Points label beside the marker; lines and polygons at their middle.
+                    let anchor = if f.geom == crate::mvt::GeomType::Point {
+                        dots.first().and_then(|p| p.first()).map(|p| (p.0 + 4.0 + text.width() as f64, p.1))
+                    } else {
+                        let (x0, y0, x1, y1) = (
+                            (f.bbox[0] - view[0]) / (view[2] - view[0]) * vw,
+                            (f.bbox[1] - view[1]) / (view[3] - view[1]) * vh,
+                            (f.bbox[2] - view[0]) / (view[2] - view[0]) * vw,
+                            (f.bbox[3] - view[1]) / (view[3] - view[1]) * vh,
+                        );
+                        Some(((x0 + x1) / 2.0, (y0 + y1) / 2.0))
+                    };
+                    if let Some(p) = anchor.filter(|p| inside(*p)) {
+                        labels.push((60, text.clone(), TStyle::new().fg(color).add_modifier(Modifier::BOLD), p));
+                    }
+                }
+            }
+        }
+
+        // Overlays: lines on the map, markers as text with first claim on space.
         for o in self.overlays {
             match o {
                 Overlay::Line { pts, color } => {
@@ -470,7 +539,9 @@ impl Widget for MapWidget<'_> {
                         cv.line(s[0], s[1], *color);
                     }
                 }
-                Overlay::Marker { lon, lat, glyph, style, label, priority } => markers.push((*priority, vp.dot_ll(*lon, *lat), glyph, style, label)),
+                Overlay::Marker { lon, lat, glyph, style, label, priority } => {
+                    markers.push((*priority, vp.dot_ll(*lon, *lat), glyph.clone(), *style, label.clone()))
+                }
             }
         }
         markers.sort_by(|a, b| b.0.cmp(&a.0));
@@ -479,10 +550,10 @@ impl Widget for MapWidget<'_> {
                 continue;
             }
             let (col, row) = ((p.0 / 2.0) as i64, (p.1 / 4.0) as i64);
-            if cv.text_at(col, row, glyph, *st, false)
+            if cv.text_at(col, row, &glyph, st, false)
                 && let Some((l, ls)) = label
             {
-                cv.text_at(col + glyph.width() as i64 + 1, row, l, *ls, true);
+                cv.text_at(col + glyph.width() as i64 + 1, row, &l, ls, true);
             }
         }
 

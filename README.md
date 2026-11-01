@@ -26,6 +26,22 @@ They follow the MapLibre GL / Mapbox GL defaults:
 - **Arrows** (or `hjkl`) pan, **`+`/`-`** zoom to the next level, both eased
 - Terminal extras: sideways swipes pan; `i` inspect, `v` vector overlay, `n` labels, `t` light/dark theme, `q` quit
 
+## GeoJSON layers
+
+`--geojson FILE|URL` draws your data over the map, as many layers as you like:
+
+```sh
+mapterm --geojson sites.geojson --geojson https://example.com/routes.geojson
+```
+
+- Points, lines and polygons (including Multi* and GeometryCollection), each
+  layer in its own color with a legend in the status bar; polygon interiors are
+  tinted (left clear over a raster layer).
+- Features with a `name` (or `title`/`label`) property are labeled.
+- Without `--at`, the map starts zoomed to fit all layers.
+- Inspect mode (`i`) lists your features first, with all their properties, and
+  `--snapshot ... --pick COL,ROW` prints them as JSON lines.
+
 ## Raster layers
 
 `--raster` puts an image tile layer under the vector map, by provider name or URL:
