@@ -14,9 +14,9 @@ categories = ["command-line-utilities", "science::geo", "visualization"]
 # Private for now: never published to crates.io (cargo publish refuses). Install from git:
 #   cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 publish = false
-# Kept out of the package: CI config and the integration tests with their fixtures (they
-# live in the repository).
-exclude = [".github/", "tests/", "deny.toml"]
+# Kept out of the package: CI and release tooling, and the integration tests with their
+# fixtures (they live in the repository).
+exclude = [".github/", "tests/", "deny.toml", "release/", "signing/"]
 
 [dependencies]
 anyhow = "1.0.104"

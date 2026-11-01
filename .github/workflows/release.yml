@@ -1,0 +1,119 @@
+name: Release
+
+# Builds release binaries for a version tag and attaches them to its GitHub release as a
+# draft. The maintainer then signs SHA256SUMS locally and publishes it with
+# release/sign-release.sh; CI never holds the signing key.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "An existing version tag to build, e.g. v0.1.0-alpha.1"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  check:
+    name: Check the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - id: version
+        name: The tag matches Cargo.toml
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG doesn't match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --bin mapterm --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          name="mapterm-${{ needs.check.outputs.version }}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/mapterm" README.md LICENSE CHANGELOG.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+          "$name/mapterm" --help | head -1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.target }}
+          path: mapterm-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Draft the release
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum mapterm-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Draft release with the archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sh release/notes.sh "$TAG" > notes.md
+          pre=""
+          case "$TAG" in *-*) pre="--prerelease" ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # An existing release goes back to draft until it is signed again.
+            gh release edit "$TAG" --draft=true --notes-file notes.md
+            gh release delete-asset "$TAG" SHA256SUMS.sig --yes 2>/dev/null || true
+          else
+            gh release create "$TAG" --verify-tag --draft $pre --title "mapterm ${TAG#v}" --notes-file notes.md
+          fi
+          gh release upload "$TAG" dist/mapterm-*.tar.gz dist/SHA256SUMS --clobber
+          echo "Drafted $TAG; sign and publish it with: release/sign-release.sh $TAG"

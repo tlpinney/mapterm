@@ -1,0 +1,3 @@
+# Keys trusted to sign mapterm releases (their SHA256SUMS), for ssh-keygen -Y verify.
+# Namespace: mapterm-release. Principal: tlpinney.
+tlpinney namespaces="mapterm-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFSZDt6uNCxuvSttHDBUcV1dctXJ1DBwYnQdbk19FfFP
