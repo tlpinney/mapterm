@@ -38,11 +38,10 @@ All notable changes to mapterm are listed here. The format follows
   `signing/allowed_signers`). The release notes say how to verify, taking the key from
   the signing keys on the maintainer's GitHub account rather than from the repository.
 - Commits and tags are signed with the same key (shown as Verified on GitHub).
-- Installing with Cargo from the private repository needs
-  `CARGO_NET_GIT_FETCH_WITH_CLI=true`, so Cargo uses git's credentials:
+- Install with Cargo from git (not published to crates.io):
 
   ```sh
-  CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.2
+  cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.2
   ```
 
 ## [0.1.0-alpha.1] - 2026-11-01

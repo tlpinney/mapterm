@@ -29,7 +29,7 @@ use mapterm::{
 };
 use tokio::sync::{Semaphore, mpsc};
 
-const USAGE: &str = "mapterm -- vector map tiles in the terminal
+const USAGE: &str = "mapterm -- a map in your terminal
 
 usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 

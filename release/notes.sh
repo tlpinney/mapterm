@@ -27,8 +27,8 @@ cat <<NOTES
 \`SHA256SUMS\` lists every archive's checksum, and \`SHA256SUMS.sig\` is the maintainer's SSH
 signature of it. The trusted key comes from the signing keys on the maintainer's GitHub
 account, not from this repository (fingerprint
-\`SHA256:LiOY0+3e/eOQFeUsG7iMovOBJui3yCAXXHlWz48c4uk\`). To download and check (the
-repository is private, so use \`gh\`):
+\`SHA256:LiOY0+3e/eOQFeUsG7iMovOBJui3yCAXXHlWz48c4uk\`). To download and check with
+\`gh\`:
 
 \`\`\`sh
 gh release download $tag --repo tlpinney/mapterm
@@ -38,11 +38,10 @@ shasum -a 256 -c SHA256SUMS --ignore-missing
 tar xzf mapterm-$version-*.tar.gz
 \`\`\`
 
-Or build it with Cargo (\`CARGO_NET_GIT_FETCH_WITH_CLI\` lets Cargo use git's credentials for
-the private repository; Rust 1.89 or newer):
+Or build it with Cargo (Rust 1.89 or newer):
 
 \`\`\`sh
-CARGO_NET_GIT_FETCH_WITH_CLI=true cargo install --git https://github.com/tlpinney/mapterm --tag $tag
+cargo install --git https://github.com/tlpinney/mapterm --tag $tag
 \`\`\`
 
 The macOS binary isn't notarized: files downloaded with a browser need
