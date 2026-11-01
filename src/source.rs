@@ -345,7 +345,12 @@ impl Source {
 
     /// `spec` is a .pmtiles path or URL, an XYZ template containing {z}/{x}/{y}, or a TileJSON URL.
     pub async fn open(spec: &str) -> Result<Self> {
-        let http = http_client();
+        Self::open_inner(spec).await.map_err(crate::mapbox::redact)
+    }
+
+    async fn open_inner(spec: &str) -> Result<Self> {
+        // Mapbox URLs carry the access token: no redirects to other hosts.
+        let http = if crate::mapbox::is_mapbox_host(spec) { keyed_client().clone() } else { http_client() };
         let is_http = spec.starts_with("http://") || spec.starts_with("https://");
         let cache_dir = is_http.then(|| cache_root().join(hash(spec)));
         if spec.ends_with(".pmtiles") {
@@ -390,6 +395,15 @@ impl Source {
 
     /// Raw (decompressed) MVT bytes, or None when the source has no such tile.
     pub async fn tile(&self, z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>> {
+        // Mapbox's tiles: cached by their HTTP headers, as received (gzipped).
+        if let (Kind::Xyz(t), Some(dir)) = (&self.kind, &self.cache_dir)
+            && crate::mapbox::is_mapbox_host(t)
+        {
+            let url = t.replace("{z}", &z.to_string()).replace("{x}", &x.to_string()).replace("{y}", &y.to_string());
+            let file = dir.join(format!("{z}/{x}/{y}.pbf"));
+            let bytes = fetch_by_headers(&self.http, &file, &url, &[], true).await.map_err(crate::mapbox::redact)?;
+            return bytes.map(maybe_gunzip).transpose();
+        }
         let path = self.cache_dir.as_ref().map(|d| d.join(format!("{z}/{x}/{y}.mvt")));
         if let Some(p) = &path
             && let Some(b) = read_fresh(p)
@@ -494,6 +508,62 @@ pub(crate) async fn get_revalidated(http: &reqwest::Client, url: &str, headers: 
         }
     }
     Ok(Revalidated { bytes: Some(out), not_modified: false, policy, etag })
+}
+
+/// A tile cached by its HTTP headers at `file` (with a `.meta` beside it: "expires etag"):
+/// used as is until its `max-age` runs out (at most 30 days), then asked for again with
+/// `If-None-Match`, so an unchanged tile comes back as a 304 and is kept. `no-store` and
+/// `no-cache` responses aren't kept. Bytes are stored as received. With `cache` off it
+/// only fetches.
+pub(crate) async fn fetch_by_headers(http: &reqwest::Client, file: &Path, url: &str, headers: &[(String, String)], cache: bool) -> Result<Option<Vec<u8>>> {
+    let meta = file.with_extension("meta");
+    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let cached = if cache { read_meta(&meta).zip(std::fs::read(file).ok()) } else { None };
+    if let Some(((expires, _), bytes)) = &cached
+        && now < *expires
+    {
+        return Ok(Some(bytes.clone()));
+    }
+    let etag = cached.as_ref().and_then(|((_, e), _)| e.clone());
+    let r = get_revalidated(http, url, headers, etag.as_deref()).await?;
+    let keep = r.policy.max_age.min(DISK_TTL.as_secs());
+    if r.not_modified {
+        let Some(((_, old_etag), bytes)) = cached else { bail!("{url}: HTTP 304 without a cached tile") };
+        if cache && !r.policy.no_store {
+            let _ = write_meta(&meta, now + keep, r.etag.as_deref().or(old_etag.as_deref()));
+        }
+        return Ok(Some(bytes));
+    }
+    if cache {
+        match &r.bytes {
+            Some(b) if !r.policy.no_store && keep > 0 => {
+                if let Some(d) = file.parent() {
+                    let _ = std::fs::create_dir_all(d);
+                }
+                if std::fs::write(file, b).is_ok() {
+                    let _ = write_meta(&meta, now + keep, r.etag.as_deref());
+                }
+            }
+            _ => {
+                // Not to be kept (or no tile): drop any older copy.
+                let _ = std::fs::remove_file(file);
+                let _ = std::fs::remove_file(&meta);
+            }
+        }
+    }
+    Ok(r.bytes)
+}
+
+/// "expires etag" from a `.meta` file (etag may be absent).
+pub(crate) fn read_meta(p: &Path) -> Option<(u64, Option<String>)> {
+    let s = std::fs::read_to_string(p).ok()?;
+    let mut it = s.trim().splitn(2, ' ');
+    let expires = it.next()?.parse().ok()?;
+    Some((expires, it.next().map(str::to_string).filter(|e| !e.is_empty())))
+}
+
+pub(crate) fn write_meta(p: &Path, expires: u64, etag: Option<&str>) -> std::io::Result<()> {
+    std::fs::write(p, format!("{expires} {}", etag.unwrap_or("")))
 }
 
 pub(crate) fn read_fresh(p: &Path) -> Option<Vec<u8>> {

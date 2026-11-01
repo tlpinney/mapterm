@@ -82,6 +82,7 @@ pub mod interact;
 pub mod kitty;
 pub mod layer;
 pub mod map;
+pub mod mapbox;
 pub mod mvt;
 pub mod pbf;
 pub mod pick;

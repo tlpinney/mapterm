@@ -65,6 +65,7 @@ mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over H
 mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, offline
 mapterm --style liberty                                # any MapLibre style: liberty, positron,
 mapterm --style ./my-style.json                        #   bright, dark, fiord, a URL or a file
+mapterm --style mapbox://styles/mapbox/streets-v12 --mapbox-token-cmd 'pass show mapbox-token'  # Mapbox
 mapterm --snapshot 120x40 --at 38.8895,-77.0353         # print one frame as text and exit
 mapterm --snapshot 120x40 --format html > map.html       #   ... or as colored ANSI text or HTML
 ```
@@ -171,7 +172,9 @@ the status bar credits "Google Maps" and Google's imagery or map data credits fo
 view (asked again when it settles somewhere new). Google tiles are kept on disk only as
 long as each tile's `Cache-Control` header allows (a day, as of 2026), then checked with
 its `ETag` instead of downloaded again, as Google's terms ask; `--raster-no-cache` turns
-that off. While the camera moves, paid imagery loads for where it
+that off. Mapbox's tiles (`--raster mapbox`, and the vector tiles of `mapbox://` styles)
+are cached the same way (12 hours, as of 2026); one token, from `--mapbox-token-cmd` or
+`MAPBOX_ACCESS_TOKEN`, serves both. While the camera moves, paid imagery loads for where it
 will stop, not for the views on the way, and `--raster-limit N|off` caps imagery requests
 a minute (300 by default for keyed providers). Keyed providers don't cache tiles on disk unless you pass
 `--raster-cache`, since commercial licenses often limit storing them. For any
@@ -262,7 +265,8 @@ let under = map.query_rendered_features(&ctl.cam, area, dot, Some(&["pins"]));
 ```
 
 - Styles: `Map::from_style` takes an OpenFreeMap name (`liberty`, `positron`,
-  `bright`, `dark`, `fiord`), a style URL or file, or `mapterm-dark` /
+  `bright`, `dark`, `fiord`), a style URL or file, a Mapbox `mapbox://styles/...` URL
+  (after `mapbox::set_access_token`), or `mapterm-dark` /
   `mapterm-light`, built-in styles tuned for terminal cells. Style layers can
   also be built in Rust with `StyleLayer`.
 - Change the map with `set_data`, `set_paint`, `set_layout`, `set_filter`,

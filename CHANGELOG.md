@@ -30,6 +30,13 @@ All notable changes to mapterm are listed here. The format follows
   limit instead of given up, and the viewer pauses imagery requests for a minute and says
   so, instead of counting them as failed.
 
+- Mapbox styles and tilesets: `--style mapbox://styles/mapbox/streets-v12` (and
+  `Map::from_style` with a `mapbox://` URL) once a token is set with
+  `mapbox::set_access_token`, `--mapbox-token-cmd` or `MAPBOX_ACCESS_TOKEN`. `mapbox://`
+  style and tileset URLs become Mapbox API URLs; the token is kept out of errors and
+  source names. Mapbox's raster and vector tiles are cached by their HTTP headers (12
+  hours, as of 2026) like Google's, and `--raster mapbox` uses the same token.
+
 ### Added (viewer)
 
 - `--raster-limit N|off` (or `MAPTERM_RASTER_LIMIT`): at most N imagery tile requests a

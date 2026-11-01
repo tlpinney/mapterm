@@ -38,6 +38,11 @@ pub fn style_location(spec: &str) -> String {
 
 /// Read a style document from a URL, a file, or an OpenFreeMap style name.
 pub async fn read_style(spec: &str) -> Result<Json> {
+    if crate::mapbox::is_mapbox_url(spec) {
+        let url = crate::mapbox::resolve(spec)?;
+        let bytes = crate::source::get_with(crate::source::keyed_client(), &url, None, &[]).await.map_err(crate::mapbox::redact)?.with_context(|| format!("{spec}: not found"))?;
+        return serde_json::from_slice(&bytes).with_context(|| format!("{spec}: not a JSON style"));
+    }
     let loc = style_location(spec);
     let bytes = if loc.starts_with("http://") || loc.starts_with("https://") {
         let http = crate::source::http_client();
@@ -53,7 +58,7 @@ pub async fn read_style(spec: &str) -> Result<Json> {
 }
 
 fn is_remote(loc: &str) -> bool {
-    loc.starts_with("http://") || loc.starts_with("https://")
+    loc.starts_with("http://") || loc.starts_with("https://") || crate::mapbox::is_mapbox_url(loc)
 }
 
 /// A style from the web may only point at the web: its sources can't read local files
@@ -217,10 +222,14 @@ async fn open_vector(s: &Json) -> Result<crate::map::VectorSource> {
         (None, Some(t)) => t.to_string(),
         _ => bail!("vector source without \"url\" or \"tiles\""),
     };
-    if spec.starts_with("mapbox://") {
-        bail!("mapbox:// URLs need Mapbox's API; use an https URL");
-    }
-    let mut src = Source::open(&spec).await?;
+    let mut src = if crate::mapbox::is_mapbox_url(&spec) {
+        let mut src = Source::open(&crate::mapbox::resolve(&spec)?).await?;
+        // The resolved URL holds the token; show the mapbox:// one.
+        src.name = spec.clone();
+        src
+    } else {
+        Source::open(&spec).await?
+    };
     if let Some(z) = s["minzoom"].as_u64() {
         src.min_zoom = z.min(30) as u8;
     }
