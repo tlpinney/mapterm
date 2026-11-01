@@ -4,7 +4,7 @@ version = "0.1.0-alpha.2"
 edition = "2024"
 # The oldest Rust that builds it (the uuid dependency needs 1.89; mapterm itself 1.88).
 rust-version = "1.89"
-description = "A map in your terminal: vector tiles (PMTiles, OpenFreeMap) as a ratatui widget, plus the mapterm viewer"
+description = "A map in your terminal: vector tiles, MapLibre styles, imagery and your own data, as a ratatui widget and the mapterm viewer"
 license = "MIT"
 authors = ["Travis Pinney <travis.pinney@gmail.com>"]
 repository = "https://github.com/tlpinney/mapterm"

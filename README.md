@@ -1,9 +1,26 @@
 # mapterm
 
-A map in your terminal. `mapterm` draws OpenStreetMap vector tiles with braille
-characters, pans and zooms like a web map, and works over SSH. The same code is a
-library: a [ratatui](https://ratatui.rs) map widget you can drop into your own
-terminal apps.
+A map in your terminal, with the pan, zoom and styling of a web map, that also works
+over SSH.
+
+- **Any vector tiles:** OpenFreeMap out of the box (no key), PMTiles files locally or over
+  HTTP, XYZ URLs and TileJSON, drawn in braille with cell-color fills and labels that
+  don't collide.
+- **MapLibre styles:** liberty, positron and the other OpenFreeMap styles, or your own,
+  with expressions, filters, fonts and point icons.
+- **Imagery:** satellite and aerial layers (OSM, Esri, USGS, NASA GIBS, and keyed
+  providers such as Vantor, Planet and Mapbox) as real images in kitty-graphics terminals, or as
+  cell colors anywhere else.
+- **Your data:** GeoJSON, CSV, GPX, KML and FlatGeobuf, from a file or a URL, drawn over
+  the map, with clustering for large point sets.
+- **Search and inspect:** find a place and fly there; point at anything to see its
+  features and properties, and copy them as JSON.
+- **Scriptable:** `--snapshot` prints a frame as text, ANSI or HTML, and `--pick` prints
+  the features at a spot as JSON.
+
+The same code is a library: a [ratatui](https://ratatui.rs) widget with a MapLibre GL
+style API (sources, style layers, expressions, events and feature state, feature
+queries) that you can drop into your own terminal apps.
 
 ```sh
 cargo install --path .         # installs the `mapterm` command
