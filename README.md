@@ -15,6 +15,7 @@ mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, 
 mapterm --style liberty                                # any MapLibre style: liberty, positron,
 mapterm --style ./my-style.json                        #   bright, dark, fiord, a URL or a file
 mapterm --snapshot 120x40 --at 38.8895,-77.0353         # print one frame as text and exit
+mapterm --snapshot 120x40 --format html > map.html       #   ... or as colored ANSI text or HTML
 ```
 
 Without `--style`, mapterm draws the source with its own terminal style (OpenMapTiles

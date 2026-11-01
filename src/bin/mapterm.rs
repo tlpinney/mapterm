@@ -31,7 +31,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- vector map tiles in the terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL, drawn
                 with mapterm's terminal style (default: OpenFreeMap planet)
@@ -59,6 +59,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --tms                   count raster rows from the bottom (TMS) even with a plain {y}
   --light       light theme (the built-in style; t switches)
   --snapshot    render one frame to stdout as text and exit
+  --format      with --snapshot: text (default), ansi (24-bit color) or html (a <pre> fragment)
   --pick        with --snapshot: print the features under that cell as JSON lines instead
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
@@ -80,6 +81,8 @@ struct Args {
     zoom: Option<f64>,
     light: bool,
     snapshot: Option<(u16, u16)>,
+    /// --snapshot output: text, ansi or html.
+    format: String,
     pick: Option<(u16, u16)>,
     raster: Option<String>,
     tms: bool,
@@ -103,7 +106,7 @@ fn args() -> Result<Args> {
         "shift" => (true, true),
         other => bail!("MAPTERM_SMOOTH={other}: use `shift` (pixel-smooth dragging) or `1` (smooth up/down panning)"),
     };
-    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, snapshot: None, pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
+    let mut a = Args { source: None, style: None, at: None, zoom: None, light: false, snapshot: None, format: "text".into(), pick: None, raster: None, tms: false, geojson: Vec::new(), raster_attribution: None, raster_key_cmd: None, raster_headers: Vec::new(), raster_cache: None, raster_params: Vec::new(), list_mosaics: false, smooth, shift };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
         match x.as_str() {
@@ -143,6 +146,13 @@ fn args() -> Result<Args> {
                 let v = it.next().context("--snapshot COLSxROWS")?;
                 let (c, r) = v.split_once('x').context("--snapshot COLSxROWS")?;
                 a.snapshot = Some((c.parse()?, r.parse()?));
+            }
+            "--format" => {
+                let v = it.next().context("--format text|ansi|html")?;
+                if !matches!(v.as_str(), "text" | "ansi" | "html") {
+                    bail!("--format {v}: use text, ansi or html");
+                }
+                a.format = v;
             }
             "--pick" => {
                 let v = it.next().context("--pick COL,ROW")?;
@@ -553,10 +563,12 @@ async fn main() -> Result<()> {
         }
         let mut buf = Buffer::empty(area);
         map.view(&cam).render(area, &mut buf);
-        for y in 0..h {
-            let line: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
-            println!("{}", line.trim_end());
-        }
+        let out = match a.format.as_str() {
+            "ansi" => mapterm::export::to_ansi(&buf),
+            "html" => mapterm::export::to_html(&buf),
+            _ => mapterm::export::to_text(&buf),
+        };
+        print!("{out}");
         return Ok(());
     }
 
