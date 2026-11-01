@@ -109,7 +109,16 @@ impl Map {
                     Ok(r) => map.add_source(id, MapSource::raster(std::sync::Arc::new(r)))?,
                     Err(e) => map.warn(format!("source \"{id}\": {e:#}")),
                 },
-                t => map.warn(format!("source \"{id}\": type {} is not drawn", t.unwrap_or("?"))),
+                t => {
+                    map.warn(format!("source \"{id}\": type {} is not drawn", t.unwrap_or("?")));
+                    continue;
+                }
+            }
+            // The style's own credit for a source wins over the tiles' metadata.
+            if let Some(a) = s["attribution"].as_str()
+                && map.source(id).is_some()
+            {
+                map.set_attribution(id, a)?;
             }
         }
         if let (Some(lon), Some(lat)) = (doc["center"][0].as_f64(), doc["center"][1].as_f64()) {

@@ -321,6 +321,7 @@ impl RasterSource {
         let http = http_client();
         let pm = PmArchive::open_raster(spec, &http).await?;
         let name = spec.rsplit('/').next().unwrap_or(spec).to_string();
+        let attribution = pm.attribution.as_deref().map(crate::source::plain_attribution).unwrap_or_default();
         Ok(Self {
             template: String::new(),
             tms: false,
@@ -335,7 +336,7 @@ impl RasterSource {
             max_zoom: pm.header.max_zoom,
             pm: Some(Arc::new(pm)),
             name,
-            attribution: String::new(),
+            attribution,
         })
     }
 

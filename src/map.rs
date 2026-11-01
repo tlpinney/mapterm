@@ -62,12 +62,23 @@ pub enum MapSource {
 impl MapSource {
     /// Vector tiles fetched from `src` by [`Map::load_tiles`].
     pub fn vector(src: Source) -> Self {
-        MapSource::Vector(VectorSource { min_zoom: src.min_zoom, max_zoom: src.max_zoom, fetch: Some(Arc::new(src)), tiles: Tiles::default() })
+        let attribution = src.attribution.as_deref().map(crate::source::plain_attribution);
+        MapSource::Vector(VectorSource { min_zoom: src.min_zoom, max_zoom: src.max_zoom, attribution, fetch: Some(Arc::new(src)), tiles: Tiles::default() })
     }
 
     /// Vector tiles the app supplies itself with [`Map::insert_tile`].
     pub fn vector_tiles(min_zoom: u8, max_zoom: u8) -> Self {
-        MapSource::Vector(VectorSource { min_zoom, max_zoom, fetch: None, tiles: Tiles::default() })
+        MapSource::Vector(VectorSource { min_zoom, max_zoom, attribution: None, fetch: None, tiles: Tiles::default() })
+    }
+
+    /// The source's credit as plain text, if it has one.
+    pub fn attribution(&self) -> Option<&str> {
+        match self {
+            MapSource::Vector(v) => v.attribution.as_deref(),
+            MapSource::GeoJson(g) => g.attribution.as_deref(),
+            MapSource::Raster(r) => Some(r.src.attribution.as_str()),
+        }
+        .filter(|a| !a.trim().is_empty())
     }
 
     /// A GeoJSON document (FeatureCollection, Feature or geometry).
@@ -171,13 +182,15 @@ impl KittyState {
 
 impl From<geojson::GeoJson> for MapSource {
     fn from(g: geojson::GeoJson) -> Self {
-        MapSource::GeoJson(GeoJsonSource { features: g.features, bbox: g.bbox })
+        MapSource::GeoJson(GeoJsonSource { features: g.features, bbox: g.bbox, attribution: None })
     }
 }
 
 pub struct VectorSource {
     pub min_zoom: u8,
     pub max_zoom: u8,
+    /// Credit to show while the source is drawn (plain text).
+    pub attribution: Option<String>,
     fetch: Option<Arc<Source>>,
     tiles: Tiles,
 }
@@ -186,12 +199,14 @@ pub struct GeoJsonSource {
     pub features: Vec<geojson::Feature>,
     /// [min_x, min_y, max_x, max_y] in world coordinates.
     pub bbox: [f64; 4],
+    /// Credit to show while the source is drawn (plain text).
+    pub attribution: Option<String>,
 }
 
 impl GeoJsonSource {
     pub fn parse(doc: &Json) -> Result<Self> {
         let (features, bbox) = geojson::features(doc)?;
-        Ok(Self { features, bbox })
+        Ok(Self { features, bbox, attribution: None })
     }
 }
 
@@ -416,11 +431,53 @@ impl Map {
         self.sources.iter().find(|(s, _)| s == id).map(|(_, s)| s)
     }
 
+    /// Set a source's credit (plain text, or HTML that [`crate::source::plain_attribution`]
+    /// turns into text); empty removes it. Raster sources keep theirs on the shared source.
+    pub fn set_attribution(&mut self, id: &str, text: &str) -> Result<()> {
+        let text = crate::source::plain_attribution(text);
+        let value = (!text.is_empty()).then_some(text);
+        match self.sources.iter_mut().find(|(s, _)| s == id) {
+            Some((_, MapSource::Vector(v))) => v.attribution = value,
+            Some((_, MapSource::GeoJson(g))) => g.attribution = value,
+            Some((_, MapSource::Raster(r))) => match Arc::get_mut(&mut r.src) {
+                Some(src) => src.attribution = value.unwrap_or_default(),
+                None => bail!("raster source \"{id}\" is shared; set its attribution before adding it"),
+            },
+            None => bail!("no source \"{id}\""),
+        }
+        Ok(())
+    }
+
+    /// The credits of the sources that the layers shown at `zoom` draw from, in source order
+    /// and without repeats, as MapLibre's attribution control lists them.
+    pub fn attributions(&self, zoom: f64) -> Vec<String> {
+        let used: HashSet<&str> = self
+            .layers
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Style(l) if l.shown_at(zoom) && l.kind != Kind::Background => l.source.as_deref(),
+                _ => None,
+            })
+            .collect();
+        let mut out: Vec<String> = Vec::new();
+        for (id, s) in &self.sources {
+            if let Some(a) = s.attribution().filter(|_| used.contains(id.as_str()))
+                && !out.iter().any(|o| o == a)
+            {
+                out.push(a.to_string());
+            }
+        }
+        out
+    }
+
     /// Replace a GeoJSON source's data (MapLibre's `setData`).
     pub fn set_data(&mut self, id: &str, doc: &Json) -> Result<()> {
-        let data = GeoJsonSource::parse(doc)?;
+        let mut data = GeoJsonSource::parse(doc)?;
         match self.sources.iter_mut().find(|(s, _)| s == id) {
-            Some((_, MapSource::GeoJson(g))) => *g = data,
+            Some((_, MapSource::GeoJson(g))) => {
+                data.attribution = g.attribution.take();
+                *g = data;
+            }
             Some(_) => bail!("source \"{id}\" is not a GeoJSON source"),
             None => bail!("no source \"{id}\""),
         }
@@ -1617,5 +1674,27 @@ mod tests {
         assert!(map.query_rendered_features(&center(15.2), area, (40.0, 40.0), None).is_empty());
         let picks = map.query_features(&center(15.2), area, (40.0, 40.0));
         assert!(picks.len() == 1 && !picks[0].drawn, "listed by inspect, but not drawn at z15");
+    }
+
+    #[test]
+    fn attributions_of_drawn_sources() {
+        let mut map = sample();
+        assert!(map.attributions(15.0).is_empty(), "no credits given");
+        map.set_attribution("sites", "<a href='https://example.org'>&copy; Example Sites</a>").unwrap();
+        map.add_source("other", MapSource::geojson(&json!({"type": "Point", "coordinates": [0, 0]})).unwrap()).unwrap();
+        map.set_attribution("other", "© Example Sites").unwrap();
+        map.add_layer(StyleLayer::circle("other-dots", "other").min_zoom(16.0)).unwrap();
+        assert_eq!(map.attributions(15.0), vec!["© Example Sites"]);
+        assert_eq!(map.attributions(16.0), vec!["© Example Sites"], "the same credit once");
+        map.set_attribution("other", "Other Data").unwrap();
+        assert_eq!(map.attributions(16.0), vec!["© Example Sites", "Other Data"]);
+        assert_eq!(map.attributions(15.0), vec!["© Example Sites"], "layers not shown at this zoom don't credit");
+        for id in ["zones", "pins"] {
+            map.set_visibility(id, false).unwrap();
+        }
+        assert_eq!(map.attributions(16.0), vec!["Other Data"], "hidden layers don't credit");
+        map.set_data("other", &json!({"type": "Point", "coordinates": [1, 1]})).unwrap();
+        assert_eq!(map.attributions(16.0), vec!["Other Data"], "new data keeps the credit");
+        assert!(map.set_attribution("nope", "x").is_err());
     }
 }

@@ -102,6 +102,8 @@ enum Backend {
 pub struct PmArchive {
     backend: Backend,
     pub header: Header,
+    /// The archive's credit from its metadata (`attribution`), as given (often HTML).
+    pub attribution: Option<String>,
     root: Vec<Entry>,
     leaves: Mutex<HashMap<(u64, u64), Arc<Vec<Entry>>>>,
 }
@@ -160,7 +162,21 @@ impl PmArchive {
             None => Self::read(&backend, http, header.root_off, header.root_len).await?,
         };
         let root = pmtiles::parse_directory(&decompress(raw, header.internal_compression)?)?;
-        Ok(Self { backend, header, root, leaves: Mutex::new(HashMap::new()) })
+        // The metadata JSON holds the credit; skip it when absent, huge or unreadable.
+        let attribution = if header.meta_len > 0 && header.meta_len <= 1 << 20 {
+            let (mo, ml) = (header.meta_off as usize, header.meta_len as usize);
+            let raw = match first.get(mo..mo.saturating_add(ml)) {
+                Some(s) => Some(s.to_vec()),
+                None => Self::read(&backend, http, header.meta_off, header.meta_len).await.ok(),
+            };
+            raw.and_then(|r| decompress(r, header.internal_compression).ok())
+                .and_then(|j| serde_json::from_slice::<serde_json::Value>(&j).ok())
+                .and_then(|m| m["attribution"].as_str().map(str::to_string))
+                .filter(|a| !a.trim().is_empty())
+        } else {
+            None
+        };
+        Ok(Self { backend, header, attribution, root, leaves: Mutex::new(HashMap::new()) })
     }
 
     pub async fn tile(&self, http: &reqwest::Client, z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>> {
@@ -193,7 +209,7 @@ impl PmArchive {
 }
 
 enum Kind {
-    Pm(PmArchive),
+    Pm(Box<PmArchive>),
     Xyz(String),
 }
 
@@ -206,6 +222,31 @@ pub struct Source {
     pub max_zoom: u8,
     /// (lon, lat, zoom) suggested by the source.
     pub center: Option<(f64, f64, f64)>,
+    /// The source's credit (TileJSON or PMTiles metadata `attribution`, often HTML; see
+    /// [`plain_attribution`]).
+    pub attribution: Option<String>,
+}
+
+/// Attribution HTML as plain text for a terminal: tags dropped, entities decoded,
+/// whitespace collapsed. `<a href="...">&copy; OpenMapTiles</a>` -> `© OpenMapTiles`.
+pub fn plain_attribution(html: &str) -> String {
+    let mut text = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' if in_tag => {
+                in_tag = false;
+                text.push(' ');
+            }
+            _ if !in_tag => text.push(ch),
+            _ => {}
+        }
+    }
+    for (entity, ch) in [("&copy;", "©"), ("&#169;", "©"), ("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#39;", "'"), ("&amp;", "&")] {
+        text = text.replace(entity, ch);
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// OpenFreeMap's public planet (OpenMapTiles schema, no key).
@@ -216,7 +257,7 @@ impl Source {
     #[cfg(test)]
     pub(crate) fn xyz_for_tests() -> Self {
         let t = "https://tiles.invalid/{z}/{x}/{y}.pbf";
-        Self { name: t.into(), kind: Kind::Xyz(t.into()), http: http_client(), cache_dir: None, min_zoom: 0, max_zoom: 14, center: None }
+        Self { name: t.into(), kind: Kind::Xyz(t.into()), http: http_client(), cache_dir: None, min_zoom: 0, max_zoom: 14, center: None, attribution: None }
     }
 
     /// `spec` is a .pmtiles path or URL, an XYZ template containing {z}/{x}/{y}, or a TileJSON URL.
@@ -227,18 +268,20 @@ impl Source {
         if spec.ends_with(".pmtiles") {
             let pm = PmArchive::open(spec, &http).await?;
             let h = pm.header.clone();
+            let attribution = pm.attribution.clone();
             return Ok(Self {
+                attribution,
                 name: spec.rsplit('/').next().unwrap_or(spec).to_string(),
                 min_zoom: h.min_zoom,
                 max_zoom: h.max_zoom,
                 center: Some((h.center.0, h.center.1, h.center.2 as f64)),
-                kind: Kind::Pm(pm),
+                kind: Kind::Pm(Box::new(pm)),
                 http,
                 cache_dir,
             });
         }
         if spec.contains("{z}") {
-            return Ok(Self { name: spec.to_string(), kind: Kind::Xyz(spec.into()), http, cache_dir, min_zoom: 0, max_zoom: 14, center: None });
+            return Ok(Self { name: spec.to_string(), kind: Kind::Xyz(spec.into()), http, cache_dir, min_zoom: 0, max_zoom: 14, center: None, attribution: None });
         }
         if !is_http {
             bail!("{spec}: expected a .pmtiles file, an XYZ URL with {{z}}/{{x}}/{{y}}, or a TileJSON URL");
@@ -255,6 +298,7 @@ impl Source {
             min_zoom: tj["minzoom"].as_u64().unwrap_or(0) as u8,
             max_zoom: tj["maxzoom"].as_u64().unwrap_or(14).min(22) as u8,
             center,
+            attribution: tj["attribution"].as_str().filter(|a| !a.trim().is_empty()).map(str::to_string),
             kind: Kind::Xyz(template.to_string()),
             http,
             cache_dir,
@@ -334,5 +378,14 @@ mod pm_file_tests {
         let t = pm.tile(&http, 15, 9372, 12536).await.expect("read");
         eprintln!("tile 15/9372/12536 -> {:?} bytes", t.as_ref().map(|b| b.len()));
         assert!(t.is_some());
+    }
+
+    #[test]
+    fn attribution_html_to_text() {
+        let ofm = r#"<a href="https://openfreemap.org" target="_blank">OpenFreeMap</a> <a href="https://www.openmaptiles.org/" target="_blank">&copy; OpenMapTiles</a> Data from <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a>"#;
+        assert_eq!(crate::source::plain_attribution(ofm), "OpenFreeMap © OpenMapTiles Data from OpenStreetMap");
+        assert_eq!(crate::source::plain_attribution("© OpenStreetMap contributors"), "© OpenStreetMap contributors");
+        assert_eq!(crate::source::plain_attribution("<a href='x'>Protomaps</a> &amp; &#169; OSM"), "Protomaps & © OSM");
+        assert_eq!(crate::source::plain_attribution("  "), "");
     }
 }

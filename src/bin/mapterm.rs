@@ -792,17 +792,21 @@ async fn main() -> Result<()> {
                     spans.push(Span::styled(tag, TStyle::new().fg(Color::Cyan)));
                 }
                 if let Some(r) = &raster {
+                    // Its credit is with the others at the end; this says how it draws.
                     let mode = ["", "· labels ", "· raster only "][vector as usize];
                     let how = if kitty { "" } else { "(cells) " };
-                    let credit = if r.attribution.is_empty() { r.name.clone() } else { format!("imagery {}", r.attribution) };
-                    spans.push(Span::styled(format!("{credit} {how}{mode}"), TStyle::new().fg(Color::LightBlue)));
+                    let name = if r.attribution.is_empty() { format!("{} ", r.name) } else { String::new() };
+                    spans.push(Span::styled(format!("imagery {name}{how}{mode}"), TStyle::new().fg(Color::LightBlue)));
                 }
                 for (name, color) in &legend {
                     spans.push(Span::styled("● ", TStyle::new().fg(*color)));
                     spans.push(Span::styled(format!("{name} "), dim));
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
-                spans.push(Span::styled(format!("· {basemap_name} · © OpenStreetMap · q quit"), dim));
+                // Credits of the sources being drawn, as the style or tiles give them.
+                let credits = map.attributions(cam.zoom);
+                let credits = if credits.is_empty() { basemap_name.clone() } else { credits.join(" · ") };
+                spans.push(Span::styled(format!("· {credits} · q quit"), dim));
                 // While typing a search, the status line is the search box.
                 if let Search::Typing(q) = &search {
                     spans = vec![
