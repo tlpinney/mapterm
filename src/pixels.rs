@@ -23,8 +23,8 @@
 //!   when one's state changes (a hover highlight), only its tiles are redrawn, and the old
 //!   image stays up until the new one is ready.
 //!
-//! Not yet: `fill-extrusion` (3D buildings); a cross-fade when a stand-in is replaced; a line
-//! color mapterm can't read is drawn black (braille's thin lines hid that).
+//! Not yet: a cross-fade when a stand-in is replaced. 3D buildings (`fill-extrusion`) are
+//! drawn flat, as from straight above.
 //!
 //! For checking by eye: `MAPTERM_PIXELS_PNG=FILE` with `mapterm --snapshot` saves the pixel
 //! image, and `MAPTERM_DEMO="+@2,-@4,right@5,q@8"` presses keys at those seconds.

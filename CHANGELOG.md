@@ -6,10 +6,14 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
-The next release is 0.2.0: the library's `formats::Format` gains a variant (Shapefile).
+The next release is 0.2.0: the library's `formats::Format` gains a variant (Shapefile),
+and `spec::Kind` one (`FillExtrusion`).
 
 ### Added
 
+- 3D buildings (`fill-extrusion` layers) are drawn flat, their footprints in their color
+  with a slightly darker edge, as MapLibre shows them from straight above. Styles like
+  liberty draw buildings only this way past zoom 14, so they had none there.
 - `--raster planetary`: Sentinel-2 with NAIP over it from zoom 12, so the imagery stays
   sharp from regional zooms down to streets, and Sentinel-2 fills in wherever NAIP has
   nothing (outside the US). Library: `raster::STACKS` / `raster::stack`.
@@ -79,6 +83,9 @@ The next release is 0.2.0: the library's `formats::Format` gains a variant (Shap
 
 ### Fixed
 
+- Layers drawn only with a sprite pattern (`fill-pattern`, `line-pattern`, no color) are
+  skipped instead of drawn in the default black: liberty's pedestrian areas and wetlands
+  came out black. A color that doesn't evaluate to one draws nothing too.
 - Zooming no longer queues downloads for views you've already left: tiles start only
   into free download slots, nearest the center first, and the rest are asked for again by
   the next frame for the view it shows. A scripted zoom from 12 to 17 over NAIP made 4
