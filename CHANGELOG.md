@@ -14,6 +14,12 @@ and `spec::Kind` one (`FillExtrusion`).
 - 3D buildings (`fill-extrusion` layers) are drawn flat, their footprints in their color
   with a slightly darker edge, as MapLibre shows them from straight above. Styles like
   liberty draw buildings only this way past zoom 14, so they had none there.
+- `--raster planetary`: Sentinel-2 with NAIP over it from zoom 12, so the imagery stays
+  sharp from regional zooms down to streets, and Sentinel-2 fills in wherever NAIP has
+  nothing (outside the US). Library: `raster::STACKS` / `raster::stack`.
+- Style files can name a built-in imagery provider in a raster source,
+  `{"type": "raster", "mapterm:raster": "naip"}`, with `maxzoom` to cap it; mixing
+  providers by zoom is then plain `minzoom`/`maxzoom` on the layers.
 - Microsoft Planetary Computer imagery, free and without a key: `--raster naip` (USDA NAIP
   aerial photos of the US at ~60 cm, public domain) and `--raster sentinel2` (Sentinel-2's
   latest clear scenes, global at ~10 m). The mosaic is registered when the layer starts
@@ -80,6 +86,7 @@ and `spec::Kind` one (`FillExtrusion`).
 - Layers drawn only with a sprite pattern (`fill-pattern`, `line-pattern`, no color) are
   skipped instead of drawn in the default black: liberty's pedestrian areas and wetlands
   came out black. A color that doesn't evaluate to one draws nothing too.
+- "Zoom in for imagery" in the status bar only for raster layers shown at that zoom.
 - Text that looks like a zero-padded number stays text in CSV, GPX and KML properties:
   ZIP code `02139` and route name `001` were read as the numbers 2139 and 1 (found by the
   differential tests).

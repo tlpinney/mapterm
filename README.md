@@ -140,6 +140,7 @@ mapterm --raster esri --at 38.8895,-77.0353 -z 15        # satellite
 mapterm --raster 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
 mapterm --raster gibs --date 2026-10-30 -z 6                # NASA daily imagery
 mapterm --raster naip --at 38.8895,-77.0353 -z 16           # US aerial photos, 60 cm
+mapterm --raster planetary -z 10                            # Sentinel-2, NAIP when zoomed in
 mapterm --raster mall.pmtiles                              # your own imagery, offline
 mapterm --raster-list                                      # providers and the keys they need
 ```
@@ -157,12 +158,27 @@ imagery that works offline.
 | `gibs` | NASA GIBS daily satellite imagery, ~250 m (`--date`, default yesterday) | none |
 | `naip` | USDA NAIP aerial photos, US only, ~60 cm, public domain; from zoom 12 (Microsoft Planetary Computer) | none |
 | `sentinel2` | Sentinel-2, the latest clear scenes, global, ~10 m; from zoom 9 (Microsoft Planetary Computer) | none |
+| `planetary` | Both: Sentinel-2 from zoom 9 with NAIP on top from zoom 12; Sentinel-2 shows wherever NAIP has nothing | none |
 | `esri-light`, `esri-dark` | Esri Gray Canvas, quiet backgrounds for overlays | none |
 | `vantor` | Vantor (Maxar) Vivid basemap | `VANTOR_API_KEY` |
 | `planet` | Planet basemaps (your subscription's mosaics) | `PL_API_KEY` + a mosaic |
 | `mapbox` | Mapbox Satellite, Retina tiles | `MAPBOX_ACCESS_TOKEN` |
 | `maptiler` | MapTiler Satellite | `MAPTILER_KEY` |
 | `google`, `google-roadmap`, `google-terrain` | Google Maps satellite, road map, terrain (Map Tiles API, billed per tile) | `GOOGLE_MAP_TILES_KEY` |
+
+In a style file, a raster source can name any of these instead of a URL, so you can
+mix providers by zoom yourself (keys come from the same environment variables):
+
+```json
+"sources": {
+  "s2":   {"type": "raster", "mapterm:raster": "sentinel2", "maxzoom": 14},
+  "naip": {"type": "raster", "mapterm:raster": "naip"}
+},
+"layers": [
+  {"id": "s2",   "type": "raster", "source": "s2"},
+  {"id": "naip", "type": "raster", "source": "naip", "minzoom": 12}
+]
+```
 
 API keys never go on the command line: they come from the provider's
 environment variable or from a command that prints the key, such as your password
