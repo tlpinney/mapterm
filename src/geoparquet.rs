@@ -648,11 +648,18 @@ impl Dataset {
                                 let gz = dir.with_extension("download");
                                 download(&client, &url, &gz).await?;
                                 let (gz2, dir2) = (gz.clone(), dir.clone());
-                                let have = tokio::task::spawn_blocking(move || crate::msbuildings::split(&gz2, &dir2, tile)).await??;
+                                let have = tokio::task::spawn_blocking(move || {
+                                    let have = crate::msbuildings::split(&gz2, &dir2, tile)?;
+                                    // Keep the cache under its limit (not this tile).
+                                    crate::msbuildings::trim_cache(&dir2)?;
+                                    anyhow::Ok(have)
+                                })
+                                .await??;
                                 let _ = std::fs::remove_file(&gz);
                                 have
                             }
                         };
+                        crate::msbuildings::touch(&dir);
                         let groups = crate::msbuildings::piece_boxes(tile.0, tile.1, tile.2);
                         Ok(Output::Footer { len: 0, meta: Meta::Pieces { dir, groups, have }, bbox: None })
                     }
@@ -666,7 +673,11 @@ impl Dataset {
                     }
                     Job::Chunk(_, g) if matches!(meta, Some(Meta::Pieces { .. })) => {
                         let Some(Meta::Pieces { dir, .. }) = meta else { unreachable!() };
-                        let features = tokio::task::spawn_blocking(move || crate::msbuildings::read_piece(&dir, g)).await??;
+                        let features = tokio::task::spawn_blocking(move || {
+                            crate::msbuildings::touch(&dir);
+                            crate::msbuildings::read_piece(&dir, g)
+                        })
+                        .await??;
                         Ok(Output::Chunk(features))
                     }
                     Job::Chunk(_, g) => {
@@ -699,6 +710,12 @@ impl Dataset {
         let Some(f) = self.files.get_mut(i) else { return Ok(None) };
         let out = match out {
             Ok(o) => o,
+            // A tile's pieces were removed to keep the cache under its limit: split it again.
+            Err(_) if matches!(&f.meta, Some(Meta::Pieces { dir, .. }) if crate::msbuildings::split_done(dir).is_none()) => {
+                f.meta = None;
+                self.loaded.retain(|(fi, _), _| *fi != i);
+                return Ok(None);
+            }
             Err(e) => {
                 f.failed = true;
                 return Err(e);

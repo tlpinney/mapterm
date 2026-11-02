@@ -48,6 +48,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 moves: only the chunks under the view, from zoom 14. `microsoft-buildings`
                 (or a dataset-links.csv URL) is Microsoft's current building footprints, each
                 ~78 km tile downloaded once and kept split in ~/.cache/mapterm
+  --buildings-cache SIZE  disk for those tiles, least recently used out first (default
+                2GB; e.g. 500MB, 10GB; 0 keeps none between uses; also
+                MAPTERM_BUILDINGS_CACHE)
   --bbox W,S,E,N  read a GeoParquet layer once, for this area only (lon/lat), instead of
                 loading it as the map moves
   --at          start position (default: fit the GeoJSON layers, else the source's center)
@@ -168,6 +171,10 @@ fn args() -> Result<Args> {
             n => Ok(Some(n.parse::<u32>().with_context(|| format!("--raster-limit {n}: a number of tiles a minute, or off"))?)),
         }
     };
+    // Before the arguments, so --buildings-cache wins over it.
+    if let Ok(v) = std::env::var("MAPTERM_BUILDINGS_CACHE") {
+        mapterm::msbuildings::set_cache_limit(mapterm::msbuildings::parse_size(&v).context("MAPTERM_BUILDINGS_CACHE")?);
+    }
     if let Ok(v) = std::env::var("MAPTERM_RASTER_LIMIT") {
         a.raster_limit = Some(parse_limit(&v)?);
     }
@@ -186,6 +193,10 @@ fn args() -> Result<Args> {
             "--raster" => a.raster = Some(it.next().context("--raster URL")?),
             "--tms" => a.tms = true,
             "--geojson" => a.geojson.push(it.next().context("--geojson FILE|URL")?),
+            "--buildings-cache" => {
+                let v = it.next().context("--buildings-cache SIZE")?;
+                mapterm::msbuildings::set_cache_limit(mapterm::msbuildings::parse_size(&v).context("--buildings-cache")?);
+            }
             "--bbox" => {
                 let v = it.next().context("--bbox W,S,E,N")?;
                 let n: Vec<f64> = v.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>().context("--bbox W,S,E,N")?;

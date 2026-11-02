@@ -140,7 +140,10 @@ them current (refreshed every few weeks, with height estimates; the Planetary
 Computer's copy stopped in 2023). They come as one gzipped file per ~78 km tile,
 which can't be read in parts: the first view of a tile downloads it once (DC's is
 78 MB, about 15 s) and splits it into 256 pieces under `~/.cache/mapterm/msbuildings`,
-so later views there load in a second or two. The status bar shows each data layer's
+so later views there load in a second or two. Those tiles take at most 2 GB of disk
+(about twenty dense cities), least recently used out first; set it with
+`--buildings-cache SIZE` or `MAPTERM_BUILDINGS_CACHE` (e.g. `500MB`, `10GB`; `0` keeps
+none between uses). The status bar shows each data layer's
 count of features in view, for comparing layers. Files and
 URLs up to 512 MB. The readers are checked against GDAL on a corpus of real files
 (`tests/differential.rs`).

@@ -23,6 +23,94 @@ pub const LATEST: &str = "https://bfppub.blob.core.windows.net/$web/2026-08-13/d
 /// Pieces per tile side: zoom-9 tiles split at zoom 13.
 pub const SPLIT: u32 = 16;
 
+/// Default for [`set_cache_limit`]: about twenty dense city tiles.
+pub const DEFAULT_CACHE_LIMIT: u64 = 2 << 30;
+
+static CACHE_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(DEFAULT_CACHE_LIMIT);
+
+/// How much disk the split tiles may take (bytes). Past it, the least recently used tiles
+/// are removed after each new one is split (never the one in use); 0 keeps none between
+/// uses. Default [`DEFAULT_CACHE_LIMIT`].
+pub fn set_cache_limit(bytes: u64) {
+    CACHE_LIMIT.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The limit set with [`set_cache_limit`].
+pub fn cache_limit() -> u64 {
+    CACHE_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A size such as `2GB`, `500MB`, `750K` or `1048576` (bytes), for [`set_cache_limit`].
+pub fn parse_size(s: &str) -> Result<u64> {
+    let t = s.trim().to_ascii_uppercase();
+    let t = t.strip_suffix("IB").map(|x| format!("{x}B")).unwrap_or(t);
+    let (num, mult) = match t.trim_end_matches('B') {
+        x if x.ends_with('K') => (&x[..x.len() - 1], 1u64 << 10),
+        x if x.ends_with('M') => (&x[..x.len() - 1], 1 << 20),
+        x if x.ends_with('G') => (&x[..x.len() - 1], 1 << 30),
+        x if x.ends_with('T') => (&x[..x.len() - 1], 1 << 40),
+        x => (x, 1),
+    };
+    let n: f64 = num.trim().parse().with_context(|| format!("{s:?}: not a size (e.g. 2GB, 500MB)"))?;
+    if !n.is_finite() || n < 0.0 {
+        bail!("{s:?}: not a size");
+    }
+    Ok((n * mult as f64) as u64)
+}
+
+/// Mark a tile as used now (for keeping the most recently used under the limit).
+pub fn touch(dir: &Path) {
+    let _ = std::fs::write(dir.join("used"), b"");
+}
+
+/// Remove the least recently used split tiles until they fit the limit, keeping `keep`.
+/// Only directories that look like tile caches (a `pieces.json` inside) are touched.
+pub fn trim_cache(keep: &Path) -> Result<u64> {
+    trim_in(&crate::source::cache_root().join("msbuildings"), keep, cache_limit())
+}
+
+fn trim_in(root: &Path, keep: &Path, limit: u64) -> Result<u64> {
+    let Ok(entries) = std::fs::read_dir(root) else { return Ok(0) };
+    let mut tiles: Vec<(std::time::SystemTime, u64, PathBuf)> = Vec::new();
+    for e in entries.flatten() {
+        let dir = e.path();
+        if !dir.join("pieces.json").is_file() {
+            continue;
+        }
+        let used =
+            std::fs::metadata(dir.join("used")).and_then(|m| m.modified()).or_else(|_| std::fs::metadata(dir.join("pieces.json")).and_then(|m| m.modified()));
+        let size: u64 =
+            std::fs::read_dir(&dir).into_iter().flatten().flatten().filter_map(|f| f.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum();
+        tiles.push((used.unwrap_or(std::time::UNIX_EPOCH), size, dir));
+    }
+    let mut total: u64 = tiles.iter().map(|t| t.1).sum();
+    tiles.sort_by_key(|t| t.0);
+    let mut freed = 0;
+    for (_, size, dir) in tiles {
+        if total <= limit {
+            break;
+        }
+        if dir == keep {
+            continue;
+        }
+        remove_tile(&dir)?;
+        total -= size;
+        freed += size;
+    }
+    Ok(freed)
+}
+
+/// Delete one tile cache: its files, then the directory (no recursion beyond it).
+fn remove_tile(dir: &Path) -> Result<()> {
+    for f in std::fs::read_dir(dir)?.flatten() {
+        if f.file_type().is_ok_and(|t| t.is_file()) {
+            std::fs::remove_file(f.path())?;
+        }
+    }
+    std::fs::remove_dir(dir)?;
+    Ok(())
+}
+
 /// A tile in the index.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tile {
@@ -192,6 +280,39 @@ mod tests {
         let b = tile_bbox(9, 146, 195);
         assert!(b[0] < -77.03 && b[2] > -77.03 && b[1] < 38.9 && b[3] > 38.9, "{b:?}");
         assert_eq!(piece_boxes(9, 146, 195).len(), 256);
+    }
+
+    #[test]
+    fn sizes_and_trimming() {
+        assert_eq!(parse_size("2GB").unwrap(), 2 << 30);
+        assert_eq!(parse_size("500mb").unwrap(), 500 << 20);
+        assert_eq!(parse_size("1.5 GiB").unwrap(), 3 << 29);
+        assert_eq!(parse_size("0").unwrap(), 0);
+        assert!(parse_size("lots").is_err() && parse_size("-1GB").is_err());
+        // Three tiles of 100 bytes: a 250-byte limit drops only the least recently used.
+        let root = std::env::temp_dir().join(format!("mapterm-msb-trim-{}", std::process::id()));
+        let tile = |name: &str, age_s: u64| {
+            let d = root.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("pieces.json"), b"{}").unwrap();
+            std::fs::write(d.join("0.jsonl.gz"), vec![0u8; 98]).unwrap();
+            let f = std::fs::File::create(d.join("used")).unwrap();
+            f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(age_s)).unwrap();
+            d
+        };
+        let (old, keep, new) = (tile("old", 300), tile("keep", 200), tile("new", 100));
+        std::fs::create_dir_all(root.join("not-a-tile")).unwrap();
+        assert_eq!(trim_in(&root, &keep, 250).unwrap(), 100, "only the oldest goes");
+        assert!(!old.exists() && keep.exists() && new.exists() && root.join("not-a-tile").exists());
+        assert_eq!(trim_in(&root, &keep, 0).unwrap(), 100, "even at 0 the tile in use stays");
+        assert!(keep.exists() && !new.exists());
+        for d in [&keep] {
+            for f in std::fs::read_dir(d).unwrap().flatten() {
+                let _ = std::fs::remove_file(f.path());
+            }
+            let _ = std::fs::remove_dir(d);
+        }
+        let _ = (std::fs::remove_dir(root.join("not-a-tile")), std::fs::remove_dir(&root));
     }
 
     #[test]
