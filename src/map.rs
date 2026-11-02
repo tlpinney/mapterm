@@ -281,12 +281,16 @@ pub struct GeoJsonSource {
     pub promote_id: Option<String>,
     /// Point clusters by zoom, when clustering is on.
     clusters: Option<crate::cluster::Clusters>,
+    /// Features added and dropped in parts while the map moves (chunks of a GeoParquet
+    /// dataset), each with its own index and box, by key. Drawn and picked with the rest; not
+    /// clustered, and not counted in [`GeoJsonSource::features`] or `bbox`.
+    parts: Vec<(u64, crate::cluster::Level, [f64; 4])>,
 }
 
 impl GeoJsonSource {
     /// A source of these features (`bbox` in world coordinates).
     pub fn new(features: Vec<geojson::Feature>, bbox: [f64; 4]) -> Self {
-        Self { data: crate::cluster::Level::new(features), bbox, attribution: None, promote_id: None, clusters: None }
+        Self { data: crate::cluster::Level::new(features), bbox, attribution: None, promote_id: None, clusters: None, parts: Vec::new() }
     }
 
     /// Parse a GeoJSON document.
@@ -315,10 +319,39 @@ impl GeoJsonSource {
         self.clusters.as_ref().and_then(|c| c.at(zoom)).unwrap_or(&self.data)
     }
 
-    /// Features (of [`GeoJsonSource::at`]) whose boxes overlap `q` (world coordinates).
+    /// Features (of [`GeoJsonSource::at`], and of the parts) whose boxes overlap `q` (world
+    /// coordinates).
     fn near(&self, zoom: f64, q: crate::index::BBox) -> impl Iterator<Item = &geojson::Feature> {
         let level = self.at(zoom);
-        level.index.search(q).into_iter().map(move |i| &level.features[i])
+        let parts = self.parts.iter().filter(move |(_, _, b)| b[0] <= q[2] && b[2] >= q[0] && b[1] <= q[3] && b[3] >= q[1]);
+        level
+            .index
+            .search(q)
+            .into_iter()
+            .map(move |i| &level.features[i])
+            .chain(parts.flat_map(move |(_, l, _)| l.index.search(q).into_iter().map(move |i| &l.features[i])))
+    }
+
+    /// Add features as part `key` (replacing a part with that key).
+    pub fn add_part(&mut self, key: u64, features: Vec<geojson::Feature>) {
+        self.remove_part(key);
+        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        for f in &features {
+            b = [b[0].min(f.bbox[0]), b[1].min(f.bbox[1]), b[2].max(f.bbox[2]), b[3].max(f.bbox[3])];
+        }
+        self.parts.push((key, crate::cluster::Level::new(features), b));
+    }
+
+    /// Drop part `key`; whether it was there.
+    pub fn remove_part(&mut self, key: u64) -> bool {
+        let n = self.parts.len();
+        self.parts.retain(|(k, ..)| *k != key);
+        self.parts.len() != n
+    }
+
+    /// The parts' keys and feature counts.
+    pub fn parts(&self) -> impl Iterator<Item = (u64, usize)> + '_ {
+        self.parts.iter().map(|(k, l, _)| (*k, l.features.len()))
     }
 }
 
@@ -994,6 +1027,53 @@ impl Map {
             None => bail!("no source \"{id}\""),
         }
         Ok(())
+    }
+
+    /// Add features to GeoJSON source `id` as part `key` (replacing a part with that key):
+    /// chunks of a dataset loaded while the map moves. See [`GeoJsonSource::add_part`].
+    pub fn add_part(&mut self, id: &str, key: u64, features: Vec<geojson::Feature>) -> Result<()> {
+        let g = self.geojson_mut(id)?;
+        g.add_part(key, features);
+        let b = g.parts.iter().find(|(k, ..)| *k == key).map(|(_, _, b)| *b);
+        if let Some(b) = b {
+            self.pixels_stale(b);
+        }
+        Ok(())
+    }
+
+    /// Drop part `key` of GeoJSON source `id`; whether it was there.
+    pub fn remove_part(&mut self, id: &str, key: u64) -> Result<bool> {
+        let g = self.geojson_mut(id)?;
+        let b = g.parts.iter().find(|(k, ..)| *k == key).map(|(_, _, b)| *b);
+        let gone = g.remove_part(key);
+        if let Some(b) = b {
+            self.pixels_stale(b);
+        }
+        Ok(gone)
+    }
+
+    fn geojson_mut(&mut self, id: &str) -> Result<&mut GeoJsonSource> {
+        match self.sources.iter_mut().find(|(s, _)| s == id) {
+            Some((_, MapSource::GeoJson(g))) => Ok(g),
+            Some(_) => bail!("source \"{id}\" is not a GeoJSON source"),
+            None => bail!("no source \"{id}\""),
+        }
+    }
+
+    /// Pixel mode: tile images overlapping `b` (world coordinates) are redrawn when there's
+    /// time; until then the old ones stay up.
+    fn pixels_stale(&mut self, b: [f64; 4]) {
+        if self.pixel_mode.is_none() {
+            return;
+        }
+        let cache = self.pixcache.get_mut().unwrap_or_else(|e| e.into_inner());
+        for (((z, x, y), ..), t) in cache.tiles.iter_mut() {
+            let n = (1u64 << z) as f64;
+            let (x0, y0) = (*x as f64 / n, *y as f64 / n);
+            if x0 <= b[2] && x0 + 1.0 / n >= b[0] && y0 <= b[3] && y0 + 1.0 / n >= b[1] {
+                t.stale = true;
+            }
+        }
     }
 
     /// Lon/lat bounds (west, south, east, north) of a GeoJSON source, for fitting the view.
@@ -2736,6 +2816,26 @@ mod tests {
         assert_eq!(names(5.0), vec!["sentinel2"]);
         assert!(names(10.0).is_empty(), "{:?}", names(10.0));
         assert!(names(16.0).is_empty());
+    }
+
+    #[test]
+    fn parts_draw_until_removed() {
+        // An empty layer gets a chunk of features as a part, then loses it.
+        let mut map = Map::new();
+        map.add_source("d", MapSource::geojson(&json!({"type": "FeatureCollection", "features": []})).unwrap()).unwrap();
+        map.add_layer(StyleLayer::fill("f", "d").color("#00ff00")).unwrap();
+        let (cam, area) = (Camera::new(0.0, 0.0, 0.0), Rect::new(0, 0, 40, 20));
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset);
+        let chunk = crate::geojson::features(&json!({"type": "Polygon", "coordinates": [[[-40, -30], [40, -30], [40, 30], [-40, 30], [-40, -30]]]})).unwrap().0;
+        map.add_part("d", 7, chunk).unwrap();
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(0, 255, 0), "the part draws");
+        let Some(MapSource::GeoJson(g)) = map.source("d") else { panic!() };
+        assert_eq!(g.parts().collect::<Vec<_>>(), vec![(7, 1)]);
+        assert!(g.features().is_empty(), "parts aren't the source's own features");
+        assert!(map.remove_part("d", 7).unwrap());
+        assert!(!map.remove_part("d", 7).unwrap());
+        assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset, "gone again");
+        assert!(map.add_part("nope", 1, Vec::new()).is_err());
     }
 
     #[test]

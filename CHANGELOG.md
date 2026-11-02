@@ -11,6 +11,13 @@ GeoParquet), and `spec::Kind` one (`FillExtrusion`).
 
 ### Added
 
+- GeoParquet URLs and STAC collections of GeoParquet files (`--geojson .../collection.json`,
+  e.g. Overture's) load as the map moves: from zoom 14, only the chunks (row groups) under
+  the view, nearest first, with the farthest dropped past 600,000 features; a collection's
+  file index is cached on disk. Overture's worldwide buildings (512 files, 257 GB) show a
+  street view of San Salvador after ~3 s and ~5 MB. Adjacent column ranges are fetched as
+  one request, all at once. Library: `geoparquet::Dataset`, `Map::add_part` /
+  `remove_part` (GeoJSON sources gain parts, drawn and picked with the rest).
 - GeoParquet layers (`--geojson x.parquet`, a file or URL; `mapterm::geoparquet`), read
   with the `geoparquet` crate. A URL is read with HTTP range requests, and `--bbox W,S,E,N`
   (or `--at` with `-z`) limits reading to an area: chunks outside it are skipped unread
