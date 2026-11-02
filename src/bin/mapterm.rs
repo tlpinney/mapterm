@@ -45,7 +45,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 names from a `name` property; inspect shows properties)
                 A GeoParquet URL, or a STAC collection of GeoParquet files (its
                 collection.json, e.g. Overture's at stac.overturemaps.org), loads as the map
-                moves: only the chunks under the view, from zoom 14
+                moves: only the chunks under the view, from zoom 14. `microsoft-buildings`
+                (or a dataset-links.csv URL) is Microsoft's current building footprints, each
+                ~78 km tile downloaded once and kept split in ~/.cache/mapterm
   --bbox W,S,E,N  read a GeoParquet layer once, for this area only (lon/lat), instead of
                 loading it as the map moves
   --at          start position (default: fit the GeoJSON layers, else the source's center)
@@ -294,6 +296,19 @@ struct Loading {
     inflight: HashSet<mapterm::geoparquet::Job>,
     /// The STAC index has been saved.
     saved: bool,
+}
+
+/// A count with thousands separators: 12,345.
+fn thousands(n: usize) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Dataset features kept loaded; past this the chunks farthest from the view are dropped.
@@ -603,7 +618,7 @@ async fn main() -> Result<()> {
         let path = g.split(['?', '#']).next().unwrap_or(g).to_ascii_lowercase();
         let remote = g.starts_with("https://") || g.starts_with("http://");
         let parquet = path.ends_with(".parquet") || path.ends_with(".geoparquet");
-        if remote && (path.ends_with("collection.json") || (parquet && a.bbox.is_none())) {
+        if mapterm::msbuildings::is_spec(g) || (remote && (path.ends_with("collection.json") || (parquet && a.bbox.is_none()))) {
             let ds = mapterm::geoparquet::Dataset::open(g).await.with_context(|| format!("--geojson {g}"))?;
             let empty = mapterm::geojson::parse(br#"{"type": "FeatureCollection", "features": []}"#, ds.name.clone(), color)?;
             opened.push((geo.len(), g.clone(), ds));
@@ -1184,9 +1199,13 @@ async fn main() -> Result<()> {
                     let name = if r.attribution.is_empty() { format!("{} ", r.name) } else { String::new() };
                     spans.push(Span::styled(format!("imagery {name}{how}{mode}"), TStyle::new().fg(Color::LightBlue)));
                 }
+                // Each data layer with how many of its features are in view (to compare layers).
                 for (name, color) in &legend {
                     spans.push(Span::styled("● ", TStyle::new().fg(*color)));
-                    spans.push(Span::styled(format!("{name} "), dim));
+                    match map.features_in_view(name, &draw_cam, map_area) {
+                        Some(n) => spans.push(Span::styled(format!("{name} {} ", thousands(n)), dim)),
+                        None => spans.push(Span::styled(format!("{name} "), dim)),
+                    }
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
                 // Credits of the sources being drawn, as the style or tiles give them.

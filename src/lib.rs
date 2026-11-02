@@ -84,6 +84,7 @@ pub mod kitty;
 pub mod layer;
 pub mod map;
 pub mod mapbox;
+pub mod msbuildings;
 pub mod mvt;
 pub mod pbf;
 pub mod pick;

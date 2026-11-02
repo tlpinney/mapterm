@@ -437,12 +437,44 @@ struct DFile {
     url: Option<String>,
     /// Lon/lat box (the whole world until known).
     bbox: Bbox,
-    /// The footer, once read: metadata, the geometry column, the covering column, and each
-    /// chunk's lon/lat box (the file's box for files without bbox columns).
-    meta: Option<FileMeta>,
+    /// Once read: the footer (metadata, the geometry column, the covering column, each
+    /// chunk's box), or for a Microsoft tile, its pieces on disk.
+    meta: Option<Meta>,
+    /// A Microsoft footprints tile (zoom, x, y): read whole and split into pieces.
+    tile: Option<(u8, u32, u32)>,
     len: u64,
     /// A job for it failed: not asked for again.
     failed: bool,
+}
+
+#[derive(Clone)]
+enum Meta {
+    Parquet(FileMeta),
+    /// A Microsoft tile split on disk: its directory, each piece's box, and which hold
+    /// buildings.
+    Pieces {
+        dir: std::path::PathBuf,
+        groups: Vec<Bbox>,
+        have: Vec<bool>,
+    },
+}
+
+impl Meta {
+    /// Each chunk's (or piece's) box, and whether it has anything to load.
+    fn chunks(&self) -> impl Iterator<Item = (usize, &Bbox)> {
+        let (groups, have): (&Vec<Bbox>, Option<&Vec<bool>>) = match self {
+            Meta::Parquet(m) => (&m.groups, None),
+            Meta::Pieces { groups, have, .. } => (groups, Some(have)),
+        };
+        groups.iter().enumerate().filter(move |(g, _)| have.is_none_or(|h| h.get(*g).copied().unwrap_or(false)))
+    }
+
+    fn group(&self, g: usize) -> Option<&Bbox> {
+        match self {
+            Meta::Parquet(m) => m.groups.get(g),
+            Meta::Pieces { groups, .. } => groups.get(g),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -475,7 +507,7 @@ impl Done {
 
 enum Output {
     Item { url: String, bbox: Bbox },
-    Footer { len: u64, meta: FileMeta, bbox: Option<Bbox> },
+    Footer { len: u64, meta: Meta, bbox: Option<Bbox> },
     Chunk(Vec<crate::geojson::Feature>),
 }
 
@@ -493,10 +525,32 @@ impl Dataset {
         let client = crate::source::http_client();
         let world = [-180.0, -90.0, 180.0, 90.0];
         let path = spec.split(['?', '#']).next().unwrap_or(spec).to_ascii_lowercase();
+        if crate::msbuildings::is_spec(spec) {
+            let url = crate::msbuildings::index_url(spec);
+            let csv = crate::geojson::fetch(url).await?.with_context(|| format!("{url}: not found"))?;
+            let tiles = crate::msbuildings::parse_index(&String::from_utf8_lossy(&csv)).with_context(|| url.to_string())?;
+            let files = tiles
+                .into_iter()
+                .map(|t| {
+                    let tile = crate::msbuildings::quadkey_tile(&t.quadkey).expect("checked when parsed");
+                    DFile {
+                        item: None,
+                        unread: false,
+                        url: Some(t.url),
+                        bbox: crate::msbuildings::tile_bbox(tile.0, tile.1, tile.2),
+                        meta: None,
+                        tile: Some(tile),
+                        len: 0,
+                        failed: false,
+                    }
+                })
+                .collect();
+            return Ok(Dataset { name: "microsoft-buildings".into(), files, client, min_zoom: 14.0, loaded: Default::default() });
+        }
         if path.ends_with(".parquet") || path.ends_with(".geoparquet") {
             let file = spec.rsplit('/').next().unwrap_or(spec).split(['?', '#']).next().unwrap_or(spec);
             let name = file.split('.').next().unwrap_or(file).to_string();
-            let f = DFile { item: None, unread: false, url: Some(spec.to_string()), bbox: world, meta: None, len: 0, failed: false };
+            let f = DFile { item: None, unread: false, url: Some(spec.to_string()), bbox: world, meta: None, tile: None, len: 0, failed: false };
             return Ok(Dataset { name, files: vec![f], client, min_zoom: 14.0, loaded: Default::default() });
         }
         let doc = get_json(&client, spec).await?;
@@ -524,8 +578,10 @@ impl Dataset {
         let files = items
             .into_iter()
             .map(|item| match cached.get(&item) {
-                Some((url, bbox)) => DFile { url: Some(url.clone()), bbox: *bbox, item: Some(item), unread: false, meta: None, len: 0, failed: false },
-                None => DFile { item: Some(item), unread: true, url: None, bbox: world, meta: None, len: 0, failed: false },
+                Some((url, bbox)) => {
+                    DFile { url: Some(url.clone()), bbox: *bbox, item: Some(item), unread: false, meta: None, tile: None, len: 0, failed: false }
+                }
+                None => DFile { item: Some(item), unread: true, url: None, bbox: world, meta: None, tile: None, len: 0, failed: false },
             })
             .collect();
         Ok(Dataset { name, files, client, min_zoom: 14.0, loaded: Default::default() })
@@ -549,7 +605,7 @@ impl Dataset {
             match &f.meta {
                 None => jobs.push((dist(&f.bbox), Job::Footer(i))),
                 Some(m) => {
-                    for (g, b) in m.groups.iter().enumerate() {
+                    for (g, b) in m.chunks() {
                         if overlaps(b, &view) && !self.loaded.contains_key(&(i, g)) {
                             jobs.push((dist(b), Job::Chunk(i, g)));
                         }
@@ -567,9 +623,9 @@ impl Dataset {
         let f = self.files.get(match job {
             Job::Item(i) | Job::Footer(i) | Job::Chunk(i, _) => i,
         });
-        let (item, url, len, meta) = match f {
-            Some(f) => (f.item.clone(), f.url.clone(), f.len, f.meta.clone()),
-            None => (None, None, 0, None),
+        let (item, url, len, meta, tile) = match f {
+            Some(f) => (f.item.clone(), f.url.clone(), f.len, f.meta.clone(), f.tile),
+            None => (None, None, 0, None, None),
         };
         async move {
             let out = async {
@@ -583,16 +639,39 @@ impl Dataset {
                         let bbox = if bbox.iter().all(|v| v.is_finite()) { bbox } else { [-180.0, -90.0, 180.0, 90.0] };
                         Ok(Output::Item { url: resolve(&item, &url), bbox })
                     }
+                    Job::Footer(_) if tile.is_some() => {
+                        let (url, tile) = (url.context("no URL")?, tile.expect("checked"));
+                        let dir = crate::msbuildings::tile_dir(&url);
+                        let have = match crate::msbuildings::split_done(&dir) {
+                            Some(h) => h,
+                            None => {
+                                let gz = dir.with_extension("download");
+                                download(&client, &url, &gz).await?;
+                                let (gz2, dir2) = (gz.clone(), dir.clone());
+                                let have = tokio::task::spawn_blocking(move || crate::msbuildings::split(&gz2, &dir2, tile)).await??;
+                                let _ = std::fs::remove_file(&gz);
+                                have
+                            }
+                        };
+                        let groups = crate::msbuildings::piece_boxes(tile.0, tile.1, tile.2);
+                        Ok(Output::Footer { len: 0, meta: Meta::Pieces { dir, groups, have }, bbox: None })
+                    }
                     Job::Footer(_) => {
                         let url = url.context("no URL")?;
                         let mut reader = HttpReader::open(&url).await?;
                         let len = reader.len;
                         let arrow = parquet::arrow::arrow_reader::ArrowReaderMetadata::load_async(&mut reader, Default::default()).await?;
                         let (meta, bbox) = file_meta(arrow)?;
-                        Ok(Output::Footer { len, meta, bbox })
+                        Ok(Output::Footer { len, meta: Meta::Parquet(meta), bbox })
+                    }
+                    Job::Chunk(_, g) if matches!(meta, Some(Meta::Pieces { .. })) => {
+                        let Some(Meta::Pieces { dir, .. }) = meta else { unreachable!() };
+                        let features = tokio::task::spawn_blocking(move || crate::msbuildings::read_piece(&dir, g)).await??;
+                        Ok(Output::Chunk(features))
                     }
                     Job::Chunk(_, g) => {
                         let (url, m) = (url.context("no URL")?, meta.context("footer not read")?);
+                        let Meta::Parquet(m) = m else { bail!("not a GeoParquet file") };
                         let reader = HttpReader::known(client, &url, len);
                         let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(reader, m.arrow.clone()).with_row_groups(vec![g]);
                         let (geo, _) = geo_metadata(builder.metadata().file_metadata())?;
@@ -660,7 +739,7 @@ impl Dataset {
             .loaded
             .iter()
             .filter_map(|(&(i, g), &n)| {
-                let b = self.files[i].meta.as_ref()?.groups.get(g)?;
+                let b = self.files[i].meta.as_ref()?.group(g)?;
                 (!overlaps(b, &view)).then(|| (((b[0] + b[2]) / 2.0 - cx).hypot((b[1] + b[3]) / 2.0 - cy), (i, g), n))
             })
             .collect();
@@ -754,6 +833,29 @@ fn resolve(base: &str, href: &str) -> String {
         }
     }
     parts.join("/")
+}
+
+/// Download `url` to `path` (through a `.part` file, so a cut download is never taken for
+/// a whole one).
+async fn download(client: &reqwest::Client, url: &str, path: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let part = path.with_extension("part");
+    let mut r = client.get(url).send().await.with_context(|| url.to_string())?;
+    if !r.status().is_success() {
+        bail!("{url}: HTTP {}", r.status());
+    }
+    let mut f = std::io::BufWriter::new(std::fs::File::create(&part)?);
+    while let Some(chunk) = r.chunk().await.with_context(|| url.to_string())? {
+        FETCHED.fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        f.write_all(&chunk)?;
+    }
+    f.flush()?;
+    drop(f);
+    std::fs::rename(&part, path)?;
+    Ok(())
 }
 
 /// A small JSON document (STAC) from `url`.
@@ -878,7 +980,8 @@ mod tests {
             unread,
             url: (!unread).then(|| "https://x/f.parquet".into()),
             bbox,
-            meta,
+            meta: meta.map(Meta::Parquet),
+            tile: None,
             len: 0,
             failed: false,
         };

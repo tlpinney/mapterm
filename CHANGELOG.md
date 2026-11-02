@@ -11,6 +11,13 @@ GeoParquet), and `spec::Kind` one (`FillExtrusion`).
 
 ### Added
 
+- `--geojson microsoft-buildings` (or a `dataset-links.csv` URL): Microsoft's current
+  Global ML Building Footprints (with heights), loading as the map moves. Each ~78 km
+  gzipped tile is downloaded once and split into 256 pieces on disk; later views read only
+  the pieces in view (`mapterm::msbuildings`).
+- The status bar shows each data layer's count of features in view, so layers (Microsoft
+  and Overture buildings, say) can be compared as the map moves (`Map::features_in_view`).
+- GeoParquet files from before 1.0 (no `geometry_types`, crs as a PROJJSON string) open.
 - GeoParquet URLs and STAC collections of GeoParquet files (`--geojson .../collection.json`,
   e.g. Overture's) load as the map moves: from zoom 14, only the chunks (row groups) under
   the view, nearest first, with the farthest dropped past 600,000 features; a collection's

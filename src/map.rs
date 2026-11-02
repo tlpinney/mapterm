@@ -1076,6 +1076,17 @@ impl Map {
         }
     }
 
+    /// How many of GeoJSON source `id`'s features (parts included) have boxes in the view;
+    /// None for other sources. For comparing layers by what's on screen.
+    pub fn features_in_view(&self, id: &str, cam: &Camera, area: Rect) -> Option<usize> {
+        let MapSource::GeoJson(g) = self.source(id)? else { return None };
+        let vp = Viewport::new(cam, area);
+        let (a, b) = (vp.dot_to_lonlat(0.0, 0.0), vp.dot_to_lonlat(area.width as f64 * 2.0, area.height as f64 * 4.0));
+        let ((x0, y0), (x1, y1)) = (to_world(a.0, a.1), to_world(b.0, b.1));
+        let q = [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)];
+        Some(g.near(cam.zoom, q).filter(|f| f.bbox[0] <= q[2] && f.bbox[2] >= q[0] && f.bbox[1] <= q[3] && f.bbox[3] >= q[1]).count())
+    }
+
     /// Lon/lat bounds (west, south, east, north) of a GeoJSON source, for fitting the view.
     pub fn source_bounds(&self, id: &str) -> Option<(f64, f64, f64, f64)> {
         match self.source(id)? {
@@ -2836,6 +2847,10 @@ mod tests {
         assert!(!map.remove_part("d", 7).unwrap());
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset, "gone again");
         assert!(map.add_part("nope", 1, Vec::new()).is_err());
+        assert_eq!(map.features_in_view("d", &cam, area), Some(0));
+        map.add_part("d", 8, crate::geojson::features(&json!({"type": "Point", "coordinates": [1, 1]})).unwrap().0).unwrap();
+        assert_eq!(map.features_in_view("d", &cam, area), Some(1));
+        assert_eq!(map.features_in_view("d", &Camera::new(120.0, 0.0, 6.0), area), Some(0), "elsewhere");
     }
 
     #[test]
