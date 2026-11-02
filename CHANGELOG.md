@@ -10,6 +10,14 @@ The next release is 0.2.0: the library's `formats::Format` gains a variant (Shap
 
 ### Added
 
+- Microsoft Planetary Computer imagery, free and without a key: `--raster naip` (USDA NAIP
+  aerial photos of the US at ~60 cm, public domain) and `--raster sentinel2` (Sentinel-2's
+  latest clear scenes, global at ~10 m). The mosaic is registered when the layer starts
+  (`RasterSource::start_session`, module `mapterm::planetary`), and tiles are kept as long
+  as their `Cache-Control` says (an hour). The service only renders these mosaics zoomed in,
+  so mapterm requests nothing below zoom 12 (NAIP) or 9 (Sentinel-2) and the status bar says
+  to zoom in: `RasterSource::min_zoom`, `Map::rasters_below_min_zoom`.
+
 - Release archives include `THIRD_PARTY_LICENSES.txt`: the copyright notices and
   license terms of the crates built into the binary, made with cargo-about.
 - Shapefiles with `--geojson roads.shp` (a file or URL): the geometry, the `.dbf`
