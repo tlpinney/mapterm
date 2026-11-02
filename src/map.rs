@@ -521,6 +521,10 @@ pub struct Map {
     /// (take each frame with [`Map::take_pixels`] and show it with kitty graphics) instead of
     /// braille. Labels and markers stay text. None (the default) draws braille.
     pub pixel_mode: Option<(f64, f64)>,
+    /// Pixel mode: fade each new tile in over the backdrop (a few frames, as web maps do)
+    /// instead of swapping it in at once. Each step sends a copy of the tile, so it suits a
+    /// terminal on this machine (shared memory) better than one over SSH. Off by default.
+    pub pixel_fade: bool,
     /// The last frame drawn in pixel mode, until taken.
     pixels: std::sync::Mutex<Option<crate::pixels::PixFrame>>,
     /// Pixel mode's tile images.
@@ -670,7 +674,8 @@ impl Map {
         // (distance in zoom, grid tile, its zoom, pixmap)
         type Other = (f64, (u8, u32, u32), f64, std::sync::Arc<tiny_skia::Pixmap>);
         let mut others: Vec<Other> =
-            cache.tiles.iter().filter(|(k, _)| k.2 == sig).map(|(k, t)| ((k.1 as f64 / 64.0 - zoom).abs(), k.0, k.1 as f64 / 64.0, t.pixmap.clone())).collect();
+            // Fading tiles are left out: they fade in over what stood in for them.
+            cache.tiles.iter().filter(|(k, t)| k.2 == sig && t.fade.is_none()).map(|(k, t)| ((k.1 as f64 / 64.0 - zoom).abs(), k.0, k.1 as f64 / 64.0, t.pixmap.clone())).collect();
         others.sort_by(|a, b| b.0.total_cmp(&a.0));
         for (z, tx, ty) in vp.tiles(gz) {
             let key = ((z, tx, ty), zkey, sig);
@@ -700,11 +705,13 @@ impl Map {
                         // The terminal gets the pixels once; the cache keeps the pixmap.
                         let mut kept = img.clone();
                         kept.rgba = Default::default();
+                        // New in the view (not a redraw for feature state): fade in.
+                        let fade = (self.pixel_fade && old.is_none()).then(crate::pixels::Fade::new);
                         if let Some(old) =
-                            cache.tiles.insert(key, CachedTile { image: kept, pixmap: std::sync::Arc::new(pixmap), used: now, touched, stale: false })
+                            cache.tiles.insert(key, CachedTile { image: kept, pixmap: std::sync::Arc::new(pixmap), used: now, touched, stale: false, fade })
                         {
                             cache.bytes -= (old.image.width * old.image.height * 4) as usize * 2;
-                            frame.freed.push(old.image.id);
+                            frame.freed.extend(std::iter::once(old.image.id).chain(old.fade.and_then(|f| f.image_id())));
                         }
                         img
                     } else if let Some(old) = old {
@@ -717,6 +724,10 @@ impl Map {
                         continue;
                     }
                 }
+            };
+            let image = match cache.tiles.get_mut(&key) {
+                Some(t) if t.fade.is_some() => crate::pixels::fade_image(t, &mut frame),
+                _ => image,
             };
             // Where it goes, in pixels from the map area's corner, cut to the area.
             let (dx, dy) = vp.dot(tx as f64 / n, ty as f64 / n);
@@ -777,7 +788,7 @@ impl Map {
                 }
                 if let Some(t) = cache.tiles.remove(&k) {
                     cache.bytes -= (t.image.width * t.image.height * 4) as usize * 2;
-                    frame.freed.push(t.image.id);
+                    frame.freed.extend(std::iter::once(t.image.id).chain(t.fade.and_then(|f| f.image_id())));
                 }
             }
         }
@@ -2628,6 +2639,37 @@ mod tests {
         assert_eq!(l.kind, Kind::FillExtrusion);
         map.add_layer(l).unwrap();
         assert_eq!(render(&map, &Camera::new(0.0, 0.0, 0.0), Rect::new(0, 0, 40, 20))[(20, 10)].bg, Color::Rgb(200, 192, 176));
+    }
+
+    #[test]
+    fn pixel_tiles_fade_in() {
+        let mut map = Map::new();
+        map.add_layer(StyleLayer::background("bg").color("#808080")).unwrap();
+        map.pixel_mode = Some((10.0, 20.0));
+        map.pixel_fade = true;
+        map.pixcache.lock().unwrap().budget = Some(std::time::Duration::from_secs(60));
+        let (cam, area) = (Camera::new(0.0, 0.0, 2.0), Rect::new(0, 0, 40, 20));
+        let mut buf = Buffer::empty(area);
+        let mut frame = || {
+            map.view(&cam).render(area, &mut buf);
+            map.take_pixels().unwrap()
+        };
+        // First frame: each tile is sent, but a quarter-opaque copy is placed in its stead.
+        let f = frame();
+        let tiles: Vec<u32> = f.new.iter().filter(|i| i.rgba.chunks(4).all(|p| p[3] == 255)).map(|i| i.id).collect();
+        assert!(!tiles.is_empty() && f.pending == tiles.len(), "fading counts as pending");
+        assert!(f.placed.iter().all(|p| !tiles.contains(&p.id)), "copies placed, not the tiles");
+        let alpha = |f: &crate::pixels::PixFrame| f.new.iter().find(|i| !tiles.contains(&i.id)).map(|i| i.rgba[3]);
+        assert_eq!(alpha(&f), Some(64));
+        // Later steps are more opaque, and each frees the one before.
+        std::thread::sleep(crate::pixels::FADE / 2);
+        let f = frame();
+        assert!(alpha(&f).is_some_and(|a| a > 64) && !f.freed.is_empty());
+        // Done: the tiles themselves, nothing pending.
+        std::thread::sleep(crate::pixels::FADE);
+        let f = frame();
+        assert_eq!(f.pending, 0);
+        assert!(f.new.is_empty() && f.placed.iter().all(|p| tiles.contains(&p.id)));
     }
 
     #[test]

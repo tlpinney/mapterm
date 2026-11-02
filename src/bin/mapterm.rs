@@ -856,6 +856,8 @@ async fn main() -> Result<()> {
     }
     if pixels_on {
         map.pixel_mode = Some(cpx);
+        // Fading sends each new tile a few more times: cheap through shared memory, not over SSH.
+        map.pixel_fade = pixels_shm;
     }
 
     let mut term = ratatui::init();
