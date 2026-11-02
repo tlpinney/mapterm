@@ -10,6 +10,8 @@ The next release is 0.2.0: the library's `formats::Format` gains a variant (Shap
 
 ### Added
 
+- Release archives include `THIRD_PARTY_LICENSES.txt`: the copyright notices and
+  license terms of the crates built into the binary, made with cargo-about.
 - Shapefiles with `--geojson roads.shp` (a file or URL): the geometry, the `.dbf`
   attributes beside it with their text decoded by the `.cpg` code page, and the `.prj`.
   Lon/lat only for now: a projected `.prj` is refused with its name, as is a file without
