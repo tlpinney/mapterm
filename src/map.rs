@@ -2491,6 +2491,8 @@ mod tests {
         // Shown only up to zoom 2.2: zoom ranges mustn't stop zoom 2's tiles standing in.
         map.add_layer(StyleLayer::fill("upto", "sq").color("#0000ff").max_zoom(2.2)).unwrap();
         map.pixel_mode = Some((10.0, 20.0));
+        // Time enough to draw every tile, however slow the machine (debug builds in CI).
+        map.pixcache.lock().unwrap().budget = Some(std::time::Duration::from_secs(60));
         let area = Rect::new(0, 0, 40, 20);
         let mut buf = Buffer::empty(area);
         let blue_at_center = |f: &crate::pixels::PixFrame| {
@@ -2542,6 +2544,9 @@ mod tests {
         map.add_layer(StyleLayer::background("bg").color("#808080")).unwrap();
         map.add_layer(StyleLayer::fill("fill", "sq").color(json!(["case", ["boolean", ["feature-state", "hover"], false], "#ff0000", "#0000ff"]))).unwrap();
         map.pixel_mode = Some((10.0, 20.0));
+        // Time enough to draw every tile, however slow the machine (debug builds in CI).
+        let plenty = Some(std::time::Duration::from_secs(60));
+        map.pixcache.lock().unwrap().budget = plenty;
         let (cam, area) = (Camera::new(0.0, 0.0, 2.0), Rect::new(0, 0, 40, 20));
         let mut buf = Buffer::empty(area);
         let red = |img: &crate::pixels::PixImage| img.rgba.chunks(4).any(|p| p == [255, 0, 0, 255]);
@@ -2567,7 +2572,7 @@ mod tests {
         map.view(&cam).render(area, &mut buf);
         let f = map.take_pixels().unwrap();
         assert!(f.new.is_empty() && f.pending == 0 && f.placed.len() == first.placed.len(), "old images stay placed");
-        map.pixcache.lock().unwrap().budget = None;
+        map.pixcache.lock().unwrap().budget = plenty;
         map.view(&cam).render(area, &mut buf);
         let f = map.take_pixels().unwrap();
         assert!(!f.new.is_empty() && !f.new.iter().any(red), "redrawn without the highlight");
