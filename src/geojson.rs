@@ -120,7 +120,7 @@ pub fn overlay_layers(source: &str, color: Color, fill: bool) -> Vec<crate::spec
 }
 
 /// A whole file from a path or http(s) URL, up to [`MAX_BYTES`]; `None` if it isn't there.
-async fn fetch(spec: &str) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn fetch(spec: &str) -> Result<Option<Vec<u8>>> {
     if spec.starts_with("http://") || spec.starts_with("https://") {
         let http = crate::source::http_client();
         return crate::source::get_data(&http, spec, MAX_BYTES).await;

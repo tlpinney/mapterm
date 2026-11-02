@@ -112,6 +112,10 @@ mapterm --geojson parcels.shp
 # Overture's buildings, worldwide (512 files, 257 GB), loading only what's on screen:
 mapterm --geojson https://stac.overturemaps.org/2026-10-21.0/buildings/building/collection.json \
   --at 13.70,-89.20 -z 17
+# Microsoft's current footprints (with heights) and Overture's, side by side:
+mapterm --geojson microsoft-buildings \
+  --geojson https://stac.overturemaps.org/2026-10-21.0/buildings/building/collection.json \
+  --at 38.8880,-76.9950 -z 17
 ```
 
 Besides GeoJSON it reads CSV/TSV with latitude/longitude columns (`lat`,
@@ -129,7 +133,15 @@ requests, nearest the center first, and the farthest are dropped past 600,000
 features. A collection's file index is read once and kept in `~/.cache/mapterm`.
 Over San Salvador that's one footer and one 4 MB chunk, about 3 s, out of
 Overture's 257 GB. With `--bbox W,S,E,N` a layer is instead read once for that area
-(local files are read once, in place). Files and
+(local files are read once, in place).
+
+`microsoft-buildings` is Microsoft's Global ML Building Footprints as Microsoft keeps
+them current (refreshed every few weeks, with height estimates; the Planetary
+Computer's copy stopped in 2023). They come as one gzipped file per ~78 km tile,
+which can't be read in parts: the first view of a tile downloads it once (DC's is
+78 MB, about 15 s) and splits it into 256 pieces under `~/.cache/mapterm/msbuildings`,
+so later views there load in a second or two. The status bar shows each data layer's
+count of features in view, for comparing layers. Files and
 URLs up to 512 MB. The readers are checked against GDAL on a corpus of real files
 (`tests/differential.rs`).
 
