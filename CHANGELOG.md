@@ -11,6 +11,10 @@ GeoParquet), and `spec::Kind` one (`FillExtrusion`).
 
 ### Added
 
+- `--buildings-cache SIZE` / `MAPTERM_BUILDINGS_CACHE` caps the disk Microsoft building
+  tiles take (default 2 GB; least recently used out first, never the tile in use;
+  `msbuildings::set_cache_limit`). A tile on screen whose pieces were removed is fetched
+  and split again.
 - `--geojson microsoft-buildings` (or a `dataset-links.csv` URL): Microsoft's current
   Global ML Building Footprints (with heights), loading as the map moves. Each ~78 km
   gzipped tile is downloaded once and split into 256 pieces on disk; later views read only
