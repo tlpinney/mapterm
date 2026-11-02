@@ -86,6 +86,7 @@ pub mod mapbox;
 pub mod mvt;
 pub mod pbf;
 pub mod pick;
+pub mod pixels;
 pub mod planetary;
 pub mod pmtiles;
 pub mod raster;

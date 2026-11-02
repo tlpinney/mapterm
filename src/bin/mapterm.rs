@@ -714,8 +714,53 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        // MAPTERM_PIXELS_PNG=FILE: also save pixel mode's image (fills and lines; labels are
+        // text) for a Retina-sized terminal, to check the drawing without one.
+        let png = std::env::var("MAPTERM_PIXELS_PNG").ok();
+        if png.is_some() {
+            map.pixel_mode = Some((16.0, 34.0));
+        }
         let mut buf = Buffer::empty(area);
+        let t = Instant::now();
         map.view(&cam).render(area, &mut buf);
+        // Pixel mode leaves tiles blank past its per-frame drawing time: draw frames until
+        // all are in, keeping every image sent so far.
+        let mut sent: Vec<mapterm::pixels::PixImage> = Vec::new();
+        let mut last = map.take_pixels();
+        while let Some(f) = last.as_mut().filter(|f| f.pending > 0) {
+            sent.append(&mut f.new);
+            map.view(&cam).render(area, &mut Buffer::empty(area));
+            last = map.take_pixels();
+        }
+        if let Some(f) = last.as_mut() {
+            sent.append(&mut f.new);
+            f.new = std::mem::take(&mut sent);
+        }
+        if let (Some(path), Some(f)) = (png, last) {
+            // The frame put together from its tiles as the terminal would place them.
+            let (cw, ch) = (16u32, 34u32);
+            let (w, h) = (area.width as u32 * cw, area.height as u32 * ch);
+            let mut img = vec![0u8; (w * h * 4) as usize];
+            let images: std::collections::HashMap<u32, &mapterm::pixels::PixImage> = f.new.iter().map(|i| (i.id, i)).collect();
+            for p in &f.placed {
+                let Some(src) = images.get(&p.id) else { continue };
+                let (sx, sy, sw, sh) = p.src;
+                let (dx, dy) = ((p.col - area.x) as u32 * cw + p.x_off, (p.row - area.y) as u32 * ch + p.y_off);
+                for y in 0..sh {
+                    for x in 0..sw {
+                        let (tx, ty) = (dx + x, dy + y);
+                        if tx >= w || ty >= h || sx + x >= src.width || sy + y >= src.height {
+                            continue;
+                        }
+                        let s = ((sy + y) * src.width + sx + x) as usize * 4;
+                        let o = (ty * w + tx) as usize * 4;
+                        img[o..o + 4].copy_from_slice(&src.rgba[s..s + 4]);
+                    }
+                }
+            }
+            image::save_buffer(&path, &img, w, h, image::ExtendedColorType::Rgba8)?;
+            eprintln!("pixels: {} tiles drawn, {} placed, {:.1} ms -> {path}", f.new.len(), f.placed.len(), t.elapsed().as_secs_f64() * 1000.0);
+        }
         let out = match a.format.as_str() {
             "ansi" => mapterm::export::to_ansi(&buf),
             "html" => mapterm::export::to_html(&buf),
@@ -728,6 +773,28 @@ async fn main() -> Result<()> {
     // Raster drawing: real images with kitty graphics, else cell background colors.
     let has_raster = map.sources().any(|(_, s)| matches!(s, MapSource::Raster(_)));
     let kitty = has_raster && mapterm::kitty::supported();
+    // Experimental pixel mode: fills and lines as an image, labels as text (MAPTERM_PIXELS=1).
+    let pixels_on = std::env::var("MAPTERM_PIXELS").is_ok_and(|v| !v.is_empty() && v != "0") && mapterm::kitty::supported();
+    // Through shared memory when the terminal runs here; inline (compressed) over SSH.
+    let pixels_shm = std::env::var_os("SSH_CONNECTION").is_none();
+    // Tile images placed last frame, to take down the ones that left the view.
+    let mut pixels_placed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    // Tiles still blank (drawing or loading): keep drawing frames until they're in.
+    let mut pixels_pending = 0usize;
+    // The backdrop shown under the tiles while some aren't ready.
+    let mut backdrop_shown: Option<u32> = None;
+    // MAPTERM_DEMO="+@2,+@3.5,-@5,right@6,q@9": press keys at those seconds after start
+    // (+ - left right up down, q quits), to replay a scenario for recordings and tests.
+    let mut demo: Vec<(f64, String)> = std::env::var("MAPTERM_DEMO")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|e| {
+            let (k, t) = e.trim().split_once('@')?;
+            Some((t.trim().parse().ok()?, k.trim().to_string()))
+        })
+        .collect();
+    demo.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let demo_start = Instant::now();
     let mut kstate = KittyState::default();
     // Terminal image memory to stay within (herdr keeps 64 MiB per pane).
     if let Some(mb) = std::env::var("MAPTERM_KITTY_BUDGET_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
@@ -736,6 +803,9 @@ async fn main() -> Result<()> {
     let mut cpx = cell_px().unwrap_or((9.0, 20.0));
     if kitty {
         map.raster_mode = RasterMode::Kitty { cell_px: cpx };
+    }
+    if pixels_on {
+        map.pixel_mode = Some(cpx);
     }
 
     let mut term = ratatui::init();
@@ -813,9 +883,22 @@ async fn main() -> Result<()> {
     let mut credit_pending = false;
     let result: Result<()> = async {
         loop {
+            while demo.last().is_some_and(|(t, _)| demo_start.elapsed().as_secs_f64() >= *t) {
+                let (_, k) = demo.pop().unwrap_or_default();
+                let code = match k.as_str() {
+                    "q" => return Ok(()),
+                    "left" => KeyCode::Left,
+                    "right" => KeyCode::Right,
+                    "up" => KeyCode::Up,
+                    "down" => KeyCode::Down,
+                    other => KeyCode::Char(other.chars().next().unwrap_or(' ')),
+                };
+                dlog(|| format!("demo: {k} at {:.2} s", demo_start.elapsed().as_secs_f64()));
+                ctl.key(crossterm::event::KeyEvent::from(code));
+            }
             ctl.tick(Instant::now());
             // One synchronized update per frame when escape sequences follow the cells.
-            let sync = smooth_on || kitty;
+            let sync = smooth_on || kitty || pixels_on;
             if sync {
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
@@ -992,6 +1075,55 @@ async fn main() -> Result<()> {
                     dlog(|| format!("frame: kitty cmds {} bytes, {} KiB of images held, cell_px={cpx:?} map={map_area:?}", cmds.len(), kstate.bytes() >> 10));
                     out.write_all(cmds.as_bytes())?;
                 }
+                if pixels_on && let Some(f) = map.take_pixels() {
+                    // New tile images once; then every tile is placed, above the imagery
+                    // (-1000 and up) and under the text, one image pixel per screen pixel.
+                    let t = Instant::now();
+                    let mut cmds = String::new();
+                    for img in &f.new {
+                        cmds.push_str(&mapterm::kitty::transmit_rgba(img.id, img.width, img.height, &img.rgba, pixels_shm));
+                    }
+                    let now: std::collections::HashSet<u32> = f.placed.iter().map(|p| p.id).collect();
+                    for id in pixels_placed.difference(&now) {
+                        cmds.push_str(&mapterm::kitty::unplace(*id));
+                    }
+                    for p in &f.placed {
+                        cmds.push_str(&mapterm::kitty::place_px(p.id, p.col, p.row, p.x_off, p.y_off, p.src, -500));
+                    }
+                    for id in &f.freed {
+                        cmds.push_str(&mapterm::kitty::free(*id));
+                    }
+                    // Under the tiles, stretched over the map area's cells.
+                    if let Some(b) = &f.backdrop {
+                        cmds.push_str(&mapterm::kitty::transmit_rgba(b.id, b.width, b.height, &b.rgba, pixels_shm));
+                        cmds.push_str(&mapterm::kitty::place(
+                            b.id,
+                            1,
+                            map_area.x,
+                            map_area.y,
+                            (0, 0, b.width, b.height),
+                            map_area.width,
+                            map_area.height,
+                            -600,
+                        ));
+                    }
+                    if let Some(old) = std::mem::replace(&mut backdrop_shown, f.backdrop.as_ref().map(|b| b.id)) {
+                        cmds.push_str(&mapterm::kitty::free(old));
+                    }
+                    pixels_placed = now;
+                    pixels_pending = f.pending;
+                    out.write_all(cmds.as_bytes())?;
+                    dlog(|| {
+                        format!(
+                            "pixels: {} new tiles, {} placed, {} freed, {} bytes, send {:.1} ms, frame {frame_ms:.1} ms",
+                            f.new.len(),
+                            f.placed.len(),
+                            f.freed.len(),
+                            cmds.len(),
+                            t.elapsed().as_secs_f64() * 1000.0
+                        )
+                    });
+                }
                 crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;
             }
 
@@ -1052,7 +1184,7 @@ async fn main() -> Result<()> {
             }
 
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
-            let idle = if ctl.animating() { Duration::from_millis(16) } else { Duration::from_millis(500) };
+            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() { Duration::from_millis(16) } else { Duration::from_millis(500) };
             tokio::select! {
                 Some(first) = rx.recv() => {
                     let mut batch = vec![first];
@@ -1302,6 +1434,9 @@ async fn main() -> Result<()> {
                                 if kitty {
                                     map.raster_mode = RasterMode::Kitty { cell_px: cpx };
                                 }
+                                if pixels_on {
+                                    map.pixel_mode = Some(cpx);
+                                }
                                 if ctl.pixel_mouse.is_some() {
                                     ctl.pixel_mouse = cell_px();
                                 }
@@ -1390,7 +1525,7 @@ async fn main() -> Result<()> {
     }
     let _ = set_pixel_mouse(false);
     let _ = set_pointer("default");
-    if kitty {
+    if kitty || pixels_on {
         let _ = std::io::stdout().write_all(mapterm::kitty::FREE_ALL.as_bytes());
     }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);

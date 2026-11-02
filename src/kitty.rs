@@ -71,6 +71,110 @@ pub fn free(id: u32) -> String {
 /// Free every image this program sent.
 pub const FREE_ALL: &str = "\x1b_Ga=d,d=A,q=2\x1b\\";
 
+/// Show RGBA pixels (`w` x `h`, 4 bytes each) as image `id`, placed at cell (`col`, `row`)
+/// and stretched over `cols` x `rows` cells at layer `z` (negative: under the text). With
+/// `shm` (the terminal is on this machine) the pixels go through POSIX shared memory, which
+/// the terminal reads and unlinks, so nothing big crosses the terminal stream; otherwise
+/// they go inline, zlib-compressed. Replaces an earlier image with the same id.
+#[allow(clippy::too_many_arguments)]
+pub fn show_rgba(id: u32, w: u32, h: u32, rgba: &[u8], col: u16, row: u16, cols: u16, rows: u16, z: i32, shm: bool) -> String {
+    let mut out = format!("\x1b[{};{}H", row + 1, col + 1);
+    let keys = format!("a=T,f=32,s={w},v={h},i={id},p=1,c={cols},r={rows},C=1,z={z},q=2");
+    #[cfg(unix)]
+    if shm && let Some(name) = shm_write(rgba) {
+        let _ = write!(out, "\x1b_G{keys},t=s,S={};{}\x1b\\", rgba.len(), base64(name.as_bytes()));
+        return out;
+    }
+    let _ = shm;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    let _ = std::io::Write::write_all(&mut z, rgba);
+    let data = base64(&z.finish().unwrap_or_default());
+    let chunks: Vec<&[u8]> = data.as_bytes().chunks(4096).collect();
+    for (i, c) in chunks.iter().enumerate() {
+        let more = u8::from(i + 1 < chunks.len());
+        let c = std::str::from_utf8(c).unwrap_or("");
+        if i == 0 {
+            let _ = write!(out, "\x1b_G{keys},o=z,m={more};{c}\x1b\\");
+        } else {
+            let _ = write!(out, "\x1b_Gm={more};{c}\x1b\\");
+        }
+    }
+    out
+}
+
+/// Put bytes in a new POSIX shared memory object; its name, or None if that failed.
+#[cfg(unix)]
+fn shm_write(data: &[u8]) -> Option<String> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let name = format!("/mapterm-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed));
+    let cname = std::ffi::CString::new(name.clone()).ok()?;
+    // SAFETY: plain POSIX calls on a fresh object this process created; the mapping is
+    // exactly `data.len()` bytes and unmapped before returning.
+    unsafe {
+        let fd = libc::shm_open(cname.as_ptr(), libc::O_CREAT | libc::O_RDWR | libc::O_EXCL, 0o600);
+        if fd < 0 {
+            return None;
+        }
+        let ok = libc::ftruncate(fd, data.len() as libc::off_t) == 0 && {
+            let p = libc::mmap(std::ptr::null_mut(), data.len(), libc::PROT_READ | libc::PROT_WRITE, libc::MAP_SHARED, fd, 0);
+            if p == libc::MAP_FAILED {
+                false
+            } else {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, data.len());
+                libc::munmap(p, data.len());
+                true
+            }
+        };
+        libc::close(fd);
+        if !ok {
+            libc::shm_unlink(cname.as_ptr());
+            return None;
+        }
+    }
+    Some(name)
+}
+
+/// Send RGBA pixels as image `id` without showing it (see [`show_rgba`] for `shm`).
+pub fn transmit_rgba(id: u32, w: u32, h: u32, rgba: &[u8], shm: bool) -> String {
+    let mut out = String::new();
+    let keys = format!("a=t,f=32,s={w},v={h},i={id},q=2");
+    #[cfg(unix)]
+    if shm && let Some(name) = shm_write(rgba) {
+        let _ = write!(out, "\x1b_G{keys},t=s,S={};{}\x1b\\", rgba.len(), base64(name.as_bytes()));
+        return out;
+    }
+    let _ = shm;
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    let _ = std::io::Write::write_all(&mut z, rgba);
+    let data = base64(&z.finish().unwrap_or_default());
+    let chunks: Vec<&[u8]> = data.as_bytes().chunks(4096).collect();
+    for (i, c) in chunks.iter().enumerate() {
+        let more = u8::from(i + 1 < chunks.len());
+        let c = std::str::from_utf8(c).unwrap_or("");
+        if i == 0 {
+            let _ = write!(out, "\x1b_G{keys},o=z,m={more};{c}\x1b\\");
+        } else {
+            let _ = write!(out, "\x1b_Gm={more};{c}\x1b\\");
+        }
+    }
+    out
+}
+
+/// Place image `id` (its placement 1, replacing an earlier one) at cell (`col`, `row`)
+/// plus a pixel offset inside it, showing `src` (x, y, w, h) one image pixel per screen
+/// pixel, at layer `z`.
+#[allow(clippy::too_many_arguments)]
+pub fn place_px(id: u32, col: u16, row: u16, x_off: u32, y_off: u32, src: (u32, u32, u32, u32), z: i32) -> String {
+    let (x, y, w, h) = src;
+    format!("\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x={x},y={y},w={w},h={h},X={x_off},Y={y_off},C=1,z={z},q=2\x1b\\", row + 1, col + 1)
+}
+
+/// Remove image `id`'s placements, keeping its data for later.
+pub fn unplace(id: u32) -> String {
+    format!("\x1b_Ga=d,d=i,i={id},q=2\x1b\\")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

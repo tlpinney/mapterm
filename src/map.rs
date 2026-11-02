@@ -329,10 +329,10 @@ enum Resolved {
         color: Option<Color>,
         outline: Option<Color>,
     },
-    /// `width` in dots (1 to 3); `dash` is on/off lengths in dots.
+    /// `width` in CSS pixels; `dash` is `line-dasharray`: on/off lengths in line widths.
     Line {
         color: Color,
-        width: u8,
+        width: f64,
         dash: Option<Vec<f64>>,
     },
     /// A glyph at each point, with an optional label beside it.
@@ -475,6 +475,11 @@ impl Tiles {
         })
     }
 
+    /// Whether every tile the view needs at `z` is loaded itself (no ancestor standing in).
+    fn complete(&self, vp: &Viewport, z: u8) -> bool {
+        vp.tiles(z).iter().all(|id| self.map.contains_key(id))
+    }
+
     /// Loaded tiles covering the view (ancestors standing in), lowest zoom first.
     fn visible(&self, vp: &Viewport, z: u8) -> Vec<(TileId, Arc<MapTile>)> {
         let mut seen = HashSet::new();
@@ -512,6 +517,14 @@ pub struct Map {
     warnings: Vec<String>,
     /// How raster layers draw (cell colors unless set to kitty images).
     pub raster_mode: RasterMode,
+    /// Pixel mode: the terminal's cell size in pixels, to draw fills and lines as an image
+    /// (take each frame with [`Map::take_pixels`] and show it with kitty graphics) instead of
+    /// braille. Labels and markers stay text. None (the default) draws braille.
+    pub pixel_mode: Option<(f64, f64)>,
+    /// The last frame drawn in pixel mode, until taken.
+    pixels: std::sync::Mutex<Option<crate::pixels::PixFrame>>,
+    /// Pixel mode's tile images.
+    pixcache: std::sync::Mutex<crate::pixels::PixCache>,
     /// How labels and markers are placed frame to frame (sticky by default).
     pub label_placement: LabelPlacement,
     /// Where symbols were placed last frame.
@@ -581,6 +594,194 @@ impl Map {
     /// An empty map.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The last frame drawn in [`Map::pixel_mode`]: the style's fills and lines as tile
+    /// images (drawn once each, about 512 pixels across) and where they go, to show under the
+    /// text with kitty graphics. None until a frame is drawn in pixel mode, and after it was
+    /// taken.
+    pub fn take_pixels(&self) -> Option<crate::pixels::PixFrame> {
+        self.pixels.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Whether every vector tile a view needs is loaded (none standing in).
+    fn tiles_complete(&self, cam: &Camera, area: Rect) -> bool {
+        let vp = Viewport::new(cam, area);
+        self.sources.iter().all(|(_, s)| match s {
+            MapSource::Vector(v) => v.tiles.complete(&vp, cam.tile_zoom(v.min_zoom, v.max_zoom)),
+            _ => true,
+        })
+    }
+
+    /// What decides how tiles look besides their data and the zoom: the layers and which are
+    /// switched on. Not their zoom ranges, so tiles from other zooms can stand in.
+    fn pixel_signature(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for e in &self.layers {
+            e.id().hash(&mut h);
+            if let Entry::Style(l) = e {
+                l.visible.hash(&mut h);
+            }
+        }
+        for (id, _) in &self.sources {
+            id.hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Pixel mode: draw (or reuse) the grid tiles over the view and plan where each goes.
+    fn pixel_tiles(&self, cam: &Camera, area: Rect, cpx: (f64, f64)) -> crate::pixels::PixFrame {
+        use crate::pixels::{BACKDROP_SCALE, CachedTile, DRAW_BUDGET, PIX_BUDGET, Pix, PixFrame, PixPlacement, next_image_id};
+        let mut frame = PixFrame::default();
+        let (cw, ch) = (cpx.0.max(1.0), cpx.1.max(1.0));
+        let (sx, sy) = (cw / 2.0, ch / 4.0);
+        let mut cache = self.pixcache.lock().unwrap_or_else(|e| e.into_inner());
+        cache.frame += 1;
+        let now = cache.frame;
+        // Feature state changed (hover highlights): tiles with those features are stale. They
+        // stay up until redrawn, so a highlight never blanks a tile.
+        let changed = std::mem::take(&mut cache.changed);
+        if !changed.is_empty() {
+            for t in cache.tiles.values_mut() {
+                if changed.iter().any(|(src, id)| match id {
+                    Some(id) => t.touched.contains(&(src.clone(), id.clone())),
+                    None => t.touched.iter().any(|(s, _)| s == src),
+                }) {
+                    t.stale = true;
+                }
+            }
+        }
+        let started = std::time::Instant::now();
+        let zoom = cam.zoom;
+        let imagery = self.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(zoom)));
+        let bg_rgb = if imagery { None } else { self.background(zoom).map(|c| c.to_u8()) };
+        // A grid fine enough that each tile is about 512 pixels across (braille's tiles would
+        // be thousands of pixels wide on a Retina screen).
+        let gz = (cam.zoom + (sx / 2.0).log2()).floor().clamp(0.0, 24.0) as u8;
+        let zkey = (cam.zoom * 64.0).round() as i64;
+        let sig = self.pixel_signature();
+        let vp = Viewport::new(cam, area);
+        let s = crate::render::TILE_DOTS * 2f64.powf(cam.zoom);
+        let n = (1u64 << gz) as f64;
+        let d = s / n;
+        let (aw, ah) = (area.width as f64 * cw, area.height as f64 * ch);
+        // Tiles drawn at other zooms (same style), nearest zoom last, for stand-ins.
+        // (distance in zoom, grid tile, its zoom, pixmap)
+        type Other = (f64, (u8, u32, u32), f64, std::sync::Arc<tiny_skia::Pixmap>);
+        let mut others: Vec<Other> =
+            cache.tiles.iter().filter(|(k, _)| k.2 == sig).map(|(k, t)| ((k.1 as f64 / 64.0 - zoom).abs(), k.0, k.1 as f64 / 64.0, t.pixmap.clone())).collect();
+        others.sort_by(|a, b| b.0.total_cmp(&a.0));
+        for (z, tx, ty) in vp.tiles(gz) {
+            let key = ((z, tx, ty), zkey, sig);
+            let budget = cache.budget.unwrap_or(DRAW_BUDGET);
+            let image = match cache.tiles.get_mut(&key) {
+                Some(t) if !t.stale || started.elapsed() >= budget => {
+                    t.used = now;
+                    t.image.clone()
+                }
+                stale_or_missing => {
+                    let old = stale_or_missing.map(|t| t.image.clone());
+                    // A camera that puts this tile's top-left corner at dot (0, 0).
+                    let (x0, y0) = (tx as f64 / n, ty as f64 / n);
+                    let (cols, rows) = ((d / 2.0).ceil() as u16 + 1, (d / 4.0).ceil() as u16 + 1);
+                    let (lon, lat) = crate::render::to_lonlat(x0 + cols as f64 / s, y0 + 2.0 * rows as f64 / s);
+                    let tcam = Camera::new(lon, lat, cam.zoom);
+                    let rect = Rect::new(0, 0, cols, rows);
+                    let (w, h) = ((d * sx).ceil() as u32, (d * sy).ceil() as u32);
+                    if started.elapsed() < budget && self.tiles_complete(&tcam, rect) {
+                        let Some(mut pix) = Pix::sized(w, h, cpx) else { continue };
+                        let mut scratch = Buffer::empty(rect);
+                        let mut touched = HashSet::new();
+                        draw_layers(self, &tcam, rect, &mut scratch, Pass::Tile { pix: &mut pix, touched: &mut touched });
+                        let (img, pixmap) = pix.finish(next_image_id());
+                        frame.new.push(img.clone());
+                        cache.bytes += img.rgba.len() + pixmap.data().len();
+                        // The terminal gets the pixels once; the cache keeps the pixmap.
+                        let mut kept = img.clone();
+                        kept.rgba = Default::default();
+                        if let Some(old) =
+                            cache.tiles.insert(key, CachedTile { image: kept, pixmap: std::sync::Arc::new(pixmap), used: now, touched, stale: false })
+                        {
+                            cache.bytes -= (old.image.width * old.image.height * 4) as usize * 2;
+                            frame.freed.push(old.image.id);
+                        }
+                        img
+                    } else if let Some(old) = old {
+                        // Stale, its data not complete: the old image stays up.
+                        old
+                    } else {
+                        // Not drawn yet (out of time this frame, center tiles first, or its
+                        // data is still loading): the backdrop shows under it.
+                        frame.pending += 1;
+                        continue;
+                    }
+                }
+            };
+            // Where it goes, in pixels from the map area's corner, cut to the area.
+            let (dx, dy) = vp.dot(tx as f64 / n, ty as f64 / n);
+            let (px, py) = (dx * sx, dy * sy);
+            let (ax0, ay0) = (px.max(0.0), py.max(0.0));
+            let (ax1, ay1) = ((px + image.width as f64).min(aw), (py + image.height as f64).min(ah));
+            if ax1 - ax0 < 1.0 || ay1 - ay0 < 1.0 {
+                continue;
+            }
+            let (col, row) = ((ax0 / cw).floor(), (ay0 / ch).floor());
+            frame.placed.push(PixPlacement {
+                id: image.id,
+                col: area.x + col as u16,
+                row: area.y + row as u16,
+                x_off: ((ax0 - col * cw).round() as u32).min(cw as u32 - 1),
+                y_off: ((ay0 - row * ch).round() as u32).min(ch as u32 - 1),
+                src: ((ax0 - px).round() as u32, (ay0 - py).round() as u32, (ax1 - ax0).round().max(1.0) as u32, (ay1 - ay0).round().max(1.0) as u32),
+            });
+        }
+        // Tiles missing: a backdrop of the whole area at low resolution, from the map's
+        // background and every cached tile (any zoom, nearest last) scaled into place, for the
+        // terminal to stretch over the area's cells under the tiles.
+        if frame.pending > 0 {
+            let (bw, bh) = ((aw * BACKDROP_SCALE).ceil().max(1.0), (ah * BACKDROP_SCALE).ceil().max(1.0));
+            let (fx, fy) = (bw / aw, bh / ah);
+            if let Some(mut pix) = Pix::sized(bw as u32, bh as u32, cpx) {
+                if let Some(bg) = bg_rgb {
+                    pix.clear(bg);
+                }
+                let view = {
+                    let (vx0, vy0) = (vp.dot_to_lonlat(0.0, 0.0), vp.dot_to_lonlat(area.width as f64 * 2.0, area.height as f64 * 4.0));
+                    let (a, b) = (crate::render::to_world(vx0.0, vx0.1), crate::render::to_world(vy0.0, vy0.1));
+                    [a.0, a.1, b.0, b.1]
+                };
+                for (_, (oz, ox, oy), ozoom, pm) in &others {
+                    let on = (1u64 << oz) as f64;
+                    let (sx0, sy0, size) = (*ox as f64 / on, *oy as f64 / on, 1.0 / on);
+                    if sx0 > view[2] || sy0 > view[3] || sx0 + size < view[0] || sy0 + size < view[1] {
+                        continue;
+                    }
+                    let (dx, dy) = vp.dot(sx0, sy0);
+                    let k = 2f64.powf(zoom - ozoom);
+                    // Pixels per dot differ across and down (cells aren't 2:4), so scale by
+                    // the backdrop's two factors; tiles were drawn with the same aspect.
+                    pix.blit_xy(pm, (dx * sx * fx) as f32, (dy * sy * fy) as f32, (k * fx) as f32, (k * fy) as f32);
+                }
+                let (img, _) = pix.finish(next_image_id());
+                frame.backdrop = Some(img);
+            }
+        }
+        // Over budget: the least recently used tiles this frame didn't use go.
+        if cache.bytes > PIX_BUDGET {
+            let mut old: Vec<(u64, crate::pixels::PixKey)> = cache.tiles.iter().filter(|(_, t)| t.used < now).map(|(k, t)| (t.used, *k)).collect();
+            old.sort_by_key(|(u, _)| *u);
+            for (_, k) in old {
+                if cache.bytes <= PIX_BUDGET {
+                    break;
+                }
+                if let Some(t) = cache.tiles.remove(&k) {
+                    cache.bytes -= (t.image.width * t.image.height * 4) as usize * 2;
+                    frame.freed.push(t.image.id);
+                }
+            }
+        }
+        frame
     }
 
     /// The labels and markers placed in the last frame drawn: (text, or glyph and label, with
@@ -689,6 +890,7 @@ impl Map {
             }
         }
         self.state_version += 1;
+        self.note_state_change(source, Some(id.to_string()));
         Ok(())
     }
 
@@ -710,6 +912,7 @@ impl Map {
             }
         }
         self.state_version += 1;
+        self.note_state_change(source, id.map(|i| i.to_string()));
     }
 
     /// A feature's state as a JSON object (empty when none is set).
@@ -721,6 +924,14 @@ impl Map {
             }
         }
         Json::Object(m)
+    }
+
+    /// Pixel mode: remember a feature's (or with None, a whole source's) state changed, so
+    /// the next frame redraws the tile images it's in.
+    fn note_state_change(&mut self, source: &str, id: Option<String>) {
+        if self.pixel_mode.is_some() {
+            self.pixcache.get_mut().unwrap_or_else(|e| e.into_inner()).changed.push((source.to_string(), id));
+        }
     }
 
     fn state_env(&self, source: &str) -> StateEnv<'_> {
@@ -1556,24 +1767,16 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
             if px <= 0.0 {
                 return None;
             }
-            let width = if px < 6.0 {
-                1
-            } else if px < 14.0 {
-                2
-            } else {
-                3
-            };
-            // Dash lengths are in line widths; at least a dot each so the pattern shows. All
-            // gaps zero means a solid line.
+            // Dash lengths are in line widths. All gaps zero means a solid line.
             let dash = match l.paint_expr("line-dasharray").map(|e| e.eval(&cp)) {
                 Some(crate::expr::Val::Array(a)) => {
-                    let v: Vec<f64> = a.iter().filter_map(|x| x.as_num()).map(|n| (n * px.max(1.0) / 4.0).max(1.0)).collect();
+                    let v: Vec<f64> = a.iter().filter_map(|x| x.as_num()).collect();
                     let gaps = a.iter().skip(1).step_by(2).any(|x| x.as_num().is_some_and(|n| n > 0.0));
                     (v.len() >= 2 && gaps).then_some(v)
                 }
                 _ => None,
             };
-            Some(Resolved::Line { color, width, dash })
+            Some(Resolved::Line { color, width: px, dash })
         }
         Kind::Circle if c.geom == GeomType::Point => {
             let fg = color("circle-color", "circle-opacity", Some(BLACK))?;
@@ -1647,7 +1850,7 @@ fn draw_resolved(ctx: &mut DrawContext, r: &Resolved, geom: GeomType, dots: &[Ve
         }
         Resolved::Line { color, width, dash } => {
             for part in dots {
-                ctx.line_styled(part, *color, *width, dash.as_deref());
+                ctx.line_px(part, *color, *width, dash.as_deref());
             }
         }
         Resolved::Point { glyph, style, label, priority } => {
@@ -1776,6 +1979,39 @@ pub struct MapView<'a> {
 impl Widget for MapView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let (map, cam) = (self.map, self.camera);
+        match map.pixel_mode {
+            Some(cpx) => {
+                let frame = map.pixel_tiles(cam, area, cpx);
+                *map.pixels.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
+                // Labels, markers and custom layers; the tiles hold the style's geometry.
+                draw_layers(map, cam, area, buf, Pass::Frame { labels: &map.label_memory, geometry_off: true });
+            }
+            None => {
+                draw_layers(map, cam, area, buf, Pass::Frame { labels: &map.label_memory, geometry_off: false });
+            }
+        }
+    }
+}
+
+/// What a [`draw_layers`] pass is for.
+enum Pass<'a> {
+    /// The frame on screen: labels and markers into the buffer, remembered for the next
+    /// frame; fills and lines as braille, or (with `geometry_off`, pixel mode) not at all for
+    /// style layers.
+    Frame { labels: &'a std::sync::Mutex<crate::layer::LabelMemory>, geometry_off: bool },
+    /// A pixel-mode tile image: fills and lines into `pix`. `touched` collects the (source,
+    /// feature id) of features in layers that read feature state, so a state change redraws
+    /// only the tiles they're in.
+    Tile { pix: &'a mut crate::pixels::Pix, touched: &'a mut HashSet<(String, String)> },
+}
+
+/// Draw the map's layers for `cam` into `area`, for a [`Pass`].
+fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass) {
+    let (pix, labels, geometry_off, mut touched) = match pass {
+        Pass::Frame { labels, geometry_off } => (None, Some(labels), geometry_off, None),
+        Pass::Tile { pix, touched } => (Some(pix), None, false, Some(touched)),
+    };
+    {
         let vp = Viewport::new(cam, area);
         let bg = map.background(cam.zoom);
         // Loaded tiles per vector source, looked up once per frame.
@@ -1787,20 +2023,28 @@ impl Widget for MapView<'_> {
                 _ => None,
             })
             .collect();
-        crate::layer::render_labelled(cam, area, buf, Some(&map.label_memory), map.label_placement == LabelPlacement::Sticky, |ctx| {
+        // Imagery under the map shows through the image, so the background isn't painted.
+        let imagery = map.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(cam.zoom)));
+        let skip_bg = pix.is_some() && imagery;
+        crate::layer::render_labelled(cam, area, buf, pix, labels, map.label_placement == LabelPlacement::Sticky, |ctx| {
             for (i, entry) in map.layers.iter().enumerate() {
                 ctx.base = i as i32 * LAYER_PRIORITY;
                 let l = match entry {
                     Entry::Style(l) => l,
                     Entry::Custom { layer, .. } => {
+                        ctx.geometry_off = false;
                         layer.draw(ctx);
                         continue;
                     }
                 };
+                ctx.geometry_off = geometry_off;
                 if !l.shown_at(cam.zoom) {
                     continue;
                 }
                 if l.kind == Kind::Background {
+                    if skip_bg {
+                        continue;
+                    }
                     if let Some(c) = l
                         .paint_expr("background-color")
                         .and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_color())
@@ -1819,10 +2063,26 @@ impl Widget for MapView<'_> {
                 }
                 let Some(sid) = l.source.as_deref() else { continue };
                 let env = map.state_env(sid);
+                let stateful = touched.is_some() && l.uses_state();
+                // Pixel tiles note the features whose look can change with feature state (all
+                // of a stateful layer's, drawn or not: a state can make a hidden one show).
+                let mut touch = |id: &Option<crate::mvt::Value>, props: &[(String, crate::mvt::Value)]| {
+                    if let Some(t) = touched.as_deref_mut()
+                        && let Some(id) = feature_id(env.promote, id, props)
+                    {
+                        t.insert((sid.to_string(), id.to_string()));
+                    }
+                };
                 match map.source(sid) {
                     Some(MapSource::Vector(_)) => {
                         for ((z, tx, ty), tile) in tiles.get(sid).into_iter().flatten() {
                             let n = (1u64 << z) as f64;
+                            if stateful && let Some(fs) = l.source_layer.as_deref().and_then(|s| tile.by_layer.get(s)) {
+                                for &fi in fs {
+                                    let f = &tile.features[fi as usize];
+                                    touch(&f.id, &f.props);
+                                }
+                            }
                             for it in tile.layer_items(i, l, cam.zoom, bg, env).iter() {
                                 let f = &tile.features[it.feature as usize];
                                 let dots: Vec<Vec<(f64, f64)>> = f
@@ -1838,6 +2098,9 @@ impl Widget for MapView<'_> {
                         for f in g.near(cam.zoom, ctx.world_view()) {
                             if !ctx.visible(f.bbox) {
                                 continue;
+                            }
+                            if stateful {
+                                touch(&f.id, &f.props);
                             }
                             let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
                             let Some(r) = resolve(l, &c, cam.zoom, bg) else { continue };
@@ -2229,6 +2492,107 @@ mod tests {
         map.set_data("other", &json!({"type": "Point", "coordinates": [1, 1]})).unwrap();
         assert_eq!(map.attributions(16.0), vec!["Other Data"], "new data keeps the credit");
         assert!(map.set_attribution("nope", "x").is_err());
+    }
+
+    #[test]
+    fn pixel_backdrop_while_zooming() {
+        // A blue square over a grey background, in pixel mode.
+        let mut map = Map::new();
+        map.add_source(
+            "sq",
+            MapSource::geojson(&json!({"type": "Polygon", "coordinates": [[[-40, -30], [40, -30], [40, 30], [-40, 30], [-40, -30]]]})).unwrap(),
+        )
+        .unwrap();
+        map.add_layer(StyleLayer::background("bg").color("#808080")).unwrap();
+        map.add_layer(StyleLayer::fill("fill", "sq").color("#0000ff")).unwrap();
+        // Shown only up to zoom 2.2: zoom ranges mustn't stop zoom 2's tiles standing in.
+        map.add_layer(StyleLayer::fill("upto", "sq").color("#0000ff").max_zoom(2.2)).unwrap();
+        map.pixel_mode = Some((10.0, 20.0));
+        // Time enough to draw every tile, however slow the machine (debug builds in CI).
+        map.pixcache.lock().unwrap().budget = Some(std::time::Duration::from_secs(60));
+        let area = Rect::new(0, 0, 40, 20);
+        let mut buf = Buffer::empty(area);
+        let blue_at_center = |f: &crate::pixels::PixFrame| {
+            // The topmost image placed over the view's center pixel (neighbours overlap by
+            // a pixel), and that pixel's color.
+            let (cx, cy) = (200u32, 200u32);
+            f.placed.iter().rev().find_map(|p| {
+                let (x0, y0) = (p.col as u32 * 10 + p.x_off, p.row as u32 * 20 + p.y_off);
+                let (sx, sy, sw, sh) = p.src;
+                if cx < x0 || cy < y0 || cx >= x0 + sw || cy >= y0 + sh {
+                    return None;
+                }
+                let img = f.new.iter().find(|i| i.id == p.id)?;
+                let o = (((cy - y0 + sy) * img.width) + cx - x0 + sx) as usize * 4;
+                Some(img.rgba[o..o + 4].to_vec())
+            })
+        };
+        map.view(&Camera::new(0.0, 0.0, 2.0)).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(f.pending == 0 && !f.new.is_empty(), "everything drawn at zoom 2");
+        assert_eq!(blue_at_center(&f), Some(vec![0, 0, 255, 255]));
+        // No time to draw: zooming in and out, the backdrop shows zoom 2's tiles scaled
+        // into place over the whole area, with nothing see-through.
+        map.pixcache.lock().unwrap().budget = Some(std::time::Duration::ZERO);
+        for z in [2.5, 1.5] {
+            map.view(&Camera::new(0.0, 0.0, z)).render(area, &mut buf);
+            let f = map.take_pixels().unwrap();
+            assert!(f.pending > 0 && f.placed.is_empty(), "z{z}: no tiles drawn");
+            let b = f.backdrop.as_ref().expect("a backdrop");
+            assert!(b.rgba.chunks(4).all(|p| p[3] == 255), "z{z}: backdrop see-through");
+            let at = |x: u32, y: u32| b.rgba[((y * b.width + x) * 4) as usize..((y * b.width + x) * 4 + 4) as usize].to_vec();
+            assert_eq!(at(b.width / 2, b.height / 2), vec![0, 0, 255, 255], "z{z}: the square in the middle");
+        }
+    }
+
+    #[test]
+    fn pixel_tiles_redraw_on_feature_state() {
+        // Two squares with ids, red while hovered; one sits inside a single grid tile.
+        let sq = |id: u32, x0: f64, y0: f64, d: f64| {
+            json!({"type": "Feature", "id": id, "properties": {},
+                "geometry": {"type": "Polygon", "coordinates": [[[x0, y0], [x0 + d, y0], [x0 + d, y0 + d], [x0, y0 + d], [x0, y0]]]}})
+        };
+        let mut map = Map::new();
+        map.add_source(
+            "sq",
+            MapSource::geojson(&json!({"type": "FeatureCollection", "features": [sq(1, -12.0, 4.0, 6.0), sq(2, 20.0, -40.0, 30.0)]})).unwrap(),
+        )
+        .unwrap();
+        map.add_layer(StyleLayer::background("bg").color("#808080")).unwrap();
+        map.add_layer(StyleLayer::fill("fill", "sq").color(json!(["case", ["boolean", ["feature-state", "hover"], false], "#ff0000", "#0000ff"]))).unwrap();
+        map.pixel_mode = Some((10.0, 20.0));
+        // Time enough to draw every tile, however slow the machine (debug builds in CI).
+        let plenty = Some(std::time::Duration::from_secs(60));
+        map.pixcache.lock().unwrap().budget = plenty;
+        let (cam, area) = (Camera::new(0.0, 0.0, 2.0), Rect::new(0, 0, 40, 20));
+        let mut buf = Buffer::empty(area);
+        let red = |img: &crate::pixels::PixImage| img.rgba.chunks(4).any(|p| p == [255, 0, 0, 255]);
+        map.view(&cam).render(area, &mut buf);
+        let first = map.take_pixels().unwrap();
+        assert!(first.pending == 0 && first.new.len() > 2, "all {} tiles drawn", first.new.len());
+        assert!(!first.new.iter().any(red));
+        // Hover square 1: only the tile it's in is redrawn (and red), its old image freed.
+        map.set_feature_state("sq", &crate::mvt::Value::Num(1.0), &json!({"hover": true})).unwrap();
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert_eq!(f.new.len(), 1, "one tile redrawn");
+        assert!(red(&f.new[0]));
+        assert_eq!(f.freed.len(), 1);
+        assert!(first.new.iter().any(|i| i.id == f.freed[0]));
+        assert_eq!(f.placed.len(), first.placed.len());
+        // Nothing changed: nothing redrawn.
+        map.view(&cam).render(area, &mut buf);
+        assert!(map.take_pixels().unwrap().new.is_empty());
+        // No time to redraw: the stale tile stays up (never blank), and is redrawn later.
+        map.pixcache.lock().unwrap().budget = Some(std::time::Duration::ZERO);
+        map.remove_feature_state("sq", None, None);
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(f.new.is_empty() && f.pending == 0 && f.placed.len() == first.placed.len(), "old images stay placed");
+        map.pixcache.lock().unwrap().budget = plenty;
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(!f.new.is_empty() && !f.new.iter().any(red), "redrawn without the highlight");
     }
 
     #[test]

@@ -58,6 +58,11 @@ pub struct DrawContext<'a> {
     /// Maps world and lon/lat coordinates to dots.
     pub viewport: Viewport,
     canvas: &'a mut Canvas,
+    /// Pixel mode: fills and lines go here instead of braille dots.
+    pix: Option<&'a mut crate::pixels::Pix>,
+    /// Skip fills and lines (pixel mode draws style layers' geometry into tile images; this
+    /// pass only places their labels and markers).
+    pub(crate) geometry_off: bool,
     /// [min_x, min_y, max_x, max_y] of the view in world coordinates.
     view: [f64; 4],
     size: (f64, f64),
@@ -88,8 +93,41 @@ impl DrawContext<'_> {
         p.0 >= 0.0 && p.1 >= 0.0 && p.0 < self.size.0 && p.1 < self.size.1
     }
 
+    /// Whether fills and lines are drawn as pixels (see [`crate::Map::pixel_mode`]).
+    pub fn pixels(&self) -> bool {
+        self.pix.is_some()
+    }
+
+    /// A polyline in dots, `width` CSS pixels wide, dashed by `dash` (on/off lengths in line
+    /// widths). As pixels in pixel mode; otherwise braille, 1 to 3 dots wide.
+    pub fn line_px(&mut self, pts: &[(f64, f64)], color: Color, width: f64, dash: Option<&[f64]>) {
+        if self.geometry_off {
+            return;
+        }
+        if let Some(p) = self.pix.as_deref_mut() {
+            p.stroke(pts, color, width, dash);
+            return;
+        }
+        let dots = if width < 6.0 {
+            1
+        } else if width < 14.0 {
+            2
+        } else {
+            3
+        };
+        let dash: Option<Vec<f64>> = dash.map(|d| d.iter().map(|n| (n * width.max(1.0) / 4.0).max(1.0)).collect());
+        self.line_styled(pts, color, dots, dash.as_deref());
+    }
+
     /// A polyline in dots.
     pub fn line_dots(&mut self, pts: &[(f64, f64)], color: Color) {
+        if self.geometry_off {
+            return;
+        }
+        if let Some(p) = self.pix.as_deref_mut() {
+            p.stroke(pts, color, 1.0, None);
+            return;
+        }
         for s in pts.windows(2) {
             self.canvas.line(s[0], s[1], color);
         }
@@ -134,7 +172,13 @@ impl DrawContext<'_> {
 
     /// Fill polygon rings (even-odd, holes allowed), in dots, into cell backgrounds.
     pub fn fill_dots(&mut self, rings: &[Vec<(f64, f64)>], color: Color) {
-        self.canvas.fill(rings, color);
+        if self.geometry_off {
+            return;
+        }
+        match self.pix.as_deref_mut() {
+            Some(p) => p.fill(rings, color),
+            None => self.canvas.fill(rings, color),
+        }
     }
 
     /// Fill polygon rings in world coordinates.
@@ -208,17 +252,19 @@ pub(crate) struct LabelMemory {
 /// priority first, never overlapping) and write the cells into `buf`.
 #[cfg(test)]
 pub(crate) fn render_with(camera: &Camera, area: Rect, buf: &mut Buffer, draw: impl FnOnce(&mut DrawContext)) {
-    render_labelled(camera, area, buf, None, false, draw)
+    render_labelled(camera, area, buf, None, None, false, draw)
 }
 
-/// [`render_with`], remembering where symbols went in `memory`. With `sticky`, symbols placed
-/// last frame are placed first (in their priority order) and each tries the spot nearest
-/// where it was, so labels don't trade places or hop between spots as the map moves:
-/// MapLibre's placement keeps shown labels the same way.
+/// [`render_with`], with fills and lines going to `pix` when given (pixel mode), and
+/// remembering where symbols went in `memory`. With `sticky`, symbols placed last frame are
+/// placed first (in their priority order) and each tries the spot nearest where it was, so
+/// labels don't trade places or hop between spots as the map moves: MapLibre's placement
+/// keeps shown labels the same way.
 pub(crate) fn render_labelled(
     camera: &Camera,
     area: Rect,
     buf: &mut Buffer,
+    pix: Option<&mut crate::pixels::Pix>,
     memory: Option<&std::sync::Mutex<LabelMemory>>,
     sticky: bool,
     draw: impl FnOnce(&mut DrawContext),
@@ -238,6 +284,8 @@ pub(crate) fn render_labelled(
         camera,
         viewport: Viewport::new(camera, area),
         canvas: &mut canvas,
+        pix,
+        geometry_off: false,
         view,
         size: (vw, vh),
         markers: Vec::new(),
@@ -433,7 +481,7 @@ mod tests {
     fn frame(mem: &std::sync::Mutex<LabelMemory>, sticky: bool, labels: &[(&str, (f64, f64), i32)]) -> Vec<String> {
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_labelled(&Camera::new(0.0, 0.0, 3.0), area, &mut buf, Some(mem), sticky, |ctx| {
+        render_labelled(&Camera::new(0.0, 0.0, 3.0), area, &mut buf, None, Some(mem), sticky, |ctx| {
             for (t, p, pri) in labels {
                 ctx.label_dot(*p, t, TStyle::new(), *pri);
             }

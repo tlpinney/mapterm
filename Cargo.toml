@@ -26,6 +26,7 @@ ratatui = "0.30.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 serde_json = "1.0.154"
 shapefile = { version = "0.9.0", features = ["encoding_rs"] }
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
 tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "time"] }
 unicode-width = "0.2.2"
 
@@ -35,6 +36,9 @@ path = "src/bin/mapterm.rs"
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[target."cfg(unix)".dependencies]
+libc = "0.2"
 
 [profile.dev]
 opt-level = 1
