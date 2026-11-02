@@ -1,0 +1,14 @@
+Third-party software in mapterm
+===============================
+
+mapterm is built from the Rust crates below. Their copyright notices and license
+terms follow, one section per license text, with the crates it covers.
+{{#each licenses}}
+
+--------------------------------------------------------------------------------
+{{name}} ({{id}})
+Used by:
+{{#each used_by}}  - {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+{{{text}}}
+{{/each}}

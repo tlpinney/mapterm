@@ -70,11 +70,17 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Build
         run: cargo build --release --locked --bin mapterm --target ${{ matrix.target }}
+      - name: Third-party notices
+        # The binary bundles its dependencies, whose licenses (MIT, BSD, Apache...) ask
+        # for their copyright notices to ship with it.
+        run: |
+          cargo install cargo-about --locked --version 0.9.2 --features cli
+          cargo about generate --fail about.hbs -o THIRD_PARTY_LICENSES.txt
       - name: Package
         run: |
           name="mapterm-${{ needs.check.outputs.version }}-${{ matrix.target }}"
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/mapterm" README.md LICENSE CHANGELOG.md "$name/"
+          cp "target/${{ matrix.target }}/release/mapterm" README.md LICENSE CHANGELOG.md THIRD_PARTY_LICENSES.txt "$name/"
           tar czf "$name.tar.gz" "$name"
           "$name/mapterm" --help | head -1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
