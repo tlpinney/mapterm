@@ -86,6 +86,10 @@ and `spec::Kind` one (`FillExtrusion`).
 - Layers drawn only with a sprite pattern (`fill-pattern`, `line-pattern`, no color) are
   skipped instead of drawn in the default black: liberty's pedestrian areas and wetlands
   came out black. A color that doesn't evaluate to one draws nothing too.
+- Zooming no longer queues downloads for views you've already left: tiles start only
+  into free download slots, nearest the center first, and the rest are asked for again by
+  the next frame for the view it shows. A scripted zoom from 12 to 17 over NAIP made 4
+  imagery requests instead of 16, and the final view filled in ~1.3 s instead of ~4 s.
 - "Zoom in for imagery" in the status bar only for raster layers shown at that zoom.
 - Text that looks like a zero-padded number stays text in CSV, GPX and KML properties:
   ZIP code `02139` and route name `001` were read as the numbers 2139 and 1 (found by the
