@@ -51,20 +51,12 @@ async fn main() -> anyhow::Result<()> {
             let vp = Viewport::new(cam, area);
             let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
             let on = |p: (f64, f64)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < w && p.1 < h;
-            let dots = |v: &[(String, f64, f64)]| -> Vec<(String, (f64, f64))> {
-                v.iter()
-                    .map(|(k, lon, lat)| (k.clone(), vp.dot_ll(*lon, *lat)))
-                    .collect()
-            };
+            let dots = |v: &[(String, f64, f64)]| -> Vec<(String, (f64, f64))> { v.iter().map(|(k, lon, lat)| (k.clone(), vp.dot_ll(*lon, *lat))).collect() };
             let (before, after) = (dots(&prev), dots(&now));
             let (a0, v0, l0, m0) = (c.appeared, c.vanished, c.lost, c.moved);
             if c.frames > 0 {
                 for (k, p) in &after {
-                    let same: Vec<f64> = before
-                        .iter()
-                        .filter(|(q, _)| q == k)
-                        .map(|(_, b)| (p.0 - b.0).hypot(p.1 - b.1))
-                        .collect();
+                    let same: Vec<f64> = before.iter().filter(|(q, _)| q == k).map(|(_, b)| (p.0 - b.0).hypot(p.1 - b.1)).collect();
                     match same.iter().copied().reduce(f64::min) {
                         None => c.appeared += 1,
                         Some(d) if d > 3.0 => c.moved += 1,
@@ -118,11 +110,5 @@ async fn main() -> anyhow::Result<()> {
 
 fn phase_line(name: &str, p: &Churn) -> String {
     let per = |n: usize| n as f64 / p.frames.max(1) as f64;
-    format!(
-        "  {name:<9} appeared {:.2}  vanished {:.2} (lost {:.2})  moved {:.2}",
-        per(p.appeared),
-        per(p.vanished),
-        per(p.lost),
-        per(p.moved)
-    )
+    format!("  {name:<9} appeared {:.2}  vanished {:.2} (lost {:.2})  moved {:.2}", per(p.appeared), per(p.vanished), per(p.lost), per(p.moved))
 }

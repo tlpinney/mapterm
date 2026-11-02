@@ -11,7 +11,6 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style as TStyle},
-
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -109,7 +108,13 @@ impl DrawContext<'_> {
             p.stroke(pts, color, width, dash);
             return;
         }
-        let dots = if width < 6.0 { 1 } else if width < 14.0 { 2 } else { 3 };
+        let dots = if width < 6.0 {
+            1
+        } else if width < 14.0 {
+            2
+        } else {
+            3
+        };
         let dash: Option<Vec<f64>> = dash.map(|d| d.iter().map(|n| (n * width.max(1.0) / 4.0).max(1.0)).collect());
         self.line_styled(pts, color, dots, dash.as_deref());
     }
@@ -288,21 +293,12 @@ pub(crate) fn render_labelled(
         base: 0,
     };
     draw(&mut ctx);
-    let DrawContext {
-        mut markers,
-        mut labels,
-        viewport: vp,
-        ..
-    } = ctx;
+    let DrawContext { mut markers, mut labels, viewport: vp, .. } = ctx;
     // Last frame's symbols, in this frame's dots.
     let (before, lost_before): (Spots, Spots) = match memory.filter(|_| sticky) {
         Some(m) => {
             let m = m.lock().unwrap_or_else(|e| e.into_inner());
-            let dots = |v: &[(String, f64, f64)]| {
-                v.iter()
-                    .map(|(k, lon, lat)| (k.clone(), vp.dot_ll(*lon, *lat)))
-                    .collect()
-            };
+            let dots = |v: &[(String, f64, f64)]| v.iter().map(|(k, lon, lat)| (k.clone(), vp.dot_ll(*lon, *lat))).collect();
             (dots(&m.placed), dots(&m.lost))
         }
         None => (Vec::new(), Vec::new()),
@@ -310,11 +306,7 @@ pub(crate) fn render_labelled(
     // How far a symbol may have drifted and still count as the same one: a few cells.
     const NEAR: f64 = 12.0;
     let near_in = |list: &[(String, (f64, f64))], key: &str, p: (f64, f64)| -> Option<f64> {
-        list.iter()
-            .filter(|(k, _)| k == key)
-            .map(|(_, q)| (p.0 - q.0).hypot(p.1 - q.1))
-            .filter(|d| *d < NEAR)
-            .reduce(f64::min)
+        list.iter().filter(|(k, _)| k == key).map(|(_, q)| (p.0 - q.0).hypot(p.1 - q.1)).filter(|d| *d < NEAR).reduce(f64::min)
     };
     let nearest = |key: &str, p: (f64, f64)| near_in(&before, key, p);
     let lost_last = |key: &str, p: (f64, f64)| near_in(&lost_before, key, p).is_some();
@@ -329,12 +321,7 @@ pub(crate) fn render_labelled(
         Label(String, TStyle, Vec<(f64, f64)>, f64),
     }
     let inside = |p: (f64, f64)| p.0 >= 0.0 && p.1 >= 0.0 && p.0 < vw && p.1 < vh;
-    let marker_key = |g: &str, l: &Option<(String, TStyle)>| {
-        format!(
-            "\u{1}{g}\u{1}{}",
-            l.as_ref().map_or("", |(t, _)| t.as_str())
-        )
-    };
+    let marker_key = |g: &str, l: &Option<(String, TStyle)>| format!("\u{1}{g}\u{1}{}", l.as_ref().map_or("", |(t, _)| t.as_str()));
     // (was shown last frame, priority, order added, symbol)
     let mut syms: Vec<(bool, i32, usize, Sym)> = Vec::with_capacity(markers.len() + labels.len());
     for (pri, p, g, st, l) in markers.drain(..) {
@@ -388,10 +375,7 @@ pub(crate) fn render_labelled(
                 let room = |w: i64| !flapping || canvas.clear_around(col, row, w, HYSTERESIS);
                 match label {
                     Some((l, ls)) => {
-                        if room(lcol - col + l.width() as i64)
-                            && canvas.fits(col, row, &glyph, false)
-                            && canvas.fits(lcol, row, &l, true)
-                        {
+                        if room(lcol - col + l.width() as i64) && canvas.fits(col, row, &glyph, false) && canvas.fits(lcol, row, &l, true) {
                             canvas.text_at(col, row, &glyph, st, false);
                             canvas.text_at(lcol, row, &l, ls, true);
                             shown.push((key, p));
@@ -400,8 +384,7 @@ pub(crate) fn render_labelled(
                         }
                     }
                     None => {
-                        if room(glyph.width() as i64) && canvas.text_at(col, row, &glyph, st, false)
-                        {
+                        if room(glyph.width() as i64) && canvas.text_at(col, row, &glyph, st, false) {
                             shown.push((key, p));
                         } else {
                             lost.push((key, p));
@@ -484,9 +467,7 @@ impl CustomLayer for Markers {
         for o in &self.0 {
             match o {
                 Overlay::Line { pts, color } => ctx.line_lonlat(pts, *color),
-                Overlay::Marker { lon, lat, glyph, style, label, priority } => {
-                    ctx.marker(*lon, *lat, glyph, *style, *priority, label.clone())
-                }
+                Overlay::Marker { lon, lat, glyph, style, label, priority } => ctx.marker(*lon, *lat, glyph, *style, *priority, label.clone()),
             }
         }
     }
@@ -497,39 +478,16 @@ mod tests {
     use super::*;
 
     /// Labels placed in a frame, as (text, row) pairs read from the buffer.
-    fn frame(
-        mem: &std::sync::Mutex<LabelMemory>,
-        sticky: bool,
-        labels: &[(&str, (f64, f64), i32)],
-    ) -> Vec<String> {
+    fn frame(mem: &std::sync::Mutex<LabelMemory>, sticky: bool, labels: &[(&str, (f64, f64), i32)]) -> Vec<String> {
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        render_labelled(
-            &Camera::new(0.0, 0.0, 3.0),
-            area,
-            &mut buf,
-            None,
-            Some(mem),
-            sticky,
-            |ctx| {
-                for (t, p, pri) in labels {
-                    ctx.label_dot(*p, t, TStyle::new(), *pri);
-                }
-            },
-        );
-        let text: String = (0..area.height)
-            .map(|y| {
-                (0..area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect::<String>()
-                    + "\n"
-            })
-            .collect();
-        labels
-            .iter()
-            .filter(|(t, ..)| text.contains(t))
-            .map(|(t, ..)| t.to_string())
-            .collect()
+        render_labelled(&Camera::new(0.0, 0.0, 3.0), area, &mut buf, None, Some(mem), sticky, |ctx| {
+            for (t, p, pri) in labels {
+                ctx.label_dot(*p, t, TStyle::new(), *pri);
+            }
+        });
+        let text: String = (0..area.height).map(|y| (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
+        labels.iter().filter(|(t, ..)| text.contains(t)).map(|(t, ..)| t.to_string()).collect()
     }
 
     #[test]
@@ -540,35 +498,19 @@ mod tests {
             assert_eq!(frame(&mem, sticky, &[(a, (30.0, 18.0), 1)]), vec![a]);
             // A higher-priority label now overlaps the one showing.
             let shown = frame(&mem, sticky, &[(a, (30.0, 18.0), 1), (b, (34.0, 18.0), 5)]);
-            assert_eq!(
-                shown,
-                if sticky { vec![a] } else { vec![b] },
-                "sticky={sticky}"
-            );
+            assert_eq!(shown, if sticky { vec![a] } else { vec![b] }, "sticky={sticky}");
         }
         // Hysteresis: the hidden label doesn't come back while it would only just fit beside
         // the shown one (a cell away), but does once there's room.
         let mem = std::sync::Mutex::new(LabelMemory::default());
         frame(&mem, true, &[(a, (30.0, 18.0), 1)]);
         frame(&mem, true, &[(a, (30.0, 18.0), 1), (b, (36.0, 18.0), 5)]);
-        assert_eq!(
-            frame(&mem, true, &[(a, (30.0, 18.0), 1), (b, (46.0, 18.0), 5)]),
-            vec![a],
-            "just fits: still hidden"
-        );
+        assert_eq!(frame(&mem, true, &[(a, (30.0, 18.0), 1), (b, (46.0, 18.0), 5)]), vec![a], "just fits: still hidden");
         // ...but a brand-new label in the same spot shows: only labels that just lost wait.
         let fresh = std::sync::Mutex::new(LabelMemory::default());
         frame(&fresh, true, &[(a, (30.0, 18.0), 1)]);
-        assert_eq!(
-            frame(&fresh, true, &[(a, (30.0, 18.0), 1), (b, (46.0, 18.0), 5)]),
-            vec![a, b],
-            "new label, normal rules"
-        );
-        assert_eq!(
-            frame(&mem, true, &[(a, (30.0, 18.0), 1), (b, (60.0, 18.0), 5)]),
-            vec![a, b],
-            "room: back"
-        );
+        assert_eq!(frame(&fresh, true, &[(a, (30.0, 18.0), 1), (b, (46.0, 18.0), 5)]), vec![a, b], "new label, normal rules");
+        assert_eq!(frame(&mem, true, &[(a, (30.0, 18.0), 1), (b, (60.0, 18.0), 5)]), vec![a, b], "room: back");
     }
 
     use crate::render::Camera;

@@ -44,12 +44,12 @@ use serde_json::Value as Json;
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    raster::{RasterSource, RasterStore, RasterTile},
     expr::{Ctx, Rgba, Val},
     geojson,
     layer::{CustomLayer, DrawContext, PickContext},
     mvt::GeomType,
     pick::{Pick, hit, stats},
+    raster::{RasterSource, RasterStore, RasterTile},
     render::{Camera, Viewport, to_lonlat, to_world},
     source::Source,
     spec::{Kind, StyleLayer},
@@ -76,7 +76,14 @@ impl MapSource {
     /// Vector tiles fetched from `src` by [`Map::load_tiles`].
     pub fn vector(src: Source) -> Self {
         let attribution = src.attribution.as_deref().map(crate::source::plain_attribution);
-        MapSource::Vector(VectorSource { min_zoom: src.min_zoom, max_zoom: src.max_zoom, attribution, promote_id: None, fetch: Some(Arc::new(src)), tiles: Tiles::default() })
+        MapSource::Vector(VectorSource {
+            min_zoom: src.min_zoom,
+            max_zoom: src.max_zoom,
+            attribution,
+            promote_id: None,
+            fetch: Some(Arc::new(src)),
+            tiles: Tiles::default(),
+        })
     }
 
     /// Vector tiles the app supplies itself with [`Map::insert_tile`].
@@ -318,14 +325,34 @@ impl GeoJsonSource {
 /// What a style layer resolved to for one feature.
 #[derive(Clone, Debug)]
 enum Resolved {
-    Fill { color: Option<Color>, outline: Option<Color> },
+    Fill {
+        color: Option<Color>,
+        outline: Option<Color>,
+    },
     /// `width` in CSS pixels; `dash` is `line-dasharray`: on/off lengths in line widths.
-    Line { color: Color, width: f64, dash: Option<Vec<f64>> },
+    Line {
+        color: Color,
+        width: f64,
+        dash: Option<Vec<f64>>,
+    },
     /// A glyph at each point, with an optional label beside it.
-    Point { glyph: String, style: TStyle, label: Option<(String, TStyle)>, priority: i32 },
+    Point {
+        glyph: String,
+        style: TStyle,
+        label: Option<(String, TStyle)>,
+        priority: i32,
+    },
     /// `anchors` are tried in order (`text-variable-anchor`); `offset` is `text-offset` in
     /// dots; `spacing` is `symbol-spacing` in dots, for labels repeated along lines.
-    Text { text: String, style: TStyle, anchors: Vec<(i8, i8)>, offset: (f64, f64), along_line: bool, spacing: f64, priority: i32 },
+    Text {
+        text: String,
+        style: TStyle,
+        anchors: Vec<(i8, i8)>,
+        offset: (f64, f64),
+        along_line: bool,
+        spacing: f64,
+        priority: i32,
+    },
 }
 
 struct Item {
@@ -629,12 +656,8 @@ impl Map {
         // Tiles drawn at other zooms (same style), nearest zoom last, for stand-ins.
         // (distance in zoom, grid tile, its zoom, pixmap)
         type Other = (f64, (u8, u32, u32), f64, std::sync::Arc<tiny_skia::Pixmap>);
-        let mut others: Vec<Other> = cache
-            .tiles
-            .iter()
-            .filter(|(k, _)| k.2 == sig)
-            .map(|(k, t)| ((k.1 as f64 / 64.0 - zoom).abs(), k.0, k.1 as f64 / 64.0, t.pixmap.clone()))
-            .collect();
+        let mut others: Vec<Other> =
+            cache.tiles.iter().filter(|(k, _)| k.2 == sig).map(|(k, t)| ((k.1 as f64 / 64.0 - zoom).abs(), k.0, k.1 as f64 / 64.0, t.pixmap.clone())).collect();
         others.sort_by(|a, b| b.0.total_cmp(&a.0));
         for (z, tx, ty) in vp.tiles(gz) {
             let key = ((z, tx, ty), zkey, sig);
@@ -835,7 +858,8 @@ impl Map {
         let Some(obj) = state.as_object() else { bail!("feature state must be a JSON object") };
         let entry = self.states.entry(source.to_string()).or_default().entry(id.to_string()).or_default();
         for (k, v) in obj {
-            let v = crate::expr::Expr::parse(&serde_json::json!(["literal", v])).map(|e| e.eval(&Ctx { zoom: 0.0, geom: GeomType::Unknown, props: &[], state: &[] }))?;
+            let v = crate::expr::Expr::parse(&serde_json::json!(["literal", v]))
+                .map(|e| e.eval(&Ctx { zoom: 0.0, geom: GeomType::Unknown, props: &[], state: &[] }))?;
             match entry.iter_mut().find(|(key, _)| key == k) {
                 Some(slot) => slot.1 = v,
                 None => entry.push((k.clone(), v)),
@@ -1106,8 +1130,7 @@ impl Map {
         }
         let mut total = state.bytes();
         if total + new_bytes > state.budget {
-            let mut old: Vec<(u64, u32, usize)> =
-                state.sent.iter().filter(|(id, _)| !needed.contains(id)).map(|(id, (b, f))| (*f, *id, *b)).collect();
+            let mut old: Vec<(u64, u32, usize)> = state.sent.iter().filter(|(id, _)| !needed.contains(id)).map(|(id, (b, f))| (*f, *id, *b)).collect();
             old.sort_unstable();
             for (_, id, b) in old {
                 if total + new_bytes <= state.budget {
@@ -1386,7 +1409,13 @@ impl Map {
             let source: Arc<str> = Arc::from(sid);
             let edges = l.kind == Kind::Line;
             let mut hits: Vec<(u8, f64, Pick)> = Vec::new();
-            let mut push = |geom: GeomType, dots: &[Vec<(f64, f64)>], lonlat: Vec<Vec<(f64, f64)>>, layer: Arc<str>, props: &[(String, crate::mvt::Value)], tile: Option<TileId>, id: Option<crate::mvt::Value>| {
+            let mut push = |geom: GeomType,
+                            dots: &[Vec<(f64, f64)>],
+                            lonlat: Vec<Vec<(f64, f64)>>,
+                            layer: Arc<str>,
+                            props: &[(String, crate::mvt::Value)],
+                            tile: Option<TileId>,
+                            id: Option<crate::mvt::Value>| {
                 if let Some((rank, score)) = hit(geom, dots, target, edges) {
                     let st = stats(geom, &lonlat);
                     let score = if geom == GeomType::Polygon { st.area_km2.unwrap_or(0.0) } else { score };
@@ -1420,11 +1449,33 @@ impl Map {
                     let mut seen = HashSet::new();
                     for it in tile.layer_items(i, l, cam.zoom, bg, env).iter() {
                         let f = &tile.features[it.feature as usize];
-                        let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); vp.dot(x, y) }).collect()).collect();
+                        let dots: Vec<Vec<(f64, f64)>> = f
+                            .parts
+                            .iter()
+                            .map(|part| {
+                                part.iter()
+                                    .map(|p| {
+                                        let (x, y) = world(p);
+                                        vp.dot(x, y)
+                                    })
+                                    .collect()
+                            })
+                            .collect();
                         if hit(f.geom, &dots, target, edges).is_none() || !seen.insert(format!("{:?}{:?}", f.geom, f.props)) {
                             continue;
                         }
-                        let lonlat = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); to_lonlat(x, y) }).collect()).collect();
+                        let lonlat = f
+                            .parts
+                            .iter()
+                            .map(|part| {
+                                part.iter()
+                                    .map(|p| {
+                                        let (x, y) = world(p);
+                                        to_lonlat(x, y)
+                                    })
+                                    .collect()
+                            })
+                            .collect();
                         push(f.geom, &dots, lonlat, f.layer.clone(), &f.props, Some(tid), feature_id(env.promote, &f.id, &f.props));
                     }
                 }
@@ -1458,9 +1509,7 @@ impl Map {
         }
         let vp = Viewport::new(cam, area);
         let bg = self.background(cam.zoom);
-        let top_layer = |sid: &str| {
-            self.layers.iter().rposition(|e| matches!(e, Entry::Style(l) if l.source.as_deref() == Some(sid)))
-        };
+        let top_layer = |sid: &str| self.layers.iter().rposition(|e| matches!(e, Entry::Style(l) if l.source.as_deref() == Some(sid)));
         let mut order: Vec<&(String, MapSource)> = self.sources.iter().collect();
         order.sort_by_key(|(id, _)| std::cmp::Reverse(top_layer(id).map_or(-1, |i| i as i64)));
         let mut out = Vec::new();
@@ -1468,11 +1517,20 @@ impl Map {
             let source: Arc<str> = Arc::from(sid.as_str());
             let env = self.state_env(sid);
             let mut hits: Vec<(u8, f64, Pick)> = Vec::new();
-            let mut push = |geom: GeomType, rank: u8, score: f64, lonlat: Vec<Vec<(f64, f64)>>, layer: Arc<str>, props: &[(String, crate::mvt::Value)], tile: Option<TileId>, by: Option<usize>, id: Option<crate::mvt::Value>| {
+            let mut push = |geom: GeomType,
+                            rank: u8,
+                            score: f64,
+                            lonlat: Vec<Vec<(f64, f64)>>,
+                            layer: Arc<str>,
+                            props: &[(String, crate::mvt::Value)],
+                            tile: Option<TileId>,
+                            by: Option<usize>,
+                            id: Option<crate::mvt::Value>| {
                 let st = stats(geom, &lonlat);
                 let score = if geom == GeomType::Polygon { st.area_km2.unwrap_or(0.0) } else { score };
                 let style_layer = by.map(|i| Arc::from(self.layers[i].id()));
-                let pick = Pick { tile, layer, geom, props: props.to_vec(), lonlat, drawn: by.is_some(), stats: st, source: Some(source.clone()), style_layer, id };
+                let pick =
+                    Pick { tile, layer, geom, props: props.to_vec(), lonlat, drawn: by.is_some(), stats: st, source: Some(source.clone()), style_layer, id };
                 hits.push((rank, score, pick));
             };
             match src {
@@ -1501,14 +1559,46 @@ impl Map {
                     let world = |p: &[f32; 2]| ((tid.1 as f64 + p[0] as f64) / tn, (tid.2 as f64 + p[1] as f64) / tn);
                     let mut seen = HashSet::new();
                     for (fi, f) in tile.features.iter().enumerate() {
-                        let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); vp.dot(x, y) }).collect()).collect();
+                        let dots: Vec<Vec<(f64, f64)>> = f
+                            .parts
+                            .iter()
+                            .map(|part| {
+                                part.iter()
+                                    .map(|p| {
+                                        let (x, y) = world(p);
+                                        vp.dot(x, y)
+                                    })
+                                    .collect()
+                            })
+                            .collect();
                         let Some((rank, score)) = hit(f.geom, &dots, target, false) else { continue };
                         // A feature cut by tile edges can appear more than once; keep one.
                         if !seen.insert(format!("{}|{:?}|{:?}", f.layer, f.geom, f.props)) {
                             continue;
                         }
-                        let lonlat = f.parts.iter().map(|part| part.iter().map(|p| { let (x, y) = world(p); to_lonlat(x, y) }).collect()).collect();
-                        push(f.geom, rank, score, lonlat, f.layer.clone(), &f.props, Some(tid), drawn_by.get(&(fi as u32)).copied(), feature_id(env.promote, &f.id, &f.props));
+                        let lonlat = f
+                            .parts
+                            .iter()
+                            .map(|part| {
+                                part.iter()
+                                    .map(|p| {
+                                        let (x, y) = world(p);
+                                        to_lonlat(x, y)
+                                    })
+                                    .collect()
+                            })
+                            .collect();
+                        push(
+                            f.geom,
+                            rank,
+                            score,
+                            lonlat,
+                            f.layer.clone(),
+                            &f.props,
+                            Some(tid),
+                            drawn_by.get(&(fi as u32)).copied(),
+                            feature_id(env.promote, &f.id, &f.props),
+                        );
                     }
                 }
                 MapSource::GeoJson(g) => {
@@ -1653,17 +1743,16 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
                 style = style.add_modifier(Modifier::ITALIC);
             }
             // Terminal labels are one line: the first non-empty line of the text.
-            let text = layout_str("text-field")
-                .and_then(|t| t.lines().map(str::trim).find(|s| !s.is_empty()).map(str::to_string))
-                .map(|t| match layout_str("text-transform").as_deref() {
+            let text = layout_str("text-field").and_then(|t| t.lines().map(str::trim).find(|s| !s.is_empty()).map(str::to_string)).map(|t| {
+                match layout_str("text-transform").as_deref() {
                     Some("uppercase") => t.to_uppercase(),
                     Some("lowercase") => t.to_lowercase(),
                     _ => t,
-                });
-            // A point's glyph: `mapterm:glyph`, else the style's icon as a one-cell symbol.
-            let glyph = layout_str("mapterm:glyph").or_else(|| {
-                (c.geom == GeomType::Point).then(|| layout_str("icon-image")).flatten().and_then(|n| crate::icons::glyph(&n)).map(str::to_string)
+                }
             });
+            // A point's glyph: `mapterm:glyph`, else the style's icon as a one-cell symbol.
+            let glyph = layout_str("mapterm:glyph")
+                .or_else(|| (c.geom == GeomType::Point).then(|| layout_str("icon-image")).flatten().and_then(|n| crate::icons::glyph(&n)).map(str::to_string));
             let priority = sort();
             match (glyph, text) {
                 (Some(glyph), text) if c.geom == GeomType::Point => {
@@ -1899,8 +1988,16 @@ fn draw_layers(
                     if skip_bg {
                         continue;
                     }
-                    if let Some(c) = l.paint_expr("background-color").and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_color())
-                        && let Some(c) = term_color(c, l.paint_expr("background-opacity").and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_num()).unwrap_or(1.0), None)
+                    if let Some(c) = l
+                        .paint_expr("background-color")
+                        .and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_color())
+                        && let Some(c) = term_color(
+                            c,
+                            l.paint_expr("background-opacity")
+                                .and_then(|e| e.eval(&Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] }).as_num())
+                                .unwrap_or(1.0),
+                            None,
+                        )
                     {
                         let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
                         ctx.fill_dots(&[vec![(0.0, 0.0), (w, 0.0), (w, h), (0.0, h), (0.0, 0.0)]], c);
@@ -1973,7 +2070,6 @@ fn draw_layers(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2011,7 +2107,8 @@ mod tests {
         let cam = Camera::new(-77.0353, 38.8895, 15.0);
         let area = Rect::new(0, 0, 60, 20);
         let buf = render(&map, &cam, area);
-        let text: String = (0..area.height).map(|y| (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
+        let text: String =
+            (0..area.height).map(|y| (0..area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
         assert!(text.contains("◆ Pin"), "{text}");
         assert_eq!(buf[(30, 10)].symbol(), "◆");
         assert_eq!(buf[(30, 10)].fg, Color::Rgb(255, 255, 0));
@@ -2028,11 +2125,8 @@ mod tests {
         let cam = Camera::new(-77.0353, 38.8895, 15.0);
         let area = Rect::new(0, 0, 60, 20);
         let center = (60.0, 40.0);
-        let ids: Vec<(String, String)> = map
-            .query_rendered_features(&cam, area, center, None)
-            .iter()
-            .map(|p| (p.style_layer.as_deref().unwrap().to_string(), p.title()))
-            .collect();
+        let ids: Vec<(String, String)> =
+            map.query_rendered_features(&cam, area, center, None).iter().map(|p| (p.style_layer.as_deref().unwrap().to_string(), p.title())).collect();
         assert_eq!(ids, vec![("pins".into(), "Pin".into()), ("zones".into(), "Box".into())]);
         let only = map.query_rendered_features(&cam, area, center, Some(&["zones"]));
         assert_eq!(only.len(), 1);
@@ -2235,15 +2329,10 @@ mod tests {
         let cam = Camera::new(-77.0353, 38.8895, 15.0);
         let area = Rect::new(0, 0, 60, 20);
         let picks = map.query_features(&cam, area, (60.0, 40.0));
-        let got: Vec<(String, Option<String>, bool)> =
-            picks.iter().map(|p| (p.title(), p.style_layer.as_deref().map(str::to_string), p.drawn)).collect();
+        let got: Vec<(String, Option<String>, bool)> = picks.iter().map(|p| (p.title(), p.style_layer.as_deref().map(str::to_string), p.drawn)).collect();
         assert_eq!(
             got,
-            vec![
-                ("Pin".into(), Some("pins".into()), true),
-                ("Box".into(), Some("zones".into()), true),
-                ("water".into(), None, false),
-            ],
+            vec![("Pin".into(), Some("pins".into()), true), ("Box".into(), Some("zones".into()), true), ("water".into(), None, false),],
             "GeoJSON (top layers) first; the unstyled water square is listed but not drawn"
         );
         map.set_visibility("pins", false).unwrap();
@@ -2254,8 +2343,13 @@ mod tests {
     #[test]
     fn geojson_overlay_layers() {
         let mut map = Map::new();
-        map.add_source("mine", MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
-            {"type": "Feature", "properties": {"name": "Pin"}, "geometry": {"type": "Point", "coordinates": [-77.0353, 38.8895]}}]})).unwrap()).unwrap();
+        map.add_source(
+            "mine",
+            MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
+            {"type": "Feature", "properties": {"name": "Pin"}, "geometry": {"type": "Point", "coordinates": [-77.0353, 38.8895]}}]}))
+            .unwrap(),
+        )
+        .unwrap();
         map.add_layers(crate::geojson::overlay_layers("mine", Color::Rgb(255, 99, 132), true), None).unwrap();
         assert_eq!(map.layer_ids(), vec!["mine-fill", "mine-line", "mine-point", "mine-cluster", "mine-label"]);
         let cam = Camera::new(-77.0353, 38.8895, 15.0);
@@ -2328,7 +2422,11 @@ mod tests {
     fn pixel_backdrop_while_zooming() {
         // A blue square over a grey background, in pixel mode.
         let mut map = Map::new();
-        map.add_source("sq", MapSource::geojson(&json!({"type": "Polygon", "coordinates": [[[-40, -30], [40, -30], [40, 30], [-40, 30], [-40, -30]]]})).unwrap()).unwrap();
+        map.add_source(
+            "sq",
+            MapSource::geojson(&json!({"type": "Polygon", "coordinates": [[[-40, -30], [40, -30], [40, 30], [-40, 30], [-40, -30]]]})).unwrap(),
+        )
+        .unwrap();
         map.add_layer(StyleLayer::background("bg").color("#808080")).unwrap();
         map.add_layer(StyleLayer::fill("fill", "sq").color("#0000ff")).unwrap();
         // Shown only up to zoom 2.2: zoom ranges mustn't stop zoom 2's tiles standing in.
@@ -2420,12 +2518,17 @@ mod tests {
         let mut map = Map::new();
         // A road across the whole view, and two same-named points: one close to the other,
         // one far away.
-        map.add_source("r", MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
-            {"type": "Feature", "properties": {"name": "Long Road"}, "geometry": {"type": "LineString", "coordinates": [[-0.5, 0], [0.5, 0]]}},
-            {"type": "Feature", "properties": {"name": "Pump"}, "geometry": {"type": "Point", "coordinates": [-0.2, 0.1]}},
-            {"type": "Feature", "properties": {"name": "Pump"}, "geometry": {"type": "Point", "coordinates": [-0.195, 0.1]}},
-            {"type": "Feature", "properties": {"name": "Pump"}, "geometry": {"type": "Point", "coordinates": [0.25, 0.1]}}
-        ]})).unwrap()).unwrap();
+        map.add_source(
+            "r",
+            MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
+                {"type": "Feature", "properties": {"name": "Long Road"}, "geometry": {"type": "LineString", "coordinates": [[-0.5, 0], [0.5, 0]]}},
+                {"type": "Feature", "properties": {"name": "Pump"}, "geometry": {"type": "Point", "coordinates": [-0.2, 0.1]}},
+                {"type": "Feature", "properties": {"name": "Pump"}, "geometry": {"type": "Point", "coordinates": [-0.195, 0.1]}},
+                {"type": "Feature", "properties": {"name": "Pump"}, "geometry": {"type": "Point", "coordinates": [0.25, 0.1]}}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
         map.add_layer(StyleLayer::symbol("road", "r").filter(json!(["==", ["geometry-type"], "LineString"])).text("{name}").color("#fff")).unwrap();
         map.add_layer(StyleLayer::symbol("pumps", "r").filter(json!(["==", ["geometry-type"], "Point"])).text("{name}").color("#fff")).unwrap();
         let buf = render(&map, &Camera::new(0.0, 0.0, 9.0), Rect::new(0, 0, 160, 20));
@@ -2442,14 +2545,25 @@ mod tests {
     #[test]
     fn variable_anchor_and_offset() {
         let mut map = Map::new();
-        map.add_source("p", MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
-            {"type": "Feature", "properties": {"name": "Blocker"}, "geometry": {"type": "Point", "coordinates": [0, 0]}},
-            {"type": "Feature", "properties": {"name": "Here"}, "geometry": {"type": "Point", "coordinates": [0, 0]}}
-        ]})).unwrap()).unwrap();
+        map.add_source(
+            "p",
+            MapSource::geojson(&json!({"type": "FeatureCollection", "features": [
+                {"type": "Feature", "properties": {"name": "Blocker"}, "geometry": {"type": "Point", "coordinates": [0, 0]}},
+                {"type": "Feature", "properties": {"name": "Here"}, "geometry": {"type": "Point", "coordinates": [0, 0]}}
+            ]}))
+            .unwrap(),
+        )
+        .unwrap();
         // "Blocker" (higher layer, placed first) sits on the point; "Here" wants the same spot
         // first, then tries below it.
-        map.add_layer(StyleLayer::symbol("here", "p").filter(json!(["==", "name", "Here"])).text("{name}").color("#fff")
-            .layout("text-variable-anchor", json!(["center", "top"]))).unwrap();
+        map.add_layer(
+            StyleLayer::symbol("here", "p")
+                .filter(json!(["==", "name", "Here"]))
+                .text("{name}")
+                .color("#fff")
+                .layout("text-variable-anchor", json!(["center", "top"])),
+        )
+        .unwrap();
         map.add_layer(StyleLayer::symbol("blocker", "p").filter(json!(["==", "name", "Blocker"])).text("{name}").color("#fff")).unwrap();
         let area = Rect::new(0, 0, 40, 11);
         let rows = text_rows(&render(&map, &Camera::new(0.0, 0.0, 5.0), area));
@@ -2523,8 +2637,13 @@ mod tests {
         let mvt = crate::mvt::tests_support::square_tile_with_id("water", 4096, Some(42));
         let mut map = Map::new();
         map.add_source("v", MapSource::vector_tiles(0, 14)).unwrap();
-        map.add_layer(StyleLayer::fill("water", "v").source_layer("water")
-            .color(json!(["case", ["boolean", ["feature-state", "picked"], false], "#ff0000", "#0000ff"]))).unwrap();
+        map.add_layer(StyleLayer::fill("water", "v").source_layer("water").color(json!([
+            "case",
+            ["boolean", ["feature-state", "picked"], false],
+            "#ff0000",
+            "#0000ff"
+        ])))
+        .unwrap();
         map.insert_tile("v", (0, 0, 0), Some(&mvt)).unwrap();
         let (cam, area) = (Camera::new(0.0, 0.0, 0.0), Rect::new(0, 0, 40, 20));
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Rgb(0, 0, 255));
@@ -2539,9 +2658,14 @@ mod tests {
 
         // GeoJSON without ids, using a property instead (promoteId).
         let mut map = Map::new();
-        map.add_source("g", MapSource::geojson(&json!({"type": "Feature", "properties": {"code": "DC"},
-            "geometry": {"type": "Polygon", "coordinates": [[[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]]]}})).unwrap()
-            .with_promote_id("code")).unwrap();
+        map.add_source(
+            "g",
+            MapSource::geojson(&json!({"type": "Feature", "properties": {"code": "DC"},
+            "geometry": {"type": "Polygon", "coordinates": [[[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]]]}}))
+            .unwrap()
+            .with_promote_id("code"),
+        )
+        .unwrap();
         map.add_layer(StyleLayer::fill("g", "g").color(json!(["case", ["boolean", ["feature-state", "on"], false], "#00ff00", "#000000"]))).unwrap();
         let cam = Camera::new(0.0, 0.0, 6.0);
         map.set_feature_state("g", &crate::mvt::Value::Str("DC".into()), &json!({"on": true})).unwrap();
@@ -2552,8 +2676,12 @@ mod tests {
     #[test]
     fn clustered_geojson_source() {
         // 50 points in a tight group plus one far away.
-        let mut feats: Vec<Json> = (0..50).map(|i| json!({"type": "Feature", "properties": {"name": format!("p{i}")},
-            "geometry": {"type": "Point", "coordinates": [-77.03 + i as f64 * 1e-5, 38.89]}})).collect();
+        let mut feats: Vec<Json> = (0..50)
+            .map(|i| {
+                json!({"type": "Feature", "properties": {"name": format!("p{i}")},
+            "geometry": {"type": "Point", "coordinates": [-77.03 + i as f64 * 1e-5, 38.89]}})
+            })
+            .collect();
         feats.push(json!({"type": "Feature", "properties": {"name": "far"}, "geometry": {"type": "Point", "coordinates": [-76.0, 38.89]}}));
         let doc = json!({"type": "FeatureCollection", "features": feats});
         let mut map = Map::new();

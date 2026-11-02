@@ -91,7 +91,11 @@ impl Bezier {
             if (v - x).abs() < 1e-6 {
                 break;
             }
-            if x > v { lo = t } else { hi = t }
+            if x > v {
+                lo = t
+            } else {
+                hi = t
+            }
             t = (lo + hi) / 2.0;
         }
         self.y(t)
@@ -465,9 +469,8 @@ impl Controller {
             }
             MouseEventKind::Down(MouseButton::Left) if inside => {
                 self.stop();
-                let double = self.last_click.is_some_and(|(t, p)| {
-                    now.duration_since(t) < DOUBLE_CLICK && (p.0 - px.0).hypot(p.1 - px.1) < self.cell_px().0 * 1.5
-                });
+                let double =
+                    self.last_click.is_some_and(|(t, p)| now.duration_since(t) < DOUBLE_CLICK && (p.0 - px.0).hypot(p.1 - px.1) < self.cell_px().0 * 1.5);
                 if double {
                     self.last_click = None;
                     self.click = None;

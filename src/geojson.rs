@@ -6,7 +6,6 @@ use anyhow::{Context, Result, bail};
 use ratatui::style::Color;
 use serde_json::Value as Json;
 
-
 use crate::{
     mvt::{GeomType, Value},
     render::to_world,
@@ -161,7 +160,9 @@ pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
     // The layer's name: the file name without its extension.
     let file = spec.rsplit('/').next().unwrap_or(spec).split(['?', '#']).next().unwrap_or(spec);
     let name = match file.rsplit_once('.') {
-        Some((stem, ext)) if ["geojson", "json", "csv", "tsv", "txt", "gpx", "kml", "fgb", "shp"].contains(&ext.to_ascii_lowercase().as_str()) => stem.to_string(),
+        Some((stem, ext)) if ["geojson", "json", "csv", "tsv", "txt", "gpx", "kml", "fgb", "shp"].contains(&ext.to_ascii_lowercase().as_str()) => {
+            stem.to_string()
+        }
         _ => file.to_string(),
     };
     let spec = spec.to_string();
@@ -217,18 +218,11 @@ fn to_value(v: &Json) -> Option<Value> {
 }
 
 fn add_feature(f: &Json, out: &mut Vec<Feature>) {
-    let mut props: Vec<(String, Value)> = f["properties"]
-        .as_object()
-        .into_iter()
-        .flatten()
-        .filter_map(|(k, v)| to_value(v).map(|v| (k.clone(), v)))
-        .collect();
+    let mut props: Vec<(String, Value)> = f["properties"].as_object().into_iter().flatten().filter_map(|(k, v)| to_value(v).map(|v| (k.clone(), v))).collect();
     if let Some(id) = f.get("id").and_then(to_value) {
         props.insert(0, ("id".into(), id));
     }
-    let label = ["name", "title", "label", "NAME", "Name"]
-        .iter()
-        .find_map(|k| f["properties"][*k].as_str().filter(|s| !s.is_empty()).map(str::to_string));
+    let label = ["name", "title", "label", "NAME", "Name"].iter().find_map(|k| f["properties"][*k].as_str().filter(|s| !s.is_empty()).map(str::to_string));
     let id = f.get("id").and_then(to_value);
     add_geometry(&f["geometry"], id, props, label, out);
 }

@@ -114,10 +114,12 @@ mod tests {
     #[test]
     fn finds_exactly_the_overlapping_boxes() {
         // A 100x100 grid of unit boxes plus a few big ones.
-        let mut boxes: Vec<BBox> = (0..10_000).map(|i| {
-            let (x, y) = ((i % 100) as f64, (i / 100) as f64);
-            [x, y, x + 0.5, y + 0.5]
-        }).collect();
+        let mut boxes: Vec<BBox> = (0..10_000)
+            .map(|i| {
+                let (x, y) = ((i % 100) as f64, (i / 100) as f64);
+                [x, y, x + 0.5, y + 0.5]
+            })
+            .collect();
         boxes.push([-10.0, -10.0, 200.0, 200.0]);
         boxes.push([40.0, 40.0, 41.0, 60.0]);
         let index = Index::new(&boxes);
@@ -125,7 +127,8 @@ mod tests {
         for q in [[10.2, 10.2, 12.7, 11.1], [-5.0, -5.0, -1.0, -1.0], [40.6, 50.0, 40.7, 50.0], [0.0, 0.0, 99.5, 99.5]] {
             let mut got = index.search(q);
             got.sort_unstable();
-            let want: Vec<usize> = boxes.iter().enumerate().filter(|(_, b)| !(b[2] < q[0] || b[0] > q[2] || b[3] < q[1] || b[1] > q[3])).map(|(i, _)| i).collect();
+            let want: Vec<usize> =
+                boxes.iter().enumerate().filter(|(_, b)| !(b[2] < q[0] || b[0] > q[2] || b[3] < q[1] || b[1] > q[3])).map(|(i, _)| i).collect();
             assert_eq!(got, want, "{q:?}");
         }
         assert!(Index::new(&[]).search([0.0, 0.0, 1.0, 1.0]).is_empty());

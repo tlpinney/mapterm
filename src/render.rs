@@ -8,9 +8,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::{
-    store::TileId,
-};
+use crate::store::TileId;
 
 /// Dots per tile edge at integer zoom.
 pub(crate) const TILE_DOTS: f64 = 256.0;

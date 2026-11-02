@@ -157,7 +157,18 @@ pub struct StyleLayer {
 impl StyleLayer {
     /// A layer of type `kind` drawing from `source`.
     pub fn new(id: impl Into<String>, kind: Kind, source: Option<String>) -> Self {
-        Self { id: id.into(), kind, source, source_layer: None, min_zoom: 0.0, max_zoom: 24.0, filter: None, visible: true, paint: Vec::new(), layout: Vec::new() }
+        Self {
+            id: id.into(),
+            kind,
+            source,
+            source_layer: None,
+            min_zoom: 0.0,
+            max_zoom: 24.0,
+            filter: None,
+            visible: true,
+            paint: Vec::new(),
+            layout: Vec::new(),
+        }
     }
 
     /// A background layer.
@@ -349,12 +360,15 @@ fn set(props: &mut Vec<(String, Expr)>, name: &str, v: &Json) -> Result<()> {
     let e = match (name, v) {
         ("text-field", _) => Expr::parse_text(v)?,
         // An array of font names is a literal, not an expression.
-        ("text-font" | "text-variable-anchor", Json::Array(a)) if a.iter().all(Json::is_string) => Expr::Lit(crate::expr::Val::Array(
-            a.iter().filter_map(Json::as_str).map(|s| crate::expr::Val::Str(s.to_string())).collect(),
-        )),
+        ("text-font" | "text-variable-anchor", Json::Array(a)) if a.iter().all(Json::is_string) => {
+            Expr::Lit(crate::expr::Val::Array(a.iter().filter_map(Json::as_str).map(|s| crate::expr::Val::Str(s.to_string())).collect()))
+        }
         _ => Expr::parse(v)?,
     };
-    if name.ends_with("-color") && let Expr::Lit(crate::expr::Val::Str(s)) = &e && crate::expr::parse_color(s).is_none() {
+    if name.ends_with("-color")
+        && let Expr::Lit(crate::expr::Val::Str(s)) = &e
+        && crate::expr::parse_color(s).is_none()
+    {
         bail!("not a color: {s}");
     }
     match props.iter_mut().find(|(k, _)| k == name) {
