@@ -1775,6 +1775,19 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
             let outline = color("fill-outline-color", "fill-opacity", None);
             (fill.is_some() || outline.is_some()).then_some(Resolved::Fill { color: fill, outline })
         }
+        Kind::FillExtrusion if c.geom == GeomType::Polygon => {
+            // Flat, as MapLibre shows extrusions from straight above: the roof in its color,
+            // with a slightly darker edge so neighbouring buildings stay apart.
+            if has_pattern(l, "fill-extrusion-pattern", &cp) && l.paint_expr("fill-extrusion-color").is_none() {
+                return None;
+            }
+            let fill = color("fill-extrusion-color", "fill-extrusion-opacity", Some(BLACK))?;
+            let outline = match fill {
+                Color::Rgb(r, g, b) => Some(Color::Rgb((r as f64 * 0.88) as u8, (g as f64 * 0.88) as u8, (b as f64 * 0.88) as u8)),
+                _ => None,
+            };
+            Some(Resolved::Fill { color: Some(fill), outline })
+        }
         Kind::Line if c.geom != GeomType::Point => {
             if has_pattern(l, "line-pattern", &cp) && l.paint_expr("line-color").is_none() {
                 return None;
@@ -2584,6 +2597,25 @@ mod tests {
         assert_eq!(center(json!({"fill-pattern": "x", "fill-color": "#00ff00"})), Color::Rgb(0, 255, 0), "its color stands in");
         assert_eq!(center(json!({"fill-color": ["get", "no-such-property"]})), Color::Reset, "unreadable color: nothing");
         assert_eq!(center(json!({})), Color::Rgb(0, 0, 0), "unset: the spec's black");
+    }
+
+    #[test]
+    fn extrusions_draw_flat() {
+        // A fill-extrusion layer (3D buildings) from style JSON: its footprint in its color.
+        let mut map = Map::new();
+        map.add_source(
+            "b",
+            MapSource::geojson(&json!({"type": "Feature", "properties": {"render_height": 30},
+                "geometry": {"type": "Polygon", "coordinates": [[[-40, -30], [40, -30], [40, 30], [-40, 30], [-40, -30]]]}}))
+            .unwrap(),
+        )
+        .unwrap();
+        let (l, _) = StyleLayer::from_json(&json!({"id": "building-3d", "type": "fill-extrusion", "source": "b",
+            "paint": {"fill-extrusion-color": "#c8c0b0", "fill-extrusion-height": ["get", "render_height"]}}))
+        .unwrap();
+        assert_eq!(l.kind, Kind::FillExtrusion);
+        map.add_layer(l).unwrap();
+        assert_eq!(render(&map, &Camera::new(0.0, 0.0, 0.0), Rect::new(0, 0, 40, 20))[(20, 10)].bg, Color::Rgb(200, 192, 176));
     }
 
     #[test]

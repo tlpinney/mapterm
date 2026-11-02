@@ -54,7 +54,10 @@ pub enum Kind {
     Symbol,
     /// Image tiles.
     Raster,
-    /// A layer type mapterm doesn't draw (hillshade, heatmap, fill-extrusion, ...).
+    /// 3D buildings (`fill-extrusion`), drawn flat: the footprint in its color, as seen from
+    /// straight above.
+    FillExtrusion,
+    /// A layer type mapterm doesn't draw (hillshade, heatmap, ...).
     Other(String),
 }
 
@@ -67,6 +70,7 @@ impl Kind {
             "circle" => Kind::Circle,
             "symbol" => Kind::Symbol,
             "raster" => Kind::Raster,
+            "fill-extrusion" => Kind::FillExtrusion,
             o => Kind::Other(o.to_string()),
         }
     }
@@ -80,6 +84,7 @@ impl Kind {
             Kind::Circle => "circle",
             Kind::Symbol => "symbol",
             Kind::Raster => "raster",
+            Kind::FillExtrusion => "fill-extrusion",
             Kind::Other(o) => o,
         }
     }
@@ -92,13 +97,14 @@ impl Kind {
             Kind::Line => "line-color",
             Kind::Circle => "circle-color",
             Kind::Symbol => "text-color",
+            Kind::FillExtrusion => "fill-extrusion-color",
             Kind::Raster | Kind::Other(_) => "color",
         }
     }
 }
 
 /// Properties mapterm reads; others are kept out so lookups stay short.
-const USED_PAINT: [&str; 18] = [
+const USED_PAINT: [&str; 21] = [
     "background-color",
     "background-opacity",
     "fill-color",
@@ -107,6 +113,9 @@ const USED_PAINT: [&str; 18] = [
     // Only to know a layer draws a sprite pattern (which mapterm can't), not its default black.
     "fill-pattern",
     "line-pattern",
+    "fill-extrusion-pattern",
+    "fill-extrusion-color",
+    "fill-extrusion-opacity",
     "line-color",
     "line-opacity",
     "circle-color",

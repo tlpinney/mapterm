@@ -338,8 +338,7 @@ moves the same way, but a whole character at a time.
 On terminals that show kitty graphics (Ghostty, kitty), `MAPTERM_PIXELS=1`
 draws fills and lines as a real image at the screen's resolution, with smooth edges and
 the style's own line widths and dashes, instead of braille dots. Labels and markers stay
-text. It is rough and may change: 3D buildings aren't drawn yet, and an unreadable line
-color shows as black. Elsewhere the variable is ignored.
+text. It is rough and may change. Elsewhere the variable is ignored.
 
 ## License
 

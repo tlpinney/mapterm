@@ -6,10 +6,14 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
-The next release is 0.2.0: the library's `formats::Format` gains a variant (Shapefile).
+The next release is 0.2.0: the library's `formats::Format` gains a variant (Shapefile),
+and `spec::Kind` one (`FillExtrusion`).
 
 ### Added
 
+- 3D buildings (`fill-extrusion` layers) are drawn flat, their footprints in their color
+  with a slightly darker edge, as MapLibre shows them from straight above. Styles like
+  liberty draw buildings only this way past zoom 14, so they had none there.
 - Microsoft Planetary Computer imagery, free and without a key: `--raster naip` (USDA NAIP
   aerial photos of the US at ~60 cm, public domain) and `--raster sentinel2` (Sentinel-2's
   latest clear scenes, global at ~10 m). The mosaic is registered when the layer starts
@@ -73,6 +77,9 @@ The next release is 0.2.0: the library's `formats::Format` gains a variant (Shap
 
 ### Fixed
 
+- Layers drawn only with a sprite pattern (`fill-pattern`, `line-pattern`, no color) are
+  skipped instead of drawn in the default black: liberty's pedestrian areas and wetlands
+  came out black. A color that doesn't evaluate to one draws nothing too.
 - Text that looks like a zero-padded number stays text in CSV, GPX and KML properties:
   ZIP code `02139` and route name `001` were read as the numbers 2139 and 1 (found by the
   differential tests).
