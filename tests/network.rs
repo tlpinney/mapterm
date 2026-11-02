@@ -42,3 +42,16 @@ async fn flatgeobuf_by_url() {
     assert_eq!(layer.features.len(), 179);
     assert_eq!(layer.name, "countries");
 }
+
+#[tokio::test]
+#[ignore = "needs the network"]
+async fn planetary_computer_naip_tile() {
+    use mapterm::raster::{RasterSource, preset};
+    let mut s = RasterSource::from_preset(preset("naip").unwrap(), None).expect("no key needed");
+    s.start_session().await.expect("registering the NAIP mosaic");
+    assert!(s.missing_params().is_empty(), "{:?}", s.missing_params());
+    // The Washington Monument at zoom 15: 60 cm aerial photography.
+    let tile = s.tile(15, 9372, 12536).await.expect("a tile").expect("NAIP covers DC");
+    let img = image::load_from_memory(&tile).expect("a PNG");
+    assert_eq!((img.width(), img.height()), (256, 256));
+}

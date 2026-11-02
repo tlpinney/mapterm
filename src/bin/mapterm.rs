@@ -1016,6 +1016,11 @@ async fn main() -> Result<()> {
                     let n = limiter.as_ref().map_or(0, |b| b.per_min);
                     spans.push(Span::styled(format!("imagery limit {n}/min (--raster-limit) "), TStyle::new().fg(Color::Yellow)));
                 }
+                // Imagery that only renders zoomed in (Planetary Computer mosaics): say so
+                // rather than show nothing.
+                for (name, z) in map.rasters_below_min_zoom(&draw_cam) {
+                    spans.push(Span::styled(format!("{name}: zoom in to {z} for imagery "), TStyle::new().fg(Color::Yellow)));
+                }
                 if smooth_on {
                     let tag = match (shift_mode, ctl.pixel_mouse.is_some()) {
                         (true, true) => "smooth·shift·px ",

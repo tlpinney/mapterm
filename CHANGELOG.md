@@ -10,6 +10,13 @@ The next release is 0.2.0: the library's `formats::Format` gains a variant (Shap
 
 ### Added
 
+- Microsoft Planetary Computer imagery, free and without a key: `--raster naip` (USDA NAIP
+  aerial photos of the US at ~60 cm, public domain) and `--raster sentinel2` (Sentinel-2's
+  latest clear scenes, global at ~10 m). The mosaic is registered when the layer starts
+  (`RasterSource::start_session`, module `mapterm::planetary`), and tiles are kept as long
+  as their `Cache-Control` says (an hour). The service only renders these mosaics zoomed in,
+  so mapterm requests nothing below zoom 12 (NAIP) or 9 (Sentinel-2) and the status bar says
+  to zoom in: `RasterSource::min_zoom`, `Map::rasters_below_min_zoom`.
 - Experimental pixel mode (`MAPTERM_PIXELS=1`, kitty-graphics terminals): fills and lines
   as an image at the screen's resolution, drawn once per tile and cached, with labels as
   text. Library: `Map::pixel_mode` and `Map::take_pixels`.

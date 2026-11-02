@@ -45,6 +45,9 @@ pub struct RasterSource {
     pm: Option<Arc<PmArchive>>,
     /// Highest zoom with tiles.
     pub max_zoom: u8,
+    /// Lowest zoom to request tiles at (0 for most): below it nothing is fetched, for
+    /// services that only render when zoomed in, such as Planetary Computer mosaics.
+    pub min_zoom: u8,
     /// A short name for the status bar.
     pub name: String,
     /// Credit to show for the imagery (known providers are filled in automatically).
@@ -161,6 +164,30 @@ pub const PRESETS: &[Preset] = &[
         attribution: "NASA EOSDIS GIBS",
         tile_px: 256,
         max_zoom: 9,
+        cache: true,
+    },
+    Preset {
+        name: "naip",
+        about: "USDA NAIP aerial photos, US only, ~60 cm, public domain; from zoom 12 (Microsoft Planetary Computer)",
+        template: "https://planetarycomputer.microsoft.com/api/data/v1/mosaic/{search}/tiles/WebMercatorQuad/{z}/{x}/{y}?collection=naip&assets=image&asset_bidx=image%7C1,2,3&format=png",
+        headers: &[],
+        key_env: &[],
+        params: &[],
+        attribution: "USDA NAIP via Microsoft Planetary Computer",
+        tile_px: 256,
+        max_zoom: 18,
+        cache: true,
+    },
+    Preset {
+        name: "sentinel2",
+        about: "Sentinel-2 latest clear scenes, global at ~10 m; from zoom 9 (Microsoft Planetary Computer)",
+        template: "https://planetarycomputer.microsoft.com/api/data/v1/mosaic/{search}/tiles/WebMercatorQuad/{z}/{x}/{y}?collection=sentinel-2-l2a&assets=B04&assets=B03&assets=B02&nodata=0&color_formula=Gamma+RGB+3.2+Saturation+0.8+Sigmoidal+RGB+25+0.35&format=png",
+        headers: &[],
+        key_env: &[],
+        params: &[],
+        attribution: "Contains modified Copernicus Sentinel data, via Microsoft Planetary Computer",
+        tile_px: 256,
+        max_zoom: 14,
         cache: true,
     },
     Preset {
@@ -333,6 +360,7 @@ impl RasterSource {
             params: Vec::new(),
             pm: None,
             max_zoom,
+            min_zoom: 0,
             name: template.split('/').nth(2).unwrap_or(template).to_string(),
             attribution: known_attribution(template).unwrap_or_default().to_string(),
         })
@@ -360,8 +388,12 @@ impl RasterSource {
         s.tile_px = p.tile_px;
         s.name = p.name.to_string();
         s.attribution = p.attribution.to_string();
-        // Mapbox's tiles are kept as long as their headers say (12 hours, as of 2026).
-        s.by_headers = crate::mapbox::is_mapbox_host(p.template);
+        // Mapbox's tiles are kept as long as their headers say (12 hours, as of 2026), and so
+        // are the Planetary Computer's (an hour): its "latest" mosaics change.
+        s.by_headers = crate::mapbox::is_mapbox_host(p.template) || crate::planetary::is_planetary(p.template);
+        if let Some(c) = crate::planetary::collection(p.template).filter(|_| crate::planetary::is_planetary(p.template)) {
+            s.min_zoom = crate::planetary::min_zoom(c);
+        }
         if s.is_google() {
             // Kept only as long as each tile's headers say (a day, as of 2026), and apart per
             // map type: the URL template is the same for all of them.
@@ -391,6 +423,7 @@ impl RasterSource {
             tile_px: 256,
             params: Vec::new(),
             max_zoom: pm.header.max_zoom,
+            min_zoom: 0,
             pm: Some(Arc::new(pm)),
             name,
             attribution,
@@ -406,11 +439,18 @@ impl RasterSource {
         self.params.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
     }
 
-    /// Get a session for sources that need one before the first tile (Google's Map Tiles API:
-    /// `createSession` with the `maptype` parameter, which fills `{session}` and the tile size).
+    /// Get a session for sources that need one before the first tile: Google's Map Tiles API
+    /// (`createSession` with the `maptype` parameter, which fills `{session}` and the tile
+    /// size), and Planetary Computer mosaics (a registered search, which fills `{search}`).
     /// Does nothing for other sources. Sessions last about two weeks; this asks for a new one
     /// each run.
     pub async fn start_session(&mut self) -> Result<()> {
+        if crate::planetary::is_planetary(&self.template) && self.param("search").is_none() {
+            let collection = crate::planetary::collection(&self.template).context("Planetary Computer URL without a collection")?.to_string();
+            let id = crate::planetary::register(&self.http, &collection).await?;
+            self.set_param("search", &id);
+            return Ok(());
+        }
         if !self.is_google() || self.param("session").is_some() {
             return Ok(());
         }
@@ -887,6 +927,26 @@ mod tests {
         s.set_param("session", "SESS");
         assert_eq!(s.fill_key(&s.url(3, 2, 1)), "https://tile.googleapis.com/v1/2dtiles/3/2/1?session=SESS&key=k3y-123");
         assert!(!RasterSource::from_preset(preset("osm").unwrap(), None).unwrap().is_google());
+    }
+
+    #[test]
+    fn planetary_computer_presets() {
+        for (name, collection, min) in [("naip", "naip", 12), ("sentinel2", "sentinel-2-l2a", 9)] {
+            let s = RasterSource::from_preset(preset(name).unwrap(), None).expect("no key needed");
+            assert_eq!(crate::planetary::collection(&s.template), Some(collection));
+            assert_eq!(s.min_zoom, min, "{name} renders from zoom {min}");
+            assert!(s.cache && s.by_headers, "{name}: kept as long as Cache-Control says");
+            // The mosaic id comes from start_session; until then it is missing.
+            assert_eq!(s.missing_params(), vec!["search".to_string()]);
+            assert!(!s.wants_key());
+        }
+        let mut s = RasterSource::from_preset(preset("naip").unwrap(), None).unwrap();
+        s.set_param("search", "pc1.1.abc");
+        assert!(
+            s.url(15, 9372, 12536)
+                .starts_with("https://planetarycomputer.microsoft.com/api/data/v1/mosaic/pc1.1.abc/tiles/WebMercatorQuad/15/9372/12536?collection=naip&")
+        );
+        assert_eq!(RasterSource::from_preset(preset("osm").unwrap(), None).unwrap().min_zoom, 0);
     }
 
     #[test]
