@@ -1,0 +1,7 @@
+# Licenses for THIRD_PARTY_LICENSES.txt (cargo-about), shipped with release binaries.
+# Keep in step with deny.toml's [licenses] allow list.
+accepted = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0"]
+# Only what goes into the mapterm binary, for the targets we release.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
