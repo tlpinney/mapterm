@@ -79,6 +79,10 @@ The next release is 0.2.0: the library's `formats::Format` gains a variant (Shap
 
 ### Fixed
 
+- Zooming no longer queues downloads for views you've already left: tiles start only
+  into free download slots, nearest the center first, and the rest are asked for again by
+  the next frame for the view it shows. A scripted zoom from 12 to 17 over NAIP made 4
+  imagery requests instead of 16, and the final view filled in ~1.3 s instead of ~4 s.
 - "Zoom in for imagery" in the status bar only for raster layers shown at that zoom.
 - Text that looks like a zero-padded number stays text in CSV, GPX and KML properties:
   ZIP code `02139` and route name `001` were read as the numbers 2139 and 1 (found by the
