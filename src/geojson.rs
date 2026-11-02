@@ -146,10 +146,30 @@ fn sibling(spec: &str, ext: &str) -> String {
     format!("{stem}.{ext}{rest}")
 }
 
-/// Load a layer from a path or http(s) URL: GeoJSON, or CSV, GPX, KML, FlatGeobuf or a
-/// Shapefile (by extension, else by content; see [`crate::formats`]). For a `.shp`, the
+/// Load a layer from a path or http(s) URL: GeoJSON, or CSV, GPX, KML, FlatGeobuf, a
+/// Shapefile or GeoParquet (by extension, else by content; see [`crate::formats`]). For a `.shp`, the
 /// `.dbf`, `.prj` and `.cpg` beside it are read too when they exist.
 pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
+    load_in(spec, color, None).await
+}
+
+/// [`load`], reading only the features inside `bbox` (west, south, east, north, lon/lat) where
+/// the format allows: a GeoParquet file or URL is read in parts, skipping chunks outside it
+/// (see [`crate::geoparquet`]). Other formats are read whole and `bbox` is ignored.
+pub async fn load_in(spec: &str, color: Color, bbox: Option<crate::geoparquet::Bbox>) -> Result<GeoJson> {
+    let path = spec.split(['?', '#']).next().unwrap_or(spec).to_ascii_lowercase();
+    if path.ends_with(".parquet") || path.ends_with(".geoparquet") {
+        let doc = if spec.starts_with("http://") || spec.starts_with("https://") {
+            crate::geoparquet::read_url(spec, bbox).await?
+        } else {
+            let p = spec.strip_prefix("file://").unwrap_or(spec).to_string();
+            tokio::task::spawn_blocking(move || crate::geoparquet::read_file(&p, bbox)).await??
+        };
+        let file = spec.rsplit('/').next().unwrap_or(spec).split(['?', '#']).next().unwrap_or(spec);
+        let name = file.rsplit_once('.').map_or(file, |(stem, _)| stem).to_string();
+        let (features, bbox) = tokio::task::spawn_blocking(move || features(&doc)).await??;
+        return Ok(GeoJson { name, color, features, bbox, fill: true, labels: true });
+    }
     let bytes = fetch(spec).await?.with_context(|| format!("{spec}: not found"))?;
     let shapefile = crate::formats::Format::detect(spec, &bytes) == crate::formats::Format::Shapefile;
     let (dbf, prj, cpg) = if shapefile {
@@ -160,7 +180,9 @@ pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
     // The layer's name: the file name without its extension.
     let file = spec.rsplit('/').next().unwrap_or(spec).split(['?', '#']).next().unwrap_or(spec);
     let name = match file.rsplit_once('.') {
-        Some((stem, ext)) if ["geojson", "json", "csv", "tsv", "txt", "gpx", "kml", "fgb", "shp"].contains(&ext.to_ascii_lowercase().as_str()) => {
+        Some((stem, ext))
+            if ["geojson", "json", "csv", "tsv", "txt", "gpx", "kml", "fgb", "shp", "parquet", "geoparquet"].contains(&ext.to_ascii_lowercase().as_str()) =>
+        {
             stem.to_string()
         }
         _ => file.to_string(),
@@ -172,7 +194,7 @@ pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
             let parts = crate::shp::Parts { shp: &bytes, dbf: dbf.as_deref(), prj: prj.as_deref(), cpg: cpg.as_deref() };
             crate::shp::to_geojson(&parts).with_context(|| format!("{spec}: reading the shapefile"))?
         } else {
-            crate::formats::to_geojson(&spec, &bytes).with_context(|| format!("{spec}: not GeoJSON, CSV, GPX, KML, FlatGeobuf or a shapefile"))?
+            crate::formats::to_geojson(&spec, &bytes).with_context(|| format!("{spec}: not GeoJSON, CSV, GPX, KML, FlatGeobuf, a shapefile or GeoParquet"))?
         };
         let (features, bbox) = features(&doc)?;
         Ok(GeoJson { name, color, features, bbox, fill: true, labels: true })

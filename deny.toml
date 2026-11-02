@@ -16,7 +16,17 @@ all-features = true
 # RustSec advisories: vulnerabilities fail; unmaintained crates and yanked versions are
 # reported too.
 yanked = "deny"
-ignore = []
+ignore = [
+    # zstd 0.13.4 and zstd-safe 7.4.0 (2026-11-01, via parquet 59, which allows no zstd 0.14)
+    # carry backports of these three fixes: a reused context starts a new frame, seekable
+    # decompression checks its length, and legacy-frame streaming no longer exposes
+    # uninitialized memory (checked by diffing them against 0.13.3 / 7.3.0). The advisory
+    # database lists only zstd 0.14.3+ / zstd-safe 8.2.0+ as fixed so far. Remove these when
+    # it records the backports, or when geoparquet moves to parquet 60 (zstd 0.14).
+    { id = "RUSTSEC-2026-0391", reason = "fixed by backport in zstd 0.13.4; database not yet updated" },
+    { id = "RUSTSEC-2026-0398", reason = "fixed by backport in zstd-safe 7.4.0; database not yet updated" },
+    { id = "RUSTSEC-2026-0403", reason = "fixed by backport in zstd-safe 7.4.0; database not yet updated" },
+]
 
 [licenses]
 # Every dependency must be usable in an MIT-licensed crate: only these licenses are
