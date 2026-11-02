@@ -639,6 +639,19 @@ impl Map {
         let mut cache = self.pixcache.lock().unwrap_or_else(|e| e.into_inner());
         cache.frame += 1;
         let now = cache.frame;
+        // Feature state changed (hover highlights): tiles with those features are stale. They
+        // stay up until redrawn, so a highlight never blanks a tile.
+        let changed = std::mem::take(&mut cache.changed);
+        if !changed.is_empty() {
+            for t in cache.tiles.values_mut() {
+                if changed.iter().any(|(src, id)| match id {
+                    Some(id) => t.touched.contains(&(src.clone(), id.clone())),
+                    None => t.touched.iter().any(|(s, _)| s == src),
+                }) {
+                    t.stale = true;
+                }
+            }
+        }
         let started = std::time::Instant::now();
         let zoom = cam.zoom;
         let imagery = self.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(zoom)));
@@ -661,12 +674,14 @@ impl Map {
         others.sort_by(|a, b| b.0.total_cmp(&a.0));
         for (z, tx, ty) in vp.tiles(gz) {
             let key = ((z, tx, ty), zkey, sig);
+            let budget = cache.budget.unwrap_or(DRAW_BUDGET);
             let image = match cache.tiles.get_mut(&key) {
-                Some(t) => {
+                Some(t) if !t.stale || started.elapsed() >= budget => {
                     t.used = now;
                     t.image.clone()
                 }
-                None => {
+                stale_or_missing => {
+                    let old = stale_or_missing.map(|t| t.image.clone());
                     // A camera that puts this tile's top-left corner at dot (0, 0).
                     let (x0, y0) = (tx as f64 / n, ty as f64 / n);
                     let (cols, rows) = ((d / 2.0).ceil() as u16 + 1, (d / 4.0).ceil() as u16 + 1);
@@ -674,18 +689,27 @@ impl Map {
                     let tcam = Camera::new(lon, lat, cam.zoom);
                     let rect = Rect::new(0, 0, cols, rows);
                     let (w, h) = ((d * sx).ceil() as u32, (d * sy).ceil() as u32);
-                    if started.elapsed() < cache.budget.unwrap_or(DRAW_BUDGET) && self.tiles_complete(&tcam, rect) {
+                    if started.elapsed() < budget && self.tiles_complete(&tcam, rect) {
                         let Some(mut pix) = Pix::sized(w, h, cpx) else { continue };
                         let mut scratch = Buffer::empty(rect);
-                        draw_layers(self, &tcam, rect, &mut scratch, Some(&mut pix), None, false);
+                        let mut touched = HashSet::new();
+                        draw_layers(self, &tcam, rect, &mut scratch, Pass::Tile { pix: &mut pix, touched: &mut touched });
                         let (img, pixmap) = pix.finish(next_image_id());
                         frame.new.push(img.clone());
                         cache.bytes += img.rgba.len() + pixmap.data().len();
                         // The terminal gets the pixels once; the cache keeps the pixmap.
                         let mut kept = img.clone();
                         kept.rgba = Default::default();
-                        cache.tiles.insert(key, CachedTile { image: kept, pixmap: std::sync::Arc::new(pixmap), used: now });
+                        if let Some(old) =
+                            cache.tiles.insert(key, CachedTile { image: kept, pixmap: std::sync::Arc::new(pixmap), used: now, touched, stale: false })
+                        {
+                            cache.bytes -= (old.image.width * old.image.height * 4) as usize * 2;
+                            frame.freed.push(old.image.id);
+                        }
                         img
+                    } else if let Some(old) = old {
+                        // Stale, its data not complete: the old image stays up.
+                        old
                     } else {
                         // Not drawn yet (out of time this frame, center tiles first, or its
                         // data is still loading): the backdrop shows under it.
@@ -866,6 +890,7 @@ impl Map {
             }
         }
         self.state_version += 1;
+        self.note_state_change(source, Some(id.to_string()));
         Ok(())
     }
 
@@ -887,6 +912,7 @@ impl Map {
             }
         }
         self.state_version += 1;
+        self.note_state_change(source, id.map(|i| i.to_string()));
     }
 
     /// A feature's state as a JSON object (empty when none is set).
@@ -898,6 +924,14 @@ impl Map {
             }
         }
         Json::Object(m)
+    }
+
+    /// Pixel mode: remember a feature's (or with None, a whole source's) state changed, so
+    /// the next frame redraws the tile images it's in.
+    fn note_state_change(&mut self, source: &str, id: Option<String>) {
+        if self.pixel_mode.is_some() {
+            self.pixcache.get_mut().unwrap_or_else(|e| e.into_inner()).changed.push((source.to_string(), id));
+        }
     }
 
     fn state_env(&self, source: &str) -> StateEnv<'_> {
@@ -1933,27 +1967,33 @@ impl Widget for MapView<'_> {
                 let frame = map.pixel_tiles(cam, area, cpx);
                 *map.pixels.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
                 // Labels, markers and custom layers; the tiles hold the style's geometry.
-                draw_layers(map, cam, area, buf, None, Some(&map.label_memory), true);
+                draw_layers(map, cam, area, buf, Pass::Frame { labels: &map.label_memory, geometry_off: true });
             }
             None => {
-                draw_layers(map, cam, area, buf, None, Some(&map.label_memory), false);
+                draw_layers(map, cam, area, buf, Pass::Frame { labels: &map.label_memory, geometry_off: false });
             }
         }
     }
 }
 
-/// Draw the map's layers for `cam` into `area`: fills and lines into `pix` when given, else
-/// braille (none of them for style layers with `geometry_off`); labels and markers into
-/// `buf`, remembered in `labels` for the next frame (None for pixel tiles' own passes).
-fn draw_layers(
-    map: &Map,
-    cam: &Camera,
-    area: Rect,
-    buf: &mut Buffer,
-    pix: Option<&mut crate::pixels::Pix>,
-    labels: Option<&std::sync::Mutex<crate::layer::LabelMemory>>,
-    geometry_off: bool,
-) {
+/// What a [`draw_layers`] pass is for.
+enum Pass<'a> {
+    /// The frame on screen: labels and markers into the buffer, remembered for the next
+    /// frame; fills and lines as braille, or (with `geometry_off`, pixel mode) not at all for
+    /// style layers.
+    Frame { labels: &'a std::sync::Mutex<crate::layer::LabelMemory>, geometry_off: bool },
+    /// A pixel-mode tile image: fills and lines into `pix`. `touched` collects the (source,
+    /// feature id) of features in layers that read feature state, so a state change redraws
+    /// only the tiles they're in.
+    Tile { pix: &'a mut crate::pixels::Pix, touched: &'a mut HashSet<(String, String)> },
+}
+
+/// Draw the map's layers for `cam` into `area`, for a [`Pass`].
+fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass) {
+    let (pix, labels, geometry_off, mut touched) = match pass {
+        Pass::Frame { labels, geometry_off } => (None, Some(labels), geometry_off, None),
+        Pass::Tile { pix, touched } => (Some(pix), None, false, Some(touched)),
+    };
     {
         let vp = Viewport::new(cam, area);
         let bg = map.background(cam.zoom);
@@ -2006,10 +2046,26 @@ fn draw_layers(
                 }
                 let Some(sid) = l.source.as_deref() else { continue };
                 let env = map.state_env(sid);
+                let stateful = touched.is_some() && l.uses_state();
+                // Pixel tiles note the features whose look can change with feature state (all
+                // of a stateful layer's, drawn or not: a state can make a hidden one show).
+                let mut touch = |id: &Option<crate::mvt::Value>, props: &[(String, crate::mvt::Value)]| {
+                    if let Some(t) = touched.as_deref_mut()
+                        && let Some(id) = feature_id(env.promote, id, props)
+                    {
+                        t.insert((sid.to_string(), id.to_string()));
+                    }
+                };
                 match map.source(sid) {
                     Some(MapSource::Vector(_)) => {
                         for ((z, tx, ty), tile) in tiles.get(sid).into_iter().flatten() {
                             let n = (1u64 << z) as f64;
+                            if stateful && let Some(fs) = l.source_layer.as_deref().and_then(|s| tile.by_layer.get(s)) {
+                                for &fi in fs {
+                                    let f = &tile.features[fi as usize];
+                                    touch(&f.id, &f.props);
+                                }
+                            }
                             for it in tile.layer_items(i, l, cam.zoom, bg, env).iter() {
                                 let f = &tile.features[it.feature as usize];
                                 let dots: Vec<Vec<(f64, f64)>> = f
@@ -2025,6 +2081,9 @@ fn draw_layers(
                         for f in g.near(cam.zoom, ctx.world_view()) {
                             if !ctx.visible(f.bbox) {
                                 continue;
+                            }
+                            if stateful {
+                                touch(&f.id, &f.props);
                             }
                             let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
                             let Some(r) = resolve(l, &c, cam.zoom, bg) else { continue };
@@ -2465,6 +2524,53 @@ mod tests {
             let at = |x: u32, y: u32| b.rgba[((y * b.width + x) * 4) as usize..((y * b.width + x) * 4 + 4) as usize].to_vec();
             assert_eq!(at(b.width / 2, b.height / 2), vec![0, 0, 255, 255], "z{z}: the square in the middle");
         }
+    }
+
+    #[test]
+    fn pixel_tiles_redraw_on_feature_state() {
+        // Two squares with ids, red while hovered; one sits inside a single grid tile.
+        let sq = |id: u32, x0: f64, y0: f64, d: f64| {
+            json!({"type": "Feature", "id": id, "properties": {},
+                "geometry": {"type": "Polygon", "coordinates": [[[x0, y0], [x0 + d, y0], [x0 + d, y0 + d], [x0, y0 + d], [x0, y0]]]}})
+        };
+        let mut map = Map::new();
+        map.add_source(
+            "sq",
+            MapSource::geojson(&json!({"type": "FeatureCollection", "features": [sq(1, -12.0, 4.0, 6.0), sq(2, 20.0, -40.0, 30.0)]})).unwrap(),
+        )
+        .unwrap();
+        map.add_layer(StyleLayer::background("bg").color("#808080")).unwrap();
+        map.add_layer(StyleLayer::fill("fill", "sq").color(json!(["case", ["boolean", ["feature-state", "hover"], false], "#ff0000", "#0000ff"]))).unwrap();
+        map.pixel_mode = Some((10.0, 20.0));
+        let (cam, area) = (Camera::new(0.0, 0.0, 2.0), Rect::new(0, 0, 40, 20));
+        let mut buf = Buffer::empty(area);
+        let red = |img: &crate::pixels::PixImage| img.rgba.chunks(4).any(|p| p == [255, 0, 0, 255]);
+        map.view(&cam).render(area, &mut buf);
+        let first = map.take_pixels().unwrap();
+        assert!(first.pending == 0 && first.new.len() > 2, "all {} tiles drawn", first.new.len());
+        assert!(!first.new.iter().any(red));
+        // Hover square 1: only the tile it's in is redrawn (and red), its old image freed.
+        map.set_feature_state("sq", &crate::mvt::Value::Num(1.0), &json!({"hover": true})).unwrap();
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert_eq!(f.new.len(), 1, "one tile redrawn");
+        assert!(red(&f.new[0]));
+        assert_eq!(f.freed.len(), 1);
+        assert!(first.new.iter().any(|i| i.id == f.freed[0]));
+        assert_eq!(f.placed.len(), first.placed.len());
+        // Nothing changed: nothing redrawn.
+        map.view(&cam).render(area, &mut buf);
+        assert!(map.take_pixels().unwrap().new.is_empty());
+        // No time to redraw: the stale tile stays up (never blank), and is redrawn later.
+        map.pixcache.lock().unwrap().budget = Some(std::time::Duration::ZERO);
+        map.remove_feature_state("sq", None, None);
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(f.new.is_empty() && f.pending == 0 && f.placed.len() == first.placed.len(), "old images stay placed");
+        map.pixcache.lock().unwrap().budget = None;
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(!f.new.is_empty() && !f.new.iter().any(red), "redrawn without the highlight");
     }
 
     #[test]

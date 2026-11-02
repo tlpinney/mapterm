@@ -10,6 +10,9 @@ The next release is 0.2.0: the library's `formats::Format` gains a variant (Shap
 
 ### Added
 
+- Experimental pixel mode (`MAPTERM_PIXELS=1`, kitty-graphics terminals): fills and lines
+  as an image at the screen's resolution, drawn once per tile and cached, with labels as
+  text. Library: `Map::pixel_mode` and `Map::take_pixels`.
 - Release archives include `THIRD_PARTY_LICENSES.txt`: the copyright notices and
   license terms of the crates built into the binary, made with cargo-about.
 - Shapefiles with `--geojson roads.shp` (a file or URL): the geometry, the `.dbf`

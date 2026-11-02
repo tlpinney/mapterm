@@ -1,6 +1,33 @@
-//! Pixel mode: fills and lines drawn into an image at the terminal's real resolution
-//! (anti-aliased, with the style's widths and dashes) instead of braille dots, for terminals
-//! that show kitty graphics. Labels and markers stay terminal text on top.
+//! Pixel mode (experimental): fills and lines drawn into an image at the terminal's real
+//! resolution (anti-aliased, with the style's widths and dashes) instead of braille dots, for
+//! terminals that show kitty graphics. Labels and markers stay terminal text on top. The
+//! viewer turns it on with `MAPTERM_PIXELS=1`; see [`crate::Map::pixel_mode`].
+//!
+//! How it stays fast:
+//!
+//! - **Tiles drawn once.** The view is covered by a grid of tiles about 512 pixels across
+//!   (the grid zoom is the view's plus log2 of pixels per dot / 2: +2 on a Retina screen).
+//!   Each is drawn once with a camera fitted to it, so neighbouring source tiles' features
+//!   meet without seams, sent to the terminal once (shared memory locally, zlib over SSH),
+//!   and cached (192 MB, least recently used out). Each frame only places the
+//!   images (`kitty::place_px`): panning costs about 0.6 ms a frame.
+//! - **Never half-drawn.** A tile waits until its data is loaded, and new tiles get
+//!   8 ms of drawing a frame, center first; the rest follow in the next frames
+//!   ([`PixFrame::pending`]).
+//! - **A backdrop while tiles are missing.** While zooming, one low-resolution image of the
+//!   map area (a third of its pixels: the background, then cached tiles of any zoom scaled into
+//!   place) is stretched by the terminal under the tiles, so the terminal's background
+//!   never shows through. Tile signatures leave out layers' zoom ranges so other zooms'
+//!   tiles can stand in.
+//! - **Feature state.** A tile remembers the features of layers that read feature state;
+//!   when one's state changes (a hover highlight), only its tiles are redrawn, and the old
+//!   image stays up until the new one is ready.
+//!
+//! Not yet: `fill-extrusion` (3D buildings); a cross-fade when a stand-in is replaced; a line
+//! color mapterm can't read is drawn black (braille's thin lines hid that).
+//!
+//! For checking by eye: `MAPTERM_PIXELS_PNG=FILE` with `mapterm --snapshot` saves the pixel
+//! image, and `MAPTERM_DEMO="+@2,-@4,right@5,q@8"` presses keys at those seconds.
 
 use ratatui::style::Color;
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform};
@@ -65,6 +92,9 @@ pub(crate) struct PixCache {
     pub(crate) frame: u64,
     /// Tests: drawing time per frame instead of [`DRAW_BUDGET`].
     pub(crate) budget: Option<std::time::Duration>,
+    /// Feature state changed since the last frame: (source, feature id, or None for all of
+    /// the source).
+    pub(crate) changed: Vec<(String, Option<String>)>,
 }
 
 /// A grid tile (z, x, y), the zoom in 1/64ths, and a signature of the style and visibility.
@@ -76,6 +106,10 @@ pub(crate) struct CachedTile {
     /// The drawn tile, premultiplied, for stand-ins at other zooms.
     pub(crate) pixmap: std::sync::Arc<Pixmap>,
     pub(crate) used: u64,
+    /// (source, feature id) of the features in layers reading feature state.
+    pub(crate) touched: std::collections::HashSet<(String, String)>,
+    /// One of those features' state changed: redraw when there's time.
+    pub(crate) stale: bool,
 }
 
 /// Time to spend drawing new tiles per frame; the rest stay blank until later frames.
