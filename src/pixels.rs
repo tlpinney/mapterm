@@ -23,8 +23,11 @@
 //!   when one's state changes (a hover highlight), only its tiles are redrawn, and the old
 //!   image stays up until the new one is ready.
 //!
-//! Not yet: a cross-fade when a stand-in is replaced. 3D buildings (`fill-extrusion`) are
-//! drawn flat, as from straight above.
+//! - **Fading in.** With [`crate::Map::pixel_fade`] (the viewer turns it on for a terminal on
+//!   this machine), a new tile fades in over the backdrop in 160 ms: kitty has no opacity
+//!   per placement, so three partly see-through copies are sent and placed in turn.
+//!
+//! 3D buildings (`fill-extrusion`) are drawn flat, as from straight above.
 //!
 //! For checking by eye: `MAPTERM_PIXELS_PNG=FILE` with `mapterm --snapshot` saves the pixel
 //! image, and `MAPTERM_DEMO="+@2,-@4,right@5,q@8"` presses keys at those seconds.
@@ -110,6 +113,66 @@ pub(crate) struct CachedTile {
     pub(crate) touched: std::collections::HashSet<(String, String)>,
     /// One of those features' state changed: redraw when there's time.
     pub(crate) stale: bool,
+    /// Fading in over the backdrop (see [`crate::Map::pixel_fade`]).
+    pub(crate) fade: Option<Fade>,
+}
+
+/// A tile fading in: since when, and the partly see-through copy placed in its stead.
+pub(crate) struct Fade {
+    pub(crate) start: std::time::Instant,
+    step: u8,
+    image: Option<PixImage>,
+}
+
+impl Fade {
+    pub(crate) fn new() -> Fade {
+        Fade { start: std::time::Instant::now(), step: 0, image: None }
+    }
+
+    /// The faded copy's id, to free with the tile.
+    pub(crate) fn image_id(&self) -> Option<u32> {
+        self.image.as_ref().map(|i| i.id)
+    }
+}
+
+/// How long a new tile takes to fade in over the backdrop.
+pub(crate) const FADE: std::time::Duration = std::time::Duration::from_millis(160);
+
+/// Fade steps (each one a copy of the tile sent to the terminal, which has no per-placement
+/// opacity): a quarter, half and three quarters opaque, then the tile itself.
+const FADE_STEPS: u8 = 4;
+
+/// The image to place for a tile this frame: itself, or while it fades in a partly
+/// see-through copy (sent as a new image; the last one is freed). Fading counts as pending,
+/// so the viewer keeps drawing and the backdrop stays under it.
+pub(crate) fn fade_image(t: &mut CachedTile, frame: &mut PixFrame) -> PixImage {
+    let Some(f) = t.fade.as_mut() else { return t.image.clone() };
+    let step = (f.start.elapsed().as_secs_f64() / FADE.as_secs_f64() * FADE_STEPS as f64) as u8;
+    if step + 1 >= FADE_STEPS {
+        if let Some(id) = f.image_id() {
+            frame.freed.push(id);
+        }
+        t.fade = None;
+        return t.image.clone();
+    }
+    frame.pending += 1;
+    if let Some(img) = f.image.as_ref().filter(|_| f.step == step) {
+        return img.clone();
+    }
+    let alpha = (step + 1) as f32 / FADE_STEPS as f32;
+    let mut rgba = Vec::with_capacity(t.pixmap.data().len());
+    for px in t.pixmap.pixels() {
+        let c = px.demultiply();
+        rgba.extend_from_slice(&[c.red(), c.green(), c.blue(), (c.alpha() as f32 * alpha).round() as u8]);
+    }
+    let img = PixImage { id: next_image_id(), width: t.image.width, height: t.image.height, rgba: std::sync::Arc::new(rgba) };
+    frame.new.push(img.clone());
+    // Kept without its pixels: the terminal has them.
+    if let Some(old) = f.image.replace(PixImage { rgba: Default::default(), ..img.clone() }) {
+        frame.freed.push(old.id);
+    }
+    f.step = step;
+    img
 }
 
 /// Time to spend drawing new tiles per frame; the rest stay blank until later frames.
