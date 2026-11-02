@@ -27,7 +27,11 @@ fn terminal_styles_parse_without_warnings() {
 
 #[test]
 fn shield_text_tidies_refs() {
-    use mapterm::{expr::{Ctx, Expr, Val}, mvt::{GeomType, Value}, stylejson::shield_text};
+    use mapterm::{
+        expr::{Ctx, Expr, Val},
+        mvt::{GeomType, Value},
+        stylejson::shield_text,
+    };
     let e = Expr::parse(&shield_text()).unwrap();
     let text = |r: &str, network: &str| {
         let mut props = vec![("ref".to_string(), Value::Str(r.into()))];

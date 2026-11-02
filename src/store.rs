@@ -49,9 +49,7 @@ pub fn decode_features(bytes: &[u8]) -> Result<Vec<Feature>> {
             if f.geometry.is_empty() || f.geom_type == GeomType::Unknown {
                 continue;
             }
-            let parts: Parts = Arc::new(
-                f.geometry.iter().map(|p| p.iter().map(|[x, y]| [*x as f32 / ext, *y as f32 / ext]).collect()).collect(),
-            );
+            let parts: Parts = Arc::new(f.geometry.iter().map(|p| p.iter().map(|[x, y]| [*x as f32 / ext, *y as f32 / ext]).collect()).collect());
             let id = f.id.map(|v| Value::Num(v as f64));
             features.push(Feature { layer: name.clone(), id, geom: f.geom_type, props: ordered_props(f), parts, drawn: false });
         }

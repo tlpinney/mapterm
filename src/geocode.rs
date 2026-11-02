@@ -136,9 +136,7 @@ pub fn parse_photon(body: &Json) -> Vec<Place> {
                 parts.push(part);
             }
         }
-        let bounds = p["extent"].as_array().filter(|e| e.len() == 4).and_then(|e| {
-            Some((e[0].as_f64()?, e[3].as_f64()?, e[2].as_f64()?, e[1].as_f64()?))
-        });
+        let bounds = p["extent"].as_array().filter(|e| e.len() == 4).and_then(|e| Some((e[0].as_f64()?, e[3].as_f64()?, e[2].as_f64()?, e[1].as_f64()?)));
         let kind = s("osm_value").replace('_', " ");
         out.push(Place { name, context: parts.join(", "), kind, lon, lat, bounds });
     }
@@ -153,7 +151,8 @@ pub fn parse_nominatim(body: &Json) -> Vec<Place> {
     for r in body.as_array().into_iter().flatten() {
         let (Some(lon), Some(lat)) = (num(&r["lon"]), num(&r["lat"])) else { continue };
         let display = r["display_name"].as_str().unwrap_or("");
-        let name = r["name"].as_str().filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| display.split(',').next().unwrap_or("").trim().to_string());
+        let name =
+            r["name"].as_str().filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| display.split(',').next().unwrap_or("").trim().to_string());
         if name.is_empty() {
             continue;
         }
@@ -219,8 +218,14 @@ mod tests {
         assert_eq!(r[1].name, "1600 Pennsylvania Avenue Northwest");
         assert_eq!(r[1].context, "Washington");
         assert_eq!(r[1].view(100, 40), (-77.03, 38.9, 16.0), "points get a close-up");
-        let sf = Place { name: "San Francisco".into(), context: "California, United States".into(), kind: "city".into(), lon: -122.42, lat: 37.78,
-            bounds: Some((-123.17, 37.64, -122.28, 37.93)) };
+        let sf = Place {
+            name: "San Francisco".into(),
+            context: "California, United States".into(),
+            kind: "city".into(),
+            lon: -122.42,
+            lat: 37.78,
+            bounds: Some((-123.17, 37.64, -122.28, 37.93)),
+        };
         assert_eq!(sf.view(100, 40), (-122.42, 37.78, 12.0), "cities center on their point, not their county-wide extent");
         let mut dup = vec![r[1].clone(), r[0].clone(), r[1].clone()];
         dedup(&mut dup);

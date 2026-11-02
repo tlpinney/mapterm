@@ -51,15 +51,7 @@ pub fn declare(id: u32, area: Rect, cam: &Camera) -> String {
     if area.width == 0 || area.height < 2 {
         return format!("\x1b_smooth;off;{id}\x1b\\");
     }
-    format!(
-        "\x1b_smooth;{id};{};{};{};{};{};{}\x1b\\",
-        area.y,
-        area.bottom() - 1,
-        area.x,
-        area.right() - 1,
-        pos(cam),
-        world_rows(cam.zoom) as u64,
-    )
+    format!("\x1b_smooth;{id};{};{};{};{};{};{}\x1b\\", area.y, area.bottom() - 1, area.x, area.right() - 1, pos(cam), world_rows(cam.zoom) as u64,)
 }
 
 /// A shift-only region (protocol v3): the region's last row and last column are overscan,
@@ -71,13 +63,7 @@ pub fn declare_shift(id: u32, area: Rect, ox: u16, oy: u16) -> String {
     if area.width < 2 || area.height < 2 {
         return format!("\x1b_smooth;off;{id}\x1b\\");
     }
-    format!(
-        "\x1b_smooth;{id};{};{};{};{};0;0;{ox};{oy}\x1b\\",
-        area.y,
-        area.bottom() - 1,
-        area.x,
-        area.right() - 1,
-    )
+    format!("\x1b_smooth;{id};{};{};{};{};0;0;{ox};{oy}\x1b\\", area.y, area.bottom() - 1, area.x, area.right() - 1,)
 }
 
 #[cfg(test)]

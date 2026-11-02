@@ -364,11 +364,7 @@ mod tests {
         let g = geometry(&Table { buf: &ok, pos: 20 }, 0).unwrap();
         assert_eq!(g["geometries"][0]["geometries"][0]["geometries"][0]["type"], "Point", "{g}");
         let deep = nested_collections(100_000);
-        let r = std::thread::Builder::new()
-            .stack_size(1 << 20)
-            .spawn(move || geometry(&Table { buf: &deep, pos: 20 }, 0).is_err())
-            .unwrap()
-            .join();
+        let r = std::thread::Builder::new().stack_size(1 << 20).spawn(move || geometry(&Table { buf: &deep, pos: 20 }, 0).is_err()).unwrap().join();
         assert!(matches!(r, Ok(true)), "deep nesting is an error, not a stack overflow");
     }
 }

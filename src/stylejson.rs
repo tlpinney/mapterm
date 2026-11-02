@@ -29,18 +29,17 @@ const MAX_STYLE_BYTES: usize = 16 << 20;
 
 /// The URL or path for a style name, URL or path.
 pub fn style_location(spec: &str) -> String {
-    if OPENFREEMAP_STYLES.contains(&spec) {
-        format!("https://tiles.openfreemap.org/styles/{spec}")
-    } else {
-        spec.to_string()
-    }
+    if OPENFREEMAP_STYLES.contains(&spec) { format!("https://tiles.openfreemap.org/styles/{spec}") } else { spec.to_string() }
 }
 
 /// Read a style document from a URL, a file, or an OpenFreeMap style name.
 pub async fn read_style(spec: &str) -> Result<Json> {
     if crate::mapbox::is_mapbox_url(spec) {
         let url = crate::mapbox::resolve(spec)?;
-        let bytes = crate::source::get_with(crate::source::keyed_client(), &url, None, &[]).await.map_err(crate::mapbox::redact)?.with_context(|| format!("{spec}: not found"))?;
+        let bytes = crate::source::get_with(crate::source::keyed_client(), &url, None, &[])
+            .await
+            .map_err(crate::mapbox::redact)?
+            .with_context(|| format!("{spec}: not found"))?;
         return serde_json::from_slice(&bytes).with_context(|| format!("{spec}: not a JSON style"));
     }
     let loc = style_location(spec);
@@ -251,22 +250,23 @@ pub fn shield_text() -> Json {
     let semi = json!(["index-of", ";", r]);
     let first = json!(["case", [">=", semi, 0], ["slice", r, 0, semi], r]);
     let numeric = json!([">=", ["to-number", first, -1], 0]);
-    json!(["case",
-        ["==", ["slice", first, 0, 2], "I "], ["concat", "I-", ["slice", first, 2]],
-        ["all", numeric, ["==", ["get", "network"], "us-interstate"]], ["concat", "I-", first],
-        ["all", numeric, ["==", ["get", "network"], "us-highway"]], ["concat", "US ", first],
-        first])
+    json!([
+        "case",
+        ["==", ["slice", first, 0, 2], "I "],
+        ["concat", "I-", ["slice", first, 2]],
+        ["all", numeric, ["==", ["get", "network"], "us-interstate"]],
+        ["concat", "I-", first],
+        ["all", numeric, ["==", ["get", "network"], "us-highway"]],
+        ["concat", "US ", first],
+        first
+    ])
 }
 
 /// Road label text: major roads by their ref (falling back to the name), others by name.
 fn road_text(major: bool) -> Json {
     use serde_json::json;
     let shield = json!(["case", ["has", "ref"], shield_text(), ["get", "name"]]);
-    if major {
-        shield
-    } else {
-        json!(["case", ["has", "name"], ["get", "name"], shield])
-    }
+    if major { shield } else { json!(["case", ["has", "name"], ["get", "name"], shield]) }
 }
 
 /// Vector tile schemas the built-in terminal styles know.
@@ -323,21 +323,15 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
                "paint": {"text-color": color}})
     };
     let mut layers = Vec::new();
-    let fill = |id: &str, src_layer: &str, filter: Json, color: &Json, min: u8| {
-        json!({"id": id, "type": "fill", "source": BASEMAP, "source-layer": src_layer, "filter": filter, "minzoom": min, "paint": {"fill-color": color}})
-    };
-    let line = |id: &str, src_layer: &str, filter: Json, color: &Json, min: u8| {
-        json!({"id": id, "type": "line", "source": BASEMAP, "source-layer": src_layer, "filter": filter, "minzoom": min, "paint": {"line-color": color}})
-    };
+    let fill = |id: &str, src_layer: &str, filter: Json, color: &Json, min: u8| json!({"id": id, "type": "fill", "source": BASEMAP, "source-layer": src_layer, "filter": filter, "minzoom": min, "paint": {"fill-color": color}});
+    let line = |id: &str, src_layer: &str, filter: Json, color: &Json, min: u8| json!({"id": id, "type": "line", "source": BASEMAP, "source-layer": src_layer, "filter": filter, "minzoom": min, "paint": {"line-color": color}});
     let poly = json!(["==", ["geometry-type"], "Polygon"]);
     let lines = json!(["==", ["geometry-type"], "LineString"]);
     // A river's centerline runs down the middle of its water polygon and stops at its mouth,
     // so drawn bright it shows as a stray line, and as a stub into the water it flows into.
     // From z11, where rivers have polygons, they take the water color (as MapLibre styles do)
     // and disappear into them; streams, canals and ditches stay bright.
-    let river_line = |attr: &str| {
-        json!(["match", ["get", attr], "river", ["step", ["zoom"], waterway.clone(), 11, water.clone()], waterway.clone()])
-    };
+    let river_line = |attr: &str| json!(["match", ["get", attr], "river", ["step", ["zoom"], waterway.clone(), 11, water.clone()], waterway.clone()]);
     match schema {
         Schema::OpenMapTiles => {
             layers.push(fill("park", "park", poly.clone(), &park, 0));
@@ -359,7 +353,11 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
                                "filter": ["==", ["geometry-type"], "Point"],
                                "layout": {"text-field": ["get", "name"], "text-font": ["Italic"]}, "paint": {"text-color": waterway}}));
             for (name, color, _, min_label, sort) in &roads {
-                let class = if *name == "minor" { json!(["!", ["in", ["get", "class"], ["literal", ["motorway", "trunk", "primary", "secondary", "tertiary"]]]]) } else { json!(["==", ["get", "class"], name]) };
+                let class = if *name == "minor" {
+                    json!(["!", ["in", ["get", "class"], ["literal", ["motorway", "trunk", "primary", "secondary", "tertiary"]]]])
+                } else {
+                    json!(["==", ["get", "class"], name])
+                };
                 // Major roads are labelled by their ref (I 66), others by name.
                 let text = road_text(*sort <= -20);
                 let mut l = label(&format!("road-{name}-label"), "transportation_name", class, text, color, json!(sort), json!(*sort <= -25));
@@ -383,8 +381,34 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
                 "paint": {"text-color": place}}));
         }
         Schema::Protomaps => {
-            layers.push(fill("park", "landuse", json!(["in", ["get", "kind"], ["literal",
-                ["park", "forest", "wood", "nature_reserve", "golf_course", "cemetery", "grass", "meadow", "garden", "playground", "protected_area", "national_park", "recreation_ground"]]]), &park, 0));
+            layers.push(fill(
+                "park",
+                "landuse",
+                json!([
+                    "in",
+                    ["get", "kind"],
+                    [
+                        "literal",
+                        [
+                            "park",
+                            "forest",
+                            "wood",
+                            "nature_reserve",
+                            "golf_course",
+                            "cemetery",
+                            "grass",
+                            "meadow",
+                            "garden",
+                            "playground",
+                            "protected_area",
+                            "national_park",
+                            "recreation_ground"
+                        ]
+                    ]
+                ]),
+                &park,
+                0,
+            ));
             layers.push(fill("landcover", "landcover", json!(["in", ["get", "kind"], ["literal", ["forest", "wood", "grass", "meadow"]]]), &park, 0));
             layers.push(fill("water", "water", poly.clone(), &water, 0));
             layers.push(fill("building", "buildings", poly.clone(), &building, 15));

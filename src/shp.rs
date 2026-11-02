@@ -53,7 +53,10 @@ pub fn to_geojson(parts: &Parts) -> Result<Json> {
             bail!(
                 "coordinates are not lon/lat (bounds {:.0},{:.0} to {:.0},{:.0}) and there is no .prj; \
                  mapterm reads lon/lat shapefiles only",
-                b.min.x, b.min.y, b.max.x, b.max.y
+                b.min.x,
+                b.min.y,
+                b.max.x,
+                b.max.y
             );
         }
     }

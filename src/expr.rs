@@ -79,9 +79,7 @@ pub fn parse_color(s: &str) -> Option<Rgba> {
         let alpha = args.get(3).map_or(Some(1.0), |a| num(a))?;
         return match func.trim() {
             "rgb" | "rgba" if args.len() >= 3 => {
-                let ch = |a: &str| -> Option<f64> {
-                    if a.ends_with('%') { num(a) } else { num(a).map(|v| v / 255.0) }
-                };
+                let ch = |a: &str| -> Option<f64> { if a.ends_with('%') { num(a) } else { num(a).map(|v| v / 255.0) } };
                 Some(Rgba { r: ch(args[0])?, g: ch(args[1])?, b: ch(args[2])?, a: alpha })
             }
             "hsl" | "hsla" if args.len() >= 3 => {
@@ -481,9 +479,7 @@ impl Expr {
         let default = Box::new(Expr::Lit(j.get("default").map_or(Val::Null, Val::from_json)));
         let interpolable = st.first().is_some_and(|(_, v)| matches!(v, Val::Num(_)) || v.as_color().is_some());
         match kind {
-            Some("categorical") => {
-                Ok(Expr::Match { input, arms: st.into_iter().map(|(k, v)| (vec![Val::from_json(&k)], Expr::Lit(v))).collect(), default })
-            }
+            Some("categorical") => Ok(Expr::Match { input, arms: st.into_iter().map(|(k, v)| (vec![Val::from_json(&k)], Expr::Lit(v))).collect(), default }),
             Some("identity") => Ok(*input),
             _ => {
                 let nums: Vec<(f64, Expr)> = st
@@ -640,9 +636,16 @@ impl Expr {
             Expr::Cmp(_, a, b) | Expr::In(a, b) => a.is_constant() && b.is_constant(),
             Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) | Expr::TypeOf(a) => a.is_constant(),
             Expr::InList(a, _) => a.is_constant(),
-            Expr::All(v) | Expr::Any(v) | Expr::Coalesce(v) | Expr::Math(_, v) | Expr::Concat(v) | Expr::ToNum(v) | Expr::ToColor(v) | Expr::Assert(_, v) | Expr::IndexOf(v) | Expr::Slice(v) => {
-                v.iter().all(Expr::is_constant)
-            }
+            Expr::All(v)
+            | Expr::Any(v)
+            | Expr::Coalesce(v)
+            | Expr::Math(_, v)
+            | Expr::Concat(v)
+            | Expr::ToNum(v)
+            | Expr::ToColor(v)
+            | Expr::Assert(_, v)
+            | Expr::IndexOf(v)
+            | Expr::Slice(v) => v.iter().all(Expr::is_constant),
             Expr::Match { input, arms, default } => input.is_constant() && default.is_constant() && arms.iter().all(|(_, e)| e.is_constant()),
             Expr::Case { arms, default } => default.is_constant() && arms.iter().all(|(c, e)| c.is_constant() && e.is_constant()),
             Expr::Interpolate { input, stops, .. } => input.is_constant() && stops.iter().all(|(_, e)| e.is_constant()),
@@ -668,10 +671,19 @@ impl Expr {
         match self {
             Expr::Lit(_) | Expr::Get(_) | Expr::Has(_) | Expr::Zoom | Expr::GeomType | Expr::Template(_) | Expr::FeatureState(_) => false,
             Expr::Cmp(_, a, b) | Expr::In(a, b) => a.any(f) || b.any(f),
-            Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) | Expr::TypeOf(a) | Expr::InList(a, _) => a.any(f),
-            Expr::All(v) | Expr::Any(v) | Expr::Coalesce(v) | Expr::Math(_, v) | Expr::Concat(v) | Expr::ToNum(v) | Expr::ToColor(v) | Expr::Assert(_, v) | Expr::IndexOf(v) | Expr::Slice(v) => {
-                v.iter().any(|e| e.any(f))
+            Expr::Not(a) | Expr::Upcase(a) | Expr::Downcase(a) | Expr::ToStr(a) | Expr::ToBool(a) | Expr::Length(a) | Expr::TypeOf(a) | Expr::InList(a, _) => {
+                a.any(f)
             }
+            Expr::All(v)
+            | Expr::Any(v)
+            | Expr::Coalesce(v)
+            | Expr::Math(_, v)
+            | Expr::Concat(v)
+            | Expr::ToNum(v)
+            | Expr::ToColor(v)
+            | Expr::Assert(_, v)
+            | Expr::IndexOf(v)
+            | Expr::Slice(v) => v.iter().any(|e| e.any(f)),
             Expr::Match { input, arms, default } => input.any(f) || default.any(f) || arms.iter().any(|(_, e)| e.any(f)),
             Expr::Case { arms, default } => default.any(f) || arms.iter().any(|(c, e)| c.any(f) || e.any(f)),
             Expr::Interpolate { input, stops, .. } => input.any(f) || stops.iter().any(|(_, e)| e.any(f)),
