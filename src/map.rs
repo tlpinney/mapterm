@@ -815,6 +815,10 @@ impl Map {
                 }
                 MapSource::Raster(r) => {
                     let rz = self.raster_zoom(&r.src, cam);
+                    // Zoomed out past what the service renders: ask for nothing.
+                    if rz < r.src.min_zoom {
+                        continue;
+                    }
                     out.extend(crate::raster::tiles_for(cam, area, rz).into_iter().filter(|t| !r.tiles.contains(t) && self.due(id, t)).map(|t| TileRequest {
                         source: id.clone(),
                         id: t,
@@ -825,6 +829,19 @@ impl Map {
             }
         }
         out
+    }
+
+    /// Raster sources this view is zoomed out too far for (past their
+    /// [`RasterSource::min_zoom`], so no tiles are requested): each one's name and the zoom it
+    /// starts at, for telling the user to zoom in.
+    pub fn rasters_below_min_zoom(&self, cam: &Camera) -> Vec<(String, u8)> {
+        self.sources
+            .iter()
+            .filter_map(|(_, s)| match s {
+                MapSource::Raster(r) if self.raster_zoom(&r.src, cam) < r.src.min_zoom => Some((r.src.name.clone(), r.src.min_zoom)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The zoom to fetch a raster source at: about 2 screen pixels per image pixel as kitty

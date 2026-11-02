@@ -28,7 +28,8 @@ https://github.com/user-attachments/assets/8bf59b7f-3156-4820-aeeb-2b138fc5bc2b
   don't collide.
 - **MapLibre styles:** liberty, positron and the other OpenFreeMap styles, or your own,
   with expressions, filters, fonts and point icons.
-- **Imagery:** satellite and aerial layers (OSM, Esri, USGS, NASA GIBS, and keyed
+- **Imagery:** satellite and aerial layers (OSM, Esri, USGS, NASA GIBS, Microsoft Planetary
+  Computer's NAIP and Sentinel-2, and keyed
   providers such as Vantor, Planet and Mapbox) as real images in kitty-graphics terminals, or as
   cell colors anywhere else.
 - **Your data:** GeoJSON, CSV, GPX, KML, FlatGeobuf and Shapefiles, from a file or a URL, drawn over
@@ -138,6 +139,7 @@ URLs up to 512 MB. The readers are checked against GDAL on a corpus of real file
 mapterm --raster esri --at 38.8895,-77.0353 -z 15        # satellite
 mapterm --raster 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
 mapterm --raster gibs --date 2026-10-30 -z 6                # NASA daily imagery
+mapterm --raster naip --at 38.8895,-77.0353 -z 16           # US aerial photos, 60 cm
 mapterm --raster mall.pmtiles                              # your own imagery, offline
 mapterm --raster-list                                      # providers and the keys they need
 ```
@@ -153,6 +155,8 @@ imagery that works offline.
 | `usgs` | USGS National Map imagery, US only, public domain | none |
 | `eox` | Sentinel-2 cloudless 2024, global, ~10 m (CC BY-NC-SA) | none |
 | `gibs` | NASA GIBS daily satellite imagery, ~250 m (`--date`, default yesterday) | none |
+| `naip` | USDA NAIP aerial photos, US only, ~60 cm, public domain; from zoom 12 (Microsoft Planetary Computer) | none |
+| `sentinel2` | Sentinel-2, the latest clear scenes, global, ~10 m; from zoom 9 (Microsoft Planetary Computer) | none |
 | `esri-light`, `esri-dark` | Esri Gray Canvas, quiet backgrounds for overlays | none |
 | `vantor` | Vantor (Maxar) Vivid basemap | `VANTOR_API_KEY` |
 | `planet` | Planet basemaps (your subscription's mosaics) | `PL_API_KEY` + a mosaic |
