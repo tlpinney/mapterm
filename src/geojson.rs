@@ -120,29 +120,59 @@ pub fn overlay_layers(source: &str, color: Color, fill: bool) -> Vec<crate::spec
     out
 }
 
-/// Load a layer from a path or http(s) URL: GeoJSON, or CSV, GPX or KML (by extension, else
-/// by content; see [`crate::formats`]).
-pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
-    let bytes = if spec.starts_with("http://") || spec.starts_with("https://") {
+/// A whole file from a path or http(s) URL, up to [`MAX_BYTES`]; `None` if it isn't there.
+async fn fetch(spec: &str) -> Result<Option<Vec<u8>>> {
+    if spec.starts_with("http://") || spec.starts_with("https://") {
         let http = crate::source::http_client();
-        crate::source::get_data(&http, spec, MAX_BYTES).await?.with_context(|| format!("{spec}: not found"))?
+        return crate::source::get_data(&http, spec, MAX_BYTES).await;
+    }
+    let meta = match std::fs::metadata(spec) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {spec}")),
+    };
+    if meta.len() as usize > MAX_BYTES {
+        bail!("{spec}: larger than {} MB", MAX_BYTES >> 20);
+    }
+    Ok(Some(std::fs::read(spec).with_context(|| format!("reading {spec}"))?))
+}
+
+/// The file beside a `.shp` with extension `ext`, in the same case as the `.shp`'s
+/// (`roads.SHP` -> `roads.DBF`), keeping a URL's query.
+fn sibling(spec: &str, ext: &str) -> String {
+    let cut = spec.find(['?', '#']).unwrap_or(spec.len());
+    let (path, rest) = spec.split_at(cut);
+    let Some((stem, old)) = path.rsplit_once('.') else { return format!("{path}.{ext}{rest}") };
+    let ext = if old.chars().all(|c| c.is_ascii_uppercase()) { ext.to_ascii_uppercase() } else { ext.to_string() };
+    format!("{stem}.{ext}{rest}")
+}
+
+/// Load a layer from a path or http(s) URL: GeoJSON, or CSV, GPX, KML, FlatGeobuf or a
+/// Shapefile (by extension, else by content; see [`crate::formats`]). For a `.shp`, the
+/// `.dbf`, `.prj` and `.cpg` beside it are read too when they exist.
+pub async fn load(spec: &str, color: Color) -> Result<GeoJson> {
+    let bytes = fetch(spec).await?.with_context(|| format!("{spec}: not found"))?;
+    let shapefile = crate::formats::Format::detect(spec, &bytes) == crate::formats::Format::Shapefile;
+    let (dbf, prj, cpg) = if shapefile {
+        (fetch(&sibling(spec, "dbf")).await?, fetch(&sibling(spec, "prj")).await?, fetch(&sibling(spec, "cpg")).await?)
     } else {
-        let meta = std::fs::metadata(spec).with_context(|| format!("reading {spec}"))?;
-        if meta.len() as usize > MAX_BYTES {
-            bail!("{spec}: larger than {} MB", MAX_BYTES >> 20);
-        }
-        std::fs::read(spec).with_context(|| format!("reading {spec}"))?
+        (None, None, None)
     };
     // The layer's name: the file name without its extension.
     let file = spec.rsplit('/').next().unwrap_or(spec).split(['?', '#']).next().unwrap_or(spec);
     let name = match file.rsplit_once('.') {
-        Some((stem, ext)) if ["geojson", "json", "csv", "tsv", "txt", "gpx", "kml", "fgb"].contains(&ext.to_ascii_lowercase().as_str()) => stem.to_string(),
+        Some((stem, ext)) if ["geojson", "json", "csv", "tsv", "txt", "gpx", "kml", "fgb", "shp"].contains(&ext.to_ascii_lowercase().as_str()) => stem.to_string(),
         _ => file.to_string(),
     };
     let spec = spec.to_string();
     tokio::task::spawn_blocking(move || {
-        // CSV, GPX and KML become GeoJSON first.
-        let doc = crate::formats::to_geojson(&spec, &bytes).with_context(|| format!("{spec}: not GeoJSON, CSV, GPX, KML or FlatGeobuf"))?;
+        // Everything becomes GeoJSON first.
+        let doc = if shapefile {
+            let parts = crate::shp::Parts { shp: &bytes, dbf: dbf.as_deref(), prj: prj.as_deref(), cpg: cpg.as_deref() };
+            crate::shp::to_geojson(&parts).with_context(|| format!("{spec}: reading the shapefile"))?
+        } else {
+            crate::formats::to_geojson(&spec, &bytes).with_context(|| format!("{spec}: not GeoJSON, CSV, GPX, KML, FlatGeobuf or a shapefile"))?
+        };
         let (features, bbox) = features(&doc)?;
         Ok(GeoJson { name, color, features, bbox, fill: true, labels: true })
     })
@@ -259,6 +289,24 @@ pub fn fit(bounds: (f64, f64, f64, f64), cols: u16, rows: u16, max_zoom: f64) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shapefile_siblings() {
+        assert_eq!(sibling("data/roads.shp", "dbf"), "data/roads.dbf");
+        assert_eq!(sibling("ROADS.SHP", "prj"), "ROADS.PRJ");
+        assert_eq!(sibling("https://x.org/a.b/roads.shp?token=1", "cpg"), "https://x.org/a.b/roads.cpg?token=1");
+    }
+
+    #[tokio::test]
+    async fn loads_a_shapefile_with_its_attributes() {
+        let shp = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/corpus/shp/ne_110m_populated_places_simple.shp");
+        let layer = load(shp, Color::Cyan).await.unwrap();
+        assert_eq!(layer.name, "ne_110m_populated_places_simple");
+        assert_eq!(layer.features.len(), 243);
+        let paris = layer.features.iter().find(|f| f.label.as_deref() == Some("Paris")).expect("Paris");
+        let region = paris.props.iter().find(|(k, _)| k == "adm1name").map(|(_, v)| v);
+        assert!(matches!(region, Some(Value::Str(s)) if s == "Île-de-France"), "the .cpg says UTF-8: {region:?}");
+    }
 
     const DOC: &str = r#"{
       "type": "FeatureCollection",

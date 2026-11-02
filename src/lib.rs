@@ -55,7 +55,7 @@
 //! - [`raster`]: image tile sources (XYZ, TMS, PMTiles, named providers) for raster layers,
 //!   drawn as [`kitty`] graphics ([`Map::kitty_commands`]) or as cell colors.
 //! - [`geojson`]: GeoJSON files or URLs, and ready-made overlay style layers for them.
-//! - [`formats`]: CSV, GPX, KML and FlatGeobuf ([`fgb`]) as GeoJSON.
+//! - [`formats`]: CSV, GPX, KML, FlatGeobuf ([`fgb`]) and Shapefiles ([`shp`]) as GeoJSON.
 //! - [`index`] and [`cluster`]: the spatial index and point clustering behind GeoJSON sources.
 //!
 //! ## Output and the rest
@@ -90,6 +90,7 @@ pub mod pixels;
 pub mod pmtiles;
 pub mod raster;
 pub mod render;
+pub mod shp;
 pub mod smooth;
 pub mod source;
 pub mod spec;
@@ -99,7 +100,7 @@ pub mod stylejson;
 pub use interact::{Click, Controller};
 pub use pick::Pick;
 pub use layer::{CustomLayer, DrawContext, Markers, PickContext};
-pub use map::{KittyState, Map, MapSource, MapView, RasterMode, TileRequest};
+pub use map::{KittyState, LabelPlacement, Map, MapSource, MapView, RasterMode, TileRequest};
 pub use spec::StyleLayer;
 pub use render::{Camera, Overlay, Viewport};
 pub use source::Source;

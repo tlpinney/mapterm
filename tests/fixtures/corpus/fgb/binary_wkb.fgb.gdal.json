@@ -1,0 +1,1 @@
+{"features": [{"geometry": null, "layer": "binary_wkb", "properties": {"id": "08b2681a1482afff056faced1a3aae40", "wkb": "0000000001c05a52f8cad6ef6b404400ba4025c3cc"}}], "gdal": "3.9.2", "layers": ["binary_wkb"]}

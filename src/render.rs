@@ -381,6 +381,20 @@ impl Canvas {
         self.w
     }
 
+    /// Whether `cols` cells from `col` on `row` are free, with `margin` more columns each side
+    /// and the rows above and below too (cells off the canvas count as free).
+    pub(crate) fn clear_around(&self, col: i64, row: i64, cols: i64, margin: i64) -> bool {
+        for r in (row - 1).max(0)..=(row + 1).min(self.h as i64 - 1) {
+            let base = r as usize * self.w;
+            for c in (col - margin).max(0)..(col + cols + margin).min(self.w as i64) {
+                if self.used[base + c as usize] {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     pub(crate) fn text_at(&mut self, col: i64, row: i64, s: &str, st: TStyle, pad: bool) -> bool {
         // Text comes from tiles, styles and data files: control characters would reach the
         // terminal as escape sequences, so they never enter a cell.

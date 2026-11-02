@@ -144,6 +144,17 @@ pub struct RasterTiles {
     credit: Option<String>,
 }
 
+/// How labels and markers are placed from one frame to the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LabelPlacement {
+    /// Symbols shown last frame are placed first and keep their spot when it still fits, so
+    /// labels don't flicker or hop between spots while the map moves (as in MapLibre).
+    #[default]
+    Sticky,
+    /// Every frame is placed from scratch, by priority alone.
+    Fresh,
+}
+
 /// How raster layers are drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum RasterMode {
@@ -487,6 +498,10 @@ pub struct Map {
     pixels: std::sync::Mutex<Option<crate::pixels::PixFrame>>,
     /// Pixel mode's tile images.
     pixcache: std::sync::Mutex<crate::pixels::PixCache>,
+    /// How labels and markers are placed frame to frame (sticky by default).
+    pub label_placement: LabelPlacement,
+    /// Where symbols were placed last frame.
+    label_memory: std::sync::Mutex<crate::layer::LabelMemory>,
     /// The starting view (lon, lat, zoom) a style suggests.
     pub center: Option<(f64, f64, f64)>,
     /// When to ask again for tiles that failed to load.
@@ -639,7 +654,7 @@ impl Map {
                     if started.elapsed() < cache.budget.unwrap_or(DRAW_BUDGET) && self.tiles_complete(&tcam, rect) {
                         let Some(mut pix) = Pix::sized(w, h, cpx) else { continue };
                         let mut scratch = Buffer::empty(rect);
-                        draw_layers(self, &tcam, rect, &mut scratch, Some(&mut pix), false);
+                        draw_layers(self, &tcam, rect, &mut scratch, Some(&mut pix), None, false);
                         let (img, pixmap) = pix.finish(next_image_id());
                         frame.new.push(img.clone());
                         cache.bytes += img.rgba.len() + pixmap.data().len();
@@ -720,6 +735,19 @@ impl Map {
             }
         }
         frame
+    }
+
+    /// The labels and markers placed in the last frame drawn: (text, or glyph and label, with
+    /// lon, lat). For tests and measuring how labels move between frames.
+    #[doc(hidden)]
+    pub fn placed_labels(&self) -> Vec<(String, f64, f64)> {
+        self.label_memory.lock().unwrap_or_else(|e| e.into_inner()).placed.clone()
+    }
+
+    /// The label and marker keys offered for placement in the last frame (placed or not).
+    #[doc(hidden)]
+    pub fn offered_labels(&self) -> Vec<String> {
+        self.label_memory.lock().unwrap_or_else(|e| e.into_inner()).offered.clone()
     }
 
     // ---- sources ----
@@ -1816,10 +1844,10 @@ impl Widget for MapView<'_> {
                 let frame = map.pixel_tiles(cam, area, cpx);
                 *map.pixels.lock().unwrap_or_else(|e| e.into_inner()) = Some(frame);
                 // Labels, markers and custom layers; the tiles hold the style's geometry.
-                draw_layers(map, cam, area, buf, None, true);
+                draw_layers(map, cam, area, buf, None, Some(&map.label_memory), true);
             }
             None => {
-                draw_layers(map, cam, area, buf, None, false);
+                draw_layers(map, cam, area, buf, None, Some(&map.label_memory), false);
             }
         }
     }
@@ -1827,8 +1855,16 @@ impl Widget for MapView<'_> {
 
 /// Draw the map's layers for `cam` into `area`: fills and lines into `pix` when given, else
 /// braille (none of them for style layers with `geometry_off`); labels and markers into
-/// `buf`.
-fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pix: Option<&mut crate::pixels::Pix>, geometry_off: bool) {
+/// `buf`, remembered in `labels` for the next frame (None for pixel tiles' own passes).
+fn draw_layers(
+    map: &Map,
+    cam: &Camera,
+    area: Rect,
+    buf: &mut Buffer,
+    pix: Option<&mut crate::pixels::Pix>,
+    labels: Option<&std::sync::Mutex<crate::layer::LabelMemory>>,
+    geometry_off: bool,
+) {
     {
         let vp = Viewport::new(cam, area);
         let bg = map.background(cam.zoom);
@@ -1844,7 +1880,7 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pix: Optio
         // Imagery under the map shows through the image, so the background isn't painted.
         let imagery = map.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(cam.zoom)));
         let skip_bg = pix.is_some() && imagery;
-        crate::layer::render_into(cam, area, buf, pix, |ctx| {
+        crate::layer::render_labelled(cam, area, buf, pix, labels, map.label_placement == LabelPlacement::Sticky, |ctx| {
             for (i, entry) in map.layers.iter().enumerate() {
                 ctx.base = i as i32 * LAYER_PRIORITY;
                 let l = match entry {

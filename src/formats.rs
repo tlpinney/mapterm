@@ -1,13 +1,14 @@
 //! Other vector data as GeoJSON: CSV / TSV with latitude and longitude columns (or a WKT
-//! column), GPX (waypoints, tracks, routes), KML (placemarks) and FlatGeobuf
-//! ([`crate::fgb`]). Each is turned into a
+//! column), GPX (waypoints, tracks, routes), KML (placemarks), FlatGeobuf ([`crate::fgb`])
+//! and Shapefiles ([`crate::shp`]). Each is turned into a
 //! GeoJSON FeatureCollection, so it draws, inspects and clusters like GeoJSON.
 
 use anyhow::{Result, bail};
 use serde_json::{Map, Value as Json, json};
 
-/// A data format mapterm reads.
+/// A data format mapterm reads. More may be added, so matches need a wildcard arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Format {
     /// GeoJSON.
     GeoJson,
@@ -19,6 +20,8 @@ pub enum Format {
     Kml,
     /// FlatGeobuf.
     FlatGeobuf,
+    /// An Esri Shapefile's `.shp` ([`crate::shp`]).
+    Shapefile,
 }
 
 impl Format {
@@ -31,11 +34,15 @@ impl Format {
             Some("gpx") => return Format::Gpx,
             Some("kml") => return Format::Kml,
             Some("fgb") => return Format::FlatGeobuf,
+            Some("shp") => return Format::Shapefile,
             Some("geojson" | "json") => return Format::GeoJson,
             _ => {}
         }
         if crate::fgb::is_fgb(bytes) {
             return Format::FlatGeobuf;
+        }
+        if crate::shp::is_shp(bytes) {
+            return Format::Shapefile;
         }
         let head = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).to_ascii_lowercase();
         let start = head.trim_start_matches('\u{feff}').trim_start();
@@ -51,7 +58,9 @@ impl Format {
     }
 }
 
-/// Read `bytes` (named `name`, for the format) as a GeoJSON document.
+/// Read `bytes` (named `name`, for the format) as a GeoJSON document. A shapefile read this
+/// way has its geometry only; [`crate::shp::to_geojson`] takes the `.dbf`, `.prj` and `.cpg`
+/// beside it too, as [`crate::geojson::load`] does.
 pub fn to_geojson(name: &str, bytes: &[u8]) -> Result<Json> {
     match Format::detect(name, bytes) {
         Format::GeoJson => Ok(serde_json::from_slice(bytes)?),
@@ -59,6 +68,7 @@ pub fn to_geojson(name: &str, bytes: &[u8]) -> Result<Json> {
         Format::Gpx => gpx(&String::from_utf8_lossy(bytes)),
         Format::Kml => kml(&String::from_utf8_lossy(bytes)),
         Format::FlatGeobuf => crate::fgb::to_geojson(bytes),
+        Format::Shapefile => crate::shp::to_geojson(&crate::shp::Parts { shp: bytes, ..Default::default() }),
     }
 }
 
@@ -105,7 +115,12 @@ fn csv_rows(text: &str, delim: char) -> Vec<Vec<String>> {
 /// A cell as a JSON value: numbers and true/false as such, else text.
 fn cell(s: &str) -> Json {
     let t = s.trim();
-    if let Ok(n) = t.parse::<f64>()
+    // A leading zero before another digit (ZIP codes like 02139, ids like 001) is an
+    // identifier, not a number: as a number it would lose the zeros.
+    let digits = t.trim_start_matches(['+', '-']).as_bytes();
+    let zero_padded = digits.len() > 1 && digits[0] == b'0' && digits[1].is_ascii_digit();
+    if !zero_padded
+        && let Ok(n) = t.parse::<f64>()
         && n.is_finite()
         && !t.is_empty()
     {
@@ -487,6 +502,21 @@ mod tests {
         assert_eq!(Format::detect("data", b"name,lat,lon\n"), Format::Csv);
         assert_eq!(Format::detect("data", b"fgb\x03fgb\x00\x10\0\0\0"), Format::FlatGeobuf);
         assert_eq!(Format::detect("x.FGB", b""), Format::FlatGeobuf);
+        assert_eq!(Format::detect("roads.SHP", b""), Format::Shapefile);
+        let mut shp = vec![0u8; 100];
+        shp[..4].copy_from_slice(&[0, 0, 0x27, 0x0a]);
+        assert_eq!(Format::detect("data", &shp), Format::Shapefile);
+    }
+
+    #[test]
+    fn zero_padded_values_stay_text() {
+        assert_eq!(cell("02139"), json!("02139"));
+        assert_eq!(cell("001"), json!("001"));
+        assert_eq!(cell("-007"), json!("-007"));
+        assert_eq!(cell("0"), json!(0.0));
+        assert_eq!(cell("0.5"), json!(0.5));
+        assert_eq!(cell("-0.25"), json!(-0.25));
+        assert_eq!(cell("1e5"), json!(100000.0));
     }
 
     #[test]
