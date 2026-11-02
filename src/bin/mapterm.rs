@@ -1,7 +1,7 @@
 //! mapterm: the terminal map viewer built on the mapterm library.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -43,9 +43,11 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 lat/lon (or WKT) columns, GPX, KML, FlatGeobuf, a Shapefile (.shp, with
                 its .dbf, .prj and .cpg) or GeoParquet (repeatable; each gets its own color;
                 names from a `name` property; inspect shows properties)
-  --bbox W,S,E,N  read only this area of GeoParquet layers (lon/lat); with --at and -z
-                and no --bbox, the area around the start view. A GeoParquet URL is read
-                with range requests, so chunks outside the area aren't downloaded
+                A GeoParquet URL, or a STAC collection of GeoParquet files (its
+                collection.json, e.g. Overture's at stac.overturemaps.org), loads as the map
+                moves: only the chunks under the view, from zoom 14
+  --bbox W,S,E,N  read a GeoParquet layer once, for this area only (lon/lat), instead of
+                loading it as the map moves
   --at          start position (default: fit the GeoJSON layers, else the source's center)
   -z            start zoom
   --raster      an image tile layer under the vector map: a provider or stack name
@@ -281,6 +283,24 @@ const CLUSTER_ABOVE: usize = 1000;
 
 /// Ids of the layers the viewer adds.
 const RASTER: &str = "mapterm-raster";
+
+/// A GeoParquet dataset layer loading as the map moves.
+struct Loading {
+    /// Its source and layers in the map.
+    id: String,
+    /// What --geojson named (the key of its saved index).
+    spec: String,
+    ds: mapterm::geoparquet::Dataset,
+    inflight: HashSet<mapterm::geoparquet::Job>,
+    /// The STAC index has been saved.
+    saved: bool,
+}
+
+/// Dataset features kept loaded; past this the chunks farthest from the view are dropped.
+const DATASET_BUDGET: usize = 600_000;
+/// Dataset jobs at once: STAC items are tiny, footers and chunks are megabytes.
+const ITEM_SLOTS: usize = 32;
+const CHUNK_SLOTS: usize = 4;
 
 /// Vector tile downloads at once.
 const VECTOR_SLOTS: usize = 6;
@@ -575,8 +595,21 @@ async fn main() -> Result<()> {
         Some([x0.min(x1) - dx, (y0.min(y1) - dy).max(-85.0), x0.max(x1) + dx, (y0.max(y1) + dy).min(85.0)])
     });
     let mut geo = Vec::new();
+    // Layers loaded a chunk at a time as the map moves: a STAC collection of GeoParquet files,
+    // or a GeoParquet URL without --bbox. They start empty. (index in `geo`, spec, dataset)
+    let mut opened: Vec<(usize, String, mapterm::geoparquet::Dataset)> = Vec::new();
     for (i, g) in a.geojson.iter().enumerate() {
         let color = mapterm::geojson::PALETTE[i % mapterm::geojson::PALETTE.len()];
+        let path = g.split(['?', '#']).next().unwrap_or(g).to_ascii_lowercase();
+        let remote = g.starts_with("https://") || g.starts_with("http://");
+        let parquet = path.ends_with(".parquet") || path.ends_with(".geoparquet");
+        if remote && (path.ends_with("collection.json") || (parquet && a.bbox.is_none())) {
+            let ds = mapterm::geoparquet::Dataset::open(g).await.with_context(|| format!("--geojson {g}"))?;
+            let empty = mapterm::geojson::parse(br#"{"type": "FeatureCollection", "features": []}"#, ds.name.clone(), color)?;
+            opened.push((geo.len(), g.clone(), ds));
+            geo.push(empty);
+            continue;
+        }
         geo.push(mapterm::geojson::load_in(g, color, bbox).await.with_context(|| format!("--geojson {g}"))?);
     }
     // The basemap: a MapLibre style, or SOURCE with the built-in terminal style.
@@ -737,6 +770,8 @@ async fn main() -> Result<()> {
     };
     // GeoJSON layers over the basemap, each in its own color.
     let mut legend: Vec<(String, Color)> = Vec::new();
+    let mut datasets: Vec<Loading> = Vec::new();
+    let mut opened = opened.into_iter().peekable();
     for (i, g) in geo.into_iter().enumerate() {
         let color = g.color;
         let mut id = g.name.clone();
@@ -751,6 +786,10 @@ async fn main() -> Result<()> {
         }
         map.add_source(&id, src)?;
         map.add_layers(mapterm::geojson::overlay_layers(&id, color, true), None)?;
+        if opened.peek().is_some_and(|(at, ..)| *at == i) {
+            let (_, spec, ds) = opened.next().expect("peeked");
+            datasets.push(Loading { id: id.clone(), spec, ds, inflight: HashSet::new(), saved: false });
+        }
         legend.push((id, color));
     }
     // Highlights, the crosshair and the clicked spot, on top of everything.
@@ -764,6 +803,7 @@ async fn main() -> Result<()> {
     let sem = Arc::new(Semaphore::new(VECTOR_SLOTS));
     let rsem = Arc::new(Semaphore::new(RASTER_SLOTS));
     let (tx, mut rx) = mpsc::unbounded_channel::<Done>();
+    let (dtx, mut drx) = mpsc::unbounded_channel::<(usize, mapterm::geoparquet::Done)>();
     let spawn_load = |req: mapterm::TileRequest, tx: mpsc::UnboundedSender<Done>| {
         let sem = if req.is_raster() { rsem.clone() } else { sem.clone() };
         tokio::spawn(async move {
@@ -780,6 +820,30 @@ async fn main() -> Result<()> {
             if let Err(e) = map.insert_loaded(&req.source, req.id, r) {
                 eprintln!("{e:#}");
             }
+        }
+        // Dataset layers: every job the view needs, until none are left.
+        let vp = Viewport::new(&cam, area);
+        let ((x0, y0), (x1, y1)) = (vp.cell_to_lonlat(0, 0), vp.cell_to_lonlat(w, h));
+        let view = [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)];
+        for d in &mut datasets {
+            use futures::StreamExt;
+            loop {
+                let jobs = d.ds.wanted(view, cam.zoom);
+                if jobs.is_empty() {
+                    break;
+                }
+                let width = if matches!(jobs[0], mapterm::geoparquet::Job::Item(_)) { ITEM_SLOTS } else { CHUNK_SLOTS };
+                let futs: Vec<_> = jobs.into_iter().map(|j| d.ds.run(j)).collect();
+                let done: Vec<_> = futures::stream::iter(futs).buffer_unordered(width).collect().await;
+                for r in done {
+                    match d.ds.apply(r) {
+                        Ok(Some((key, features))) => map.add_part(&d.id, key, features)?,
+                        Ok(None) => {}
+                        Err(e) => eprintln!("{}: {e:#}", d.id),
+                    }
+                }
+            }
+            d.ds.save_index(&d.spec);
         }
         if let Some((c, r)) = a.pick {
             let dot = ((c as f64 - area.x as f64) * 2.0 + 1.0, (r as f64 - area.y as f64) * 4.0 + 2.0);
@@ -1079,8 +1143,9 @@ async fn main() -> Result<()> {
                 {
                     spans.push(Span::styled(format!("{n} "), TStyle::new().fg(Color::Green)));
                 }
-                if !pending.is_empty() || waiting > 0 {
-                    spans.push(Span::styled(format!("loading {} ", pending.len() + waiting), TStyle::new().fg(Color::Yellow)));
+                let ds_busy: usize = datasets.iter().map(|d| d.inflight.len()).sum();
+                if !pending.is_empty() || waiting > 0 || ds_busy > 0 {
+                    spans.push(Span::styled(format!("loading {} ", pending.len() + waiting + ds_busy), TStyle::new().fg(Color::Yellow)));
                 }
                 if errors > 0 {
                     spans.push(Span::styled(format!("{errors} failed "), TStyle::new().fg(Color::Red)));
@@ -1097,6 +1162,9 @@ async fn main() -> Result<()> {
                 }
                 // Imagery that only renders zoomed in (Planetary Computer mosaics): say so
                 // rather than show nothing.
+                for d in datasets.iter().filter(|d| draw_cam.zoom < d.ds.min_zoom) {
+                    spans.push(Span::styled(format!("{}: zoom in to {} ", d.ds.name, d.ds.min_zoom), TStyle::new().fg(Color::Yellow)));
+                }
                 for (name, z) in map.rasters_below_min_zoom(&draw_cam) {
                     spans.push(Span::styled(format!("{name}: zoom in to {z} for imagery "), TStyle::new().fg(Color::Yellow)));
                 }
@@ -1215,6 +1283,38 @@ async fn main() -> Result<()> {
             if let Some(t) = target {
                 reqs.extend(map.tile_requests(&t, map_area).into_iter().filter(|r| r.source == RASTER));
             }
+            // Dataset layers: the chunks under the view, into their own slots; far ones dropped.
+            {
+                let vp = Viewport::new(&draw_cam, map_area);
+                let ((x0, y0), (x1, y1)) = (vp.cell_to_lonlat(0, 0), vp.cell_to_lonlat(map_area.width, map_area.height));
+                let view = [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)];
+                for (di, d) in datasets.iter_mut().enumerate() {
+                    for k in d.ds.evict(view, DATASET_BUDGET) {
+                        map.remove_part(&d.id, k)?;
+                    }
+                    let mut busy = (
+                        d.inflight.iter().filter(|j| matches!(j, mapterm::geoparquet::Job::Item(_))).count(),
+                        d.inflight.iter().filter(|j| !matches!(j, mapterm::geoparquet::Job::Item(_))).count(),
+                    );
+                    for job in d.ds.wanted(view, draw_cam.zoom) {
+                        if d.inflight.contains(&job) {
+                            continue;
+                        }
+                        let (used, slots) =
+                            if matches!(job, mapterm::geoparquet::Job::Item(_)) { (&mut busy.0, ITEM_SLOTS) } else { (&mut busy.1, CHUNK_SLOTS) };
+                        if *used >= slots {
+                            continue;
+                        }
+                        *used += 1;
+                        d.inflight.insert(job);
+                        dlog(|| format!("start {} {job:?}", d.id));
+                        let (fut, tx) = (d.ds.run(job), dtx.clone());
+                        tokio::spawn(async move {
+                            let _ = tx.send((di, fut.await));
+                        });
+                    }
+                }
+            }
             held_back = false;
             // Downloads start only into free slots, nearest the view's center first (the order
             // tile_requests gives); the rest wait for a later frame, which asks again for the
@@ -1276,6 +1376,25 @@ async fn main() -> Result<()> {
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
             let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() { Duration::from_millis(16) } else { Duration::from_millis(500) };
             tokio::select! {
+                Some((di, done)) = drx.recv() => {
+                    let d = &mut datasets[di];
+                    let job = done.job();
+                    d.inflight.remove(&job);
+                    dlog(|| format!("done {} {job:?}", d.id));
+                    match d.ds.apply(done) {
+                        Ok(Some((key, features))) => map.add_part(&d.id, key, features)?,
+                        Ok(None) => {
+                            if !d.saved && d.ds.items_unread() == 0 {
+                                d.ds.save_index(&d.spec);
+                                d.saved = true;
+                            }
+                        }
+                        Err(e) => {
+                            errors += 1;
+                            dlog(|| format!("{}: {e:#}", d.id));
+                        }
+                    }
+                }
                 Some(first) = rx.recv() => {
                     let mut batch = vec![first];
                     while let Ok(d) = rx.try_recv() {

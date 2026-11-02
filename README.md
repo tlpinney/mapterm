@@ -109,8 +109,8 @@ They follow the MapLibre GL / Mapbox GL defaults:
 mapterm --geojson sites.geojson --geojson https://example.com/routes.geojson
 mapterm --geojson stores.csv --geojson run.gpx --geojson places.kml
 mapterm --geojson parcels.shp
-# 18,000 buildings in San Salvador from a 508 MB Overture file, downloading ~5 MB:
-mapterm --geojson 'https://overturemaps-us-west-2.s3.amazonaws.com/release/2026-10-21.0/theme=buildings/type=building/part-00000-85375c54-5dfb-57c7-b21d-8b5e5245ad06-c000.zstd.parquet' \
+# Overture's buildings, worldwide (512 files, 257 GB), loading only what's on screen:
+mapterm --geojson https://stac.overturemaps.org/2026-10-21.0/buildings/building/collection.json \
   --at 13.70,-89.20 -z 17
 ```
 
@@ -122,11 +122,14 @@ and extended data; unzip KMZ first), FlatGeobuf (lon/lat) and Shapefiles
 are read too), and GeoParquet (lon/lat). The format
 comes from the extension, else the content.
 
-GeoParquet is read only where needed. A URL is fetched with HTTP range requests,
-and with `--bbox W,S,E,N`, or `--at` and `-z` without one, only the area around
-the view is read: chunks outside it are skipped without being downloaded when the
-file has GeoParquet 1.1 bbox columns (as Overture's do), and rows outside it are
-dropped either way. Panning past that area shows nothing more for now. Files and
+GeoParquet is read only where needed. A GeoParquet URL, or a STAC collection of
+GeoParquet files (its `collection.json`, as Overture publishes), loads as the map
+moves: from zoom 14, the chunks under the view are fetched with HTTP range
+requests, nearest the center first, and the farthest are dropped past 600,000
+features. A collection's file index is read once and kept in `~/.cache/mapterm`.
+Over San Salvador that's one footer and one 4 MB chunk, about 3 s, out of
+Overture's 257 GB. With `--bbox W,S,E,N` a layer is instead read once for that area
+(local files are read once, in place). Files and
 URLs up to 512 MB. The readers are checked against GDAL on a corpus of real files
 (`tests/differential.rs`).
 
