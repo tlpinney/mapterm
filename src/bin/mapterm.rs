@@ -1,7 +1,7 @@
 //! mapterm: the terminal map viewer built on the mapterm library.
 
 use std::{
-    collections::HashSet,
+    collections::HashMap,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -253,16 +253,23 @@ const CLUSTER_ABOVE: usize = 1000;
 
 /// Ids of the layers the viewer adds.
 const RASTER: &str = "mapterm-raster";
+
+/// Vector tile downloads at once.
+const VECTOR_SLOTS: usize = 6;
+/// Imagery downloads at once: tile servers like OSM's ask for at most two connections.
+const RASTER_SLOTS: usize = 2;
 const OVERLAYS: &str = "mapterm-overlays";
 
 /// Debug log for troubleshooting (MAPTERM_LOG=path); a no-op unless set.
 fn dlog(msg: impl FnOnce() -> String) {
     use std::sync::OnceLock;
     static PATH: OnceLock<Option<String>> = OnceLock::new();
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = *START.get_or_init(Instant::now);
     if let Some(path) = PATH.get_or_init(|| std::env::var("MAPTERM_LOG").ok()).as_deref()
         && let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path)
     {
-        let _ = writeln!(f, "{}", msg());
+        let _ = writeln!(f, "{:8.3} {}", start.elapsed().as_secs_f64(), msg());
     }
 }
 
@@ -686,9 +693,8 @@ async fn main() -> Result<()> {
     let mut vector: u8 = 0;
     apply_toggles(&mut map, &base, labels, vector, raster.is_some());
 
-    let sem = Arc::new(Semaphore::new(6));
-    // Tile servers like OSM's ask for at most two connections.
-    let rsem = Arc::new(Semaphore::new(2));
+    let sem = Arc::new(Semaphore::new(VECTOR_SLOTS));
+    let rsem = Arc::new(Semaphore::new(RASTER_SLOTS));
     let (tx, mut rx) = mpsc::unbounded_channel::<Done>();
     let spawn_load = |req: mapterm::TileRequest, tx: mpsc::UnboundedSender<Done>| {
         let sem = if req.is_raster() { rsem.clone() } else { sem.clone() };
@@ -819,7 +825,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    let mut pending: HashSet<(String, TileId)> = HashSet::new();
+    // Tiles being downloaded, and whether each is imagery (for the per-kind slot limits).
+    let mut pending: HashMap<(String, TileId), bool> = HashMap::new();
+    // Wanted tiles not started for lack of a free slot this frame (for the status bar).
+    let mut waiting = 0usize;
     let mut errors = 0usize;
     let mut smooth_on = a.smooth;
     // `s` only toggles smooth scrolling when MAPTERM_SMOOTH opted in to the experiment.
@@ -1000,8 +1009,8 @@ async fn main() -> Result<()> {
                 {
                     spans.push(Span::styled(format!("{n} "), TStyle::new().fg(Color::Green)));
                 }
-                if !pending.is_empty() {
-                    spans.push(Span::styled(format!("loading {} ", pending.len()), TStyle::new().fg(Color::Yellow)));
+                if !pending.is_empty() || waiting > 0 {
+                    spans.push(Span::styled(format!("loading {} ", pending.len() + waiting), TStyle::new().fg(Color::Yellow)));
                 }
                 if errors > 0 {
                     spans.push(Span::styled(format!("{errors} failed "), TStyle::new().fg(Color::Red)));
@@ -1137,8 +1146,20 @@ async fn main() -> Result<()> {
                 reqs.extend(map.tile_requests(&t, map_area).into_iter().filter(|r| r.source == RASTER));
             }
             held_back = false;
+            // Downloads start only into free slots, nearest the view's center first (the order
+            // tile_requests gives); the rest wait for a later frame, which asks again for the
+            // view it then shows. So zooming through levels never queues tiles for views
+            // already left, and the view you stop on loads first.
+            waiting = 0;
+            let mut busy = (pending.values().filter(|r| **r).count(), pending.values().filter(|r| !**r).count());
             for req in reqs {
-                if pending.contains(&(req.source.clone(), req.id)) {
+                if pending.contains_key(&(req.source.clone(), req.id)) {
+                    continue;
+                }
+                let raster = req.is_raster();
+                let (used, slots) = if raster { (&mut busy.0, RASTER_SLOTS) } else { (&mut busy.1, VECTOR_SLOTS) };
+                if *used >= slots {
+                    waiting += 1;
                     continue;
                 }
                 // The provider said "too many requests" (or its daily quota is used up): ask it
@@ -1154,10 +1175,9 @@ async fn main() -> Result<()> {
                     held_back = true;
                     continue;
                 }
-                if req.source == RASTER {
-                    dlog(|| format!("raster tile {:?}", req.id));
-                }
-                pending.insert((req.source.clone(), req.id));
+                dlog(|| format!("start {} {:?}", req.source, req.id));
+                *used += 1;
+                pending.insert((req.source.clone(), req.id), raster);
                 spawn_load(req, tx.clone());
             }
 
@@ -1193,6 +1213,7 @@ async fn main() -> Result<()> {
                     }
                     for (source, id, r) in batch {
                         pending.remove(&(source.clone(), id));
+                        dlog(|| format!("done {source} {id:?}"));
                         if let Err(e) = map.insert_loaded(&source, id, r) {
                             // The map asks for it again after a growing wait.
                             dlog(|| format!("{e:#}"));
