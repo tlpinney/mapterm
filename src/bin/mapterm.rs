@@ -40,9 +40,12 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 print the Mapbox access token with a command (else MAPBOX_ACCESS_TOKEN);
                 used for mapbox:// styles and --raster mapbox
   --geojson     a data file or URL drawn as a layer over the map: GeoJSON, CSV with
-                lat/lon (or WKT) columns, GPX, KML, FlatGeobuf or a Shapefile (.shp, with
-                its .dbf, .prj and .cpg) (repeatable; each gets its own color;
+                lat/lon (or WKT) columns, GPX, KML, FlatGeobuf, a Shapefile (.shp, with
+                its .dbf, .prj and .cpg) or GeoParquet (repeatable; each gets its own color;
                 names from a `name` property; inspect shows properties)
+  --bbox W,S,E,N  read only this area of GeoParquet layers (lon/lat); with --at and -z
+                and no --bbox, the area around the start view. A GeoParquet URL is read
+                with range requests, so chunks outside the area aren't downloaded
   --at          start position (default: fit the GeoJSON layers, else the source's center)
   -z            start zoom
   --raster      an image tile layer under the vector map: a provider or stack name
@@ -96,6 +99,8 @@ struct Args {
     style: Option<String>,
     at: Option<(f64, f64)>,
     zoom: Option<f64>,
+    /// --bbox: the area of GeoParquet layers to read.
+    bbox: Option<[f64; 4]>,
     light: bool,
     /// --no-labels: start with symbol layers hidden, as if `n` had been pressed.
     no_labels: bool,
@@ -133,6 +138,7 @@ fn args() -> Result<Args> {
         style: None,
         at: None,
         zoom: None,
+        bbox: None,
         light: false,
         no_labels: false,
         snapshot: None,
@@ -176,6 +182,15 @@ fn args() -> Result<Args> {
             "--raster" => a.raster = Some(it.next().context("--raster URL")?),
             "--tms" => a.tms = true,
             "--geojson" => a.geojson.push(it.next().context("--geojson FILE|URL")?),
+            "--bbox" => {
+                let v = it.next().context("--bbox W,S,E,N")?;
+                let n: Vec<f64> = v.split(',').map(|x| x.trim().parse()).collect::<Result<_, _>>().context("--bbox W,S,E,N")?;
+                let [w, s, e, nn] = n[..] else { bail!("--bbox W,S,E,N: four numbers") };
+                if w >= e || s >= nn {
+                    bail!("--bbox W,S,E,N: west must be less than east and south less than north");
+                }
+                a.bbox = Some([w, s, e, nn]);
+            }
             "--raster-key-cmd" => a.raster_key_cmd = Some(it.next().context("--raster-key-cmd CMD")?),
             "--mapbox-token-cmd" => a.mapbox_token_cmd = Some(it.next().context("--mapbox-token-cmd CMD")?),
             "--raster-header" => a.raster_headers.push(it.next().context("--raster-header 'Name: value'")?),
@@ -550,10 +565,19 @@ async fn main() -> Result<()> {
     }
     // Mapbox's token, for mapbox:// styles and the mapbox imagery.
     mapterm::mapbox::set_access_token(mapterm::raster::find_key(a.mapbox_token_cmd.as_deref(), &["MAPBOX_ACCESS_TOKEN"])?);
+    // GeoParquet layers read only this area: --bbox, else three screens around the start view.
+    let bbox = a.bbox.or_else(|| {
+        let ((lon, lat), z) = (a.at?, a.zoom?);
+        let (w, h) = a.snapshot.or_else(|| crossterm::terminal::size().ok()).unwrap_or((120, 40));
+        let vp = Viewport::new(&Camera::new(lon, lat, z), Rect::new(0, 0, w, h));
+        let ((x0, y0), (x1, y1)) = (vp.cell_to_lonlat(0, 0), vp.cell_to_lonlat(w, h));
+        let (dx, dy) = ((x1 - x0).abs(), (y0 - y1).abs());
+        Some([x0.min(x1) - dx, (y0.min(y1) - dy).max(-85.0), x0.max(x1) + dx, (y0.max(y1) + dy).min(85.0)])
+    });
     let mut geo = Vec::new();
     for (i, g) in a.geojson.iter().enumerate() {
         let color = mapterm::geojson::PALETTE[i % mapterm::geojson::PALETTE.len()];
-        geo.push(mapterm::geojson::load(g, color).await.with_context(|| format!("--geojson {g}"))?);
+        geo.push(mapterm::geojson::load_in(g, color, bbox).await.with_context(|| format!("--geojson {g}"))?);
     }
     // The basemap: a MapLibre style, or SOURCE with the built-in terminal style.
     let src = match &a.style {

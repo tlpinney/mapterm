@@ -1,6 +1,6 @@
 //! Other vector data as GeoJSON: CSV / TSV with latitude and longitude columns (or a WKT
-//! column), GPX (waypoints, tracks, routes), KML (placemarks), FlatGeobuf ([`crate::fgb`])
-//! and Shapefiles ([`crate::shp`]). Each is turned into a
+//! column), GPX (waypoints, tracks, routes), KML (placemarks), FlatGeobuf ([`crate::fgb`]),
+//! Shapefiles ([`crate::shp`]) and GeoParquet ([`crate::geoparquet`]). Each is turned into a
 //! GeoJSON FeatureCollection, so it draws, inspects and clusters like GeoJSON.
 
 use anyhow::{Result, bail};
@@ -22,6 +22,8 @@ pub enum Format {
     FlatGeobuf,
     /// An Esri Shapefile's `.shp` ([`crate::shp`]).
     Shapefile,
+    /// GeoParquet ([`crate::geoparquet`]).
+    GeoParquet,
 }
 
 impl Format {
@@ -35,6 +37,7 @@ impl Format {
             Some("kml") => return Format::Kml,
             Some("fgb") => return Format::FlatGeobuf,
             Some("shp") => return Format::Shapefile,
+            Some("parquet" | "geoparquet") => return Format::GeoParquet,
             Some("geojson" | "json") => return Format::GeoJson,
             _ => {}
         }
@@ -43,6 +46,9 @@ impl Format {
         }
         if crate::shp::is_shp(bytes) {
             return Format::Shapefile;
+        }
+        if crate::geoparquet::is_parquet(bytes) {
+            return Format::GeoParquet;
         }
         let head = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]).to_ascii_lowercase();
         let start = head.trim_start_matches('\u{feff}').trim_start();
@@ -69,6 +75,7 @@ pub fn to_geojson(name: &str, bytes: &[u8]) -> Result<Json> {
         Format::Kml => kml(&String::from_utf8_lossy(bytes)),
         Format::FlatGeobuf => crate::fgb::to_geojson(bytes),
         Format::Shapefile => crate::shp::to_geojson(&crate::shp::Parts { shp: bytes, ..Default::default() }),
+        Format::GeoParquet => crate::geoparquet::to_geojson(bytes),
     }
 }
 

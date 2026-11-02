@@ -1,0 +1,72 @@
+# OSV-Scanner (CI's "Vulnerabilities (OSV)" job). Each ignore says why and expires, so it is
+# looked at again rather than left forever.
+#
+# zstd 0.13.4 / zstd-safe 7.4.0 (via parquet 59, which allows no zstd 0.14) carry backports
+# of all of these, one commit each on zstd-rs's 0.13.x branch, released 2026-11-01. The
+# advisory databases list only zstd 0.14.3+ / zstd-safe 8.2.0+ as fixed so far. Remove these
+# when they record the backports, or when geoparquet moves to parquet 60 (zstd 0.14).
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0391"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd 0.13.4 (zstd-rs 4820ca7c: reset the session in with_context)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0395"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs 4d76de82: refuse to enable StableInBuffer)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0396"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs 217f4957: no Seekable use before a successful init)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0397"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs 8cdeed4a: zero-fill the gap in OutBuffer::around_pos)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0398"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs 08411710: clamp Seekable::decompress to the data)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0399"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs a6d74beb: bind init_using_{c,d}dict's borrow to the context)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0400"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs 2b160726, 4929c0ff: reset after one-shot calls)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0401"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 / zstd 0.13.4 (zstd-rs c188d462: overflow-checked sample sizes)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0402"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs 5b58819a: refuse CCtx::try_clone once NbWorkers was set)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0403"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs 00638cf5: commit positions only from successful streaming calls)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0404"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs 1f069299: DCtx::try_clone refuses owned state)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0405"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs f48548be: check InBuffer::pos before zstd sees it)"
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0406"
+ignoreUntil = 2027-02-01
+reason = "fixed in zstd-safe 7.4.0 (zstd-rs d6a1fc43: no dictionary unload under unfinished zstdmt jobs)"

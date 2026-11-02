@@ -76,6 +76,7 @@ pub mod fgb;
 pub mod formats;
 pub mod geocode;
 pub mod geojson;
+pub mod geoparquet;
 pub mod icons;
 pub mod index;
 pub mod interact;

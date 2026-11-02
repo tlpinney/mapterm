@@ -32,7 +32,7 @@ https://github.com/user-attachments/assets/8bf59b7f-3156-4820-aeeb-2b138fc5bc2b
   Computer's NAIP and Sentinel-2, and keyed
   providers such as Vantor, Planet and Mapbox) as real images in kitty-graphics terminals, or as
   cell colors anywhere else.
-- **Your data:** GeoJSON, CSV, GPX, KML, FlatGeobuf and Shapefiles, from a file or a URL, drawn over
+- **Your data:** GeoJSON, CSV, GPX, KML, FlatGeobuf, Shapefiles and GeoParquet, from a file or a URL, drawn over
   the map, with clustering for large point sets.
 - **Search and inspect:** find a place and fly there; point at anything to see its
   features and properties, and copy them as JSON.
@@ -109,6 +109,9 @@ They follow the MapLibre GL / Mapbox GL defaults:
 mapterm --geojson sites.geojson --geojson https://example.com/routes.geojson
 mapterm --geojson stores.csv --geojson run.gpx --geojson places.kml
 mapterm --geojson parcels.shp
+# 18,000 buildings in San Salvador from a 508 MB Overture file, downloading ~5 MB:
+mapterm --geojson 'https://overturemaps-us-west-2.s3.amazonaws.com/release/2026-10-21.0/theme=buildings/type=building/part-00000-85375c54-5dfb-57c7-b21d-8b5e5245ad06-c000.zstd.parquet' \
+  --at 13.70,-89.20 -z 17
 ```
 
 Besides GeoJSON it reads CSV/TSV with latitude/longitude columns (`lat`,
@@ -116,7 +119,14 @@ Besides GeoJSON it reads CSV/TSV with latitude/longitude columns (`lat`,
 (waypoints, tracks, routes), KML (placemarks with their names, descriptions
 and extended data; unzip KMZ first), FlatGeobuf (lon/lat) and Shapefiles
 (lon/lat; the `.dbf` attributes, `.prj` and `.cpg` code page beside the `.shp`
-are read too). The format comes from the extension, else the content. Files and
+are read too), and GeoParquet (lon/lat). The format
+comes from the extension, else the content.
+
+GeoParquet is read only where needed. A URL is fetched with HTTP range requests,
+and with `--bbox W,S,E,N`, or `--at` and `-z` without one, only the area around
+the view is read: chunks outside it are skipped without being downloaded when the
+file has GeoParquet 1.1 bbox columns (as Overture's do), and rows outside it are
+dropped either way. Panning past that area shows nothing more for now. Files and
 URLs up to 512 MB. The readers are checked against GDAL on a corpus of real files
 (`tests/differential.rs`).
 

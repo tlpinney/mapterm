@@ -6,11 +6,18 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
-The next release is 0.2.0: the library's `formats::Format` gains a variant (Shapefile),
-and `spec::Kind` one (`FillExtrusion`).
+The next release is 0.2.0: the library's `formats::Format` gains variants (Shapefile,
+GeoParquet), and `spec::Kind` one (`FillExtrusion`).
 
 ### Added
 
+- GeoParquet layers (`--geojson x.parquet`, a file or URL; `mapterm::geoparquet`), read
+  with the `geoparquet` crate. A URL is read with HTTP range requests, and `--bbox W,S,E,N`
+  (or `--at` with `-z`) limits reading to an area: chunks outside it are skipped unread
+  when the file has GeoParquet 1.1 bbox columns. San Salvador's 18,000 buildings came from
+  a 508 MB Overture file with 5 MB downloaded. Library: `geojson::load_in` takes the area.
+- CI scans every lockfile against OSV.dev (RustSec, GitHub advisories and more) with
+  OSV-Scanner, on pull requests and nightly; documented exceptions in `osv-scanner.toml`.
 - 3D buildings (`fill-extrusion` layers) are drawn flat, their footprints in their color
   with a slightly darker edge, as MapLibre shows them from straight above. Styles like
   liberty draw buildings only this way past zoom 14, so they had none there.
@@ -83,6 +90,8 @@ and `spec::Kind` one (`FillExtrusion`).
 
 ### Fixed
 
+- `webpki-root-certs` 1.0.11: no longer trusts the distrusted emSign intermediates
+  (RUSTSEC-2026-0383).
 - Layers drawn only with a sprite pattern (`fill-pattern`, `line-pattern`, no color) are
   skipped instead of drawn in the default black: liberty's pedestrian areas and wetlands
   came out black. A color that doesn't evaluate to one draws nothing too.
