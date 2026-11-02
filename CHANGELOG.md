@@ -18,6 +18,9 @@ GeoParquet), and `spec::Kind` one (`FillExtrusion`).
   a 508 MB Overture file with 5 MB downloaded. Library: `geojson::load_in` takes the area.
 - CI scans every lockfile against OSV.dev (RustSec, GitHub advisories and more) with
   OSV-Scanner, on pull requests and nightly; documented exceptions in `osv-scanner.toml`.
+- Pixel mode: new tiles fade in over the low-resolution stand-in (160 ms) instead of
+  swapping in at once, on a terminal on this machine; over SSH they still swap, since each
+  fade step sends the tile again. Library: `Map::pixel_fade`.
 - 3D buildings (`fill-extrusion` layers) are drawn flat, their footprints in their color
   with a slightly darker edge, as MapLibre shows them from straight above. Styles like
   liberty draw buildings only this way past zoom 14, so they had none there.
