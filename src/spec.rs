@@ -98,12 +98,15 @@ impl Kind {
 }
 
 /// Properties mapterm reads; others are kept out so lookups stay short.
-const USED_PAINT: [&str; 16] = [
+const USED_PAINT: [&str; 18] = [
     "background-color",
     "background-opacity",
     "fill-color",
     "fill-opacity",
     "fill-outline-color",
+    // Only to know a layer draws a sprite pattern (which mapterm can't), not its default black.
+    "fill-pattern",
+    "line-pattern",
     "line-color",
     "line-opacity",
     "circle-color",

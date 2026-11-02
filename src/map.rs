@@ -1736,6 +1736,11 @@ const BLACK: Rgba = Rgba::rgb(0, 0, 0);
 
 /// What one style layer draws for one feature, or `None`. The filter and layout use `c`
 /// (its zoom is the whole zoom level); paint uses `paint_zoom`.
+/// Whether a layer's `prop` (`fill-pattern`, `line-pattern`) names a sprite image here.
+fn has_pattern(l: &StyleLayer, prop: &str, c: &Ctx) -> bool {
+    l.paint_expr(prop).is_some_and(|e| !e.eval(c).to_text().is_empty())
+}
+
 fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option<Resolved> {
     if let Some(f) = &l.filter
         && !f.eval(c).as_bool()
@@ -1743,8 +1748,13 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
         return None;
     }
     let cp = Ctx { zoom: paint_zoom, geom: c.geom, props: c.props, state: c.state };
+    // A color the style sets but that doesn't evaluate to one (an unsupported expression)
+    // draws nothing rather than the spec's default black; the default is for unset colors.
     let color = |prop: &str, opacity: &str, default: Option<Rgba>| -> Option<Color> {
-        let rgba = l.paint_expr(prop).and_then(|e| e.eval(&cp).as_color()).or(default)?;
+        let rgba = match l.paint_expr(prop) {
+            Some(e) => e.eval(&cp).as_color()?,
+            None => default?,
+        };
         let o = l.paint_expr(opacity).and_then(|e| e.eval(&cp).as_num()).unwrap_or(1.0);
         term_color(rgba, o, bg)
     };
@@ -1755,11 +1765,20 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
     };
     match l.kind {
         Kind::Fill if c.geom == GeomType::Polygon => {
+            // Sprite patterns can't be drawn: a pattern layer shows its color if it sets one
+            // (in its place), else nothing, never the default black.
+            let pattern = has_pattern(l, "fill-pattern", &cp);
+            if pattern && l.paint_expr("fill-color").is_none() {
+                return None;
+            }
             let fill = color("fill-color", "fill-opacity", Some(BLACK));
             let outline = color("fill-outline-color", "fill-opacity", None);
             (fill.is_some() || outline.is_some()).then_some(Resolved::Fill { color: fill, outline })
         }
         Kind::Line if c.geom != GeomType::Point => {
+            if has_pattern(l, "line-pattern", &cp) && l.paint_expr("line-color").is_none() {
+                return None;
+            }
             let color = color("line-color", "line-opacity", Some(BLACK))?;
             // Pixels to dots: a braille dot is about 4 px, so thin lines stay one dot and wide
             // roads get two or three (no wider: braille can't show an outline around a fill).
@@ -2543,6 +2562,28 @@ mod tests {
             let at = |x: u32, y: u32| b.rgba[((y * b.width + x) * 4) as usize..((y * b.width + x) * 4 + 4) as usize].to_vec();
             assert_eq!(at(b.width / 2, b.height / 2), vec![0, 0, 255, 255], "z{z}: the square in the middle");
         }
+    }
+
+    #[test]
+    fn patterns_and_unreadable_colors_never_draw_black() {
+        // Liberty's pedestrian areas are a fill with only a sprite pattern: drawn as the
+        // spec's default black, they made a black band over Georgetown.
+        let square = json!({"type": "Polygon", "coordinates": [[[-40, -30], [40, -30], [40, 30], [-40, 30], [-40, -30]]]});
+        let (cam, area) = (Camera::new(0.0, 0.0, 0.0), Rect::new(0, 0, 40, 20));
+        let center = |paint: Json| {
+            let mut map = Map::new();
+            map.add_source("sq", MapSource::geojson(&square).unwrap()).unwrap();
+            let mut l = StyleLayer::fill("f", "sq");
+            for (k, v) in paint.as_object().unwrap() {
+                l.set_paint(k, v).unwrap();
+            }
+            map.add_layer(l).unwrap();
+            render(&map, &cam, area)[(20, 10)].bg
+        };
+        assert_eq!(center(json!({"fill-pattern": "pedestrian_polygon"})), Color::Reset, "pattern only: nothing");
+        assert_eq!(center(json!({"fill-pattern": "x", "fill-color": "#00ff00"})), Color::Rgb(0, 255, 0), "its color stands in");
+        assert_eq!(center(json!({"fill-color": ["get", "no-such-property"]})), Color::Reset, "unreadable color: nothing");
+        assert_eq!(center(json!({})), Color::Rgb(0, 0, 0), "unset: the spec's black");
     }
 
     #[test]
