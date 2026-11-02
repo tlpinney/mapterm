@@ -20,7 +20,7 @@ exclude = [".github/", "tests/", "deny.toml", "about.toml", "about.hbs", "releas
 [dependencies]
 anyhow = "1.0.104"
 arrow-array = "59.3"
-arrow-cast = { version = "59.3", default-features = false }
+arrow-cast = { version = "60.1", default-features = false }
 arrow-schema = "59.3"
 bytes = "1.12"
 crossterm = "0.29.0"
