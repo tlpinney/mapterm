@@ -71,6 +71,31 @@ fn read_sync<T: parquet::file::reader::ChunkReader + 'static>(builder: ParquetRe
     collect(&batches, &read)
 }
 
+/// A file's GeoParquet metadata, and its raw JSON. Files from before GeoParquet 1.0 (such
+/// as Microsoft's building footprints on the Planetary Computer) leave out fields that came
+/// later; they're filled in with the spec's defaults (`geometry_types` empty: any type).
+fn geo_metadata(meta: &parquet::file::metadata::FileMetaData) -> Result<(geoparquet::metadata::GeoParquetMetadata, Json)> {
+    let raw: Json = meta
+        .key_value_metadata()
+        .and_then(|kv| kv.iter().find(|k| k.key == "geo"))
+        .and_then(|k| k.value.as_deref())
+        .context("a Parquet file without GeoParquet's \"geo\" metadata (no geometry column named)")
+        .and_then(|v| serde_json::from_str(v).context("GeoParquet \"geo\" metadata isn't JSON"))?;
+    let mut fixed = raw.clone();
+    if fixed["version"].is_null() {
+        fixed["version"] = json!("1.0.0");
+    }
+    if let Some(cols) = fixed["columns"].as_object_mut() {
+        for c in cols.values_mut() {
+            if c["geometry_types"].is_null() {
+                c["geometry_types"] = json!([]);
+            }
+        }
+    }
+    let geo = serde_json::from_value(fixed).context("GeoParquet metadata")?;
+    Ok((geo, raw))
+}
+
 /// What [`collect`] needs to know about a read.
 struct Read {
     /// The geometry column.
@@ -86,18 +111,7 @@ struct Read {
 /// and rows filtered as they're read; without them, every row is read and the returned box is
 /// for filtering rows afterwards.
 fn prepare<T>(builder: ArrowReaderBuilder<T>, bbox: Option<Bbox>) -> Result<(ArrowReaderBuilder<T>, Read, SchemaRef)> {
-    let geo = builder
-        .geoparquet_metadata()
-        .context("a Parquet file without GeoParquet's \"geo\" metadata (no geometry column named)")?
-        .map_err(|e| anyhow!("GeoParquet metadata: {e}"))?;
-    let raw: Json = builder
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .and_then(|kv| kv.iter().find(|k| k.key == "geo"))
-        .and_then(|k| k.value.as_deref())
-        .and_then(|v| serde_json::from_str(v).ok())
-        .unwrap_or_default();
+    let (geo, raw) = geo_metadata(builder.metadata().file_metadata())?;
     let col = &raw["columns"][&geo.primary_column];
     check_crs(&col["crs"], col.get("crs").is_some())?;
     let schema = builder.geoarrow_schema(&geo, false, Default::default()).map_err(|e| anyhow!("GeoParquet schema: {e}"))?;
@@ -207,6 +221,8 @@ fn check_crs(crs: &Json, given: bool) -> Result<()> {
     match crs {
         Json::Null => bail!("GeoParquet geometry with an unknown coordinate system (crs: null); only lon/lat is read"),
         Json::String(s) if matches!(s.to_ascii_uppercase().as_str(), "OGC:CRS84" | "EPSG:4326") => Ok(()),
+        // Before GeoParquet 1.0 the PROJJSON came as a string.
+        Json::String(s) if s.trim_start().starts_with('{') => check_crs(&serde_json::from_str(s).context("crs isn't PROJJSON")?, true),
         c => match id(c) {
             Some((a, code)) if (a == "EPSG" && code == "4326") || (a == "OGC" && code == "CRS84") => Ok(()),
             _ => {
@@ -579,7 +595,7 @@ impl Dataset {
                         let (url, m) = (url.context("no URL")?, meta.context("footer not read")?);
                         let reader = HttpReader::known(client, &url, len);
                         let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(reader, m.arrow.clone()).with_row_groups(vec![g]);
-                        let geo = builder.geoparquet_metadata().context("no geo metadata")?.map_err(|e| anyhow!("{e}"))?;
+                        let (geo, _) = geo_metadata(builder.metadata().file_metadata())?;
                         let schema = builder.geoarrow_schema(&geo, false, Default::default()).map_err(|e| anyhow!("GeoParquet schema: {e}"))?;
                         let stream = GeoParquetRecordBatchStream::try_new(builder.build()?, schema)?;
                         let batches: Vec<RecordBatch> = stream.try_collect().await?;
@@ -694,16 +710,9 @@ fn key(file: usize, group: usize) -> u64 {
 
 /// A footer's metadata, the reading plan, each chunk's box, and the file's box.
 fn file_meta(arrow: parquet::arrow::arrow_reader::ArrowReaderMetadata) -> Result<(FileMeta, Option<Bbox>)> {
-    let gm = geoparquet::reader::GeoParquetReaderMetadata::from_arrow_meta(arrow.clone()).map_err(|e| anyhow!("{e}"))?;
+    let (geo, raw) = geo_metadata(arrow.metadata().file_metadata())?;
+    let gm = geoparquet::reader::GeoParquetReaderMetadata::new(arrow.clone(), geo);
     let geo = gm.geo_metadata();
-    let raw: Json = arrow
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .and_then(|kv| kv.iter().find(|k| k.key == "geo"))
-        .and_then(|k| k.value.as_deref())
-        .and_then(|v| serde_json::from_str(v).ok())
-        .unwrap_or_default();
     let col = &raw["columns"][&geo.primary_column];
     check_crs(&col["crs"], col.get("crs").is_some())?;
     let file_bbox = gm.file_bbox(None).ok().flatten().filter(|b| b.len() >= 4).map(|b| [b[0], b[1], b[2], b[3]]);
@@ -844,7 +853,10 @@ mod tests {
         assert_eq!(f.as_array().unwrap().len(), 2);
         assert_eq!(f[1]["geometry"], json!({"type": "Point", "coordinates": [2.29, 48.86]}));
         assert_eq!(f[1]["properties"], json!({"name": "Tour", "height": 330.0}));
-        // Lon/lat by EPSG code is fine; a projected crs is refused by name.
+        // Lon/lat by EPSG code is fine (also as a PROJJSON string, as before GeoParquet 1.0);
+        // a projected crs is refused by name.
+        assert!(check_crs(&json!(r#"{"name": "WGS 84", "id": {"authority": "EPSG", "code": 4326}}"#), true).is_ok());
+        assert!(check_crs(&json!(r#"{"name": "NAD83 / UTM 18N", "id": {"authority": "EPSG", "code": 26918}}"#), true).is_err());
         let epsg = r#"{"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": {"encoding": "WKB", "geometry_types": [], "crs": {"id": {"authority": "EPSG", "code": 4326}}}}}"#;
         assert!(to_geojson(&sample(epsg)).is_ok());
         let utm = r#"{"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": {"encoding": "WKB", "geometry_types": [], "crs": {"name": "WGS 84 / UTM zone 18N", "id": {"authority": "EPSG", "code": 32618}}}}}"#;
