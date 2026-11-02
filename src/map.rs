@@ -1046,10 +1046,22 @@ impl Map {
     /// [`RasterSource::min_zoom`], so no tiles are requested): each one's name and the zoom it
     /// starts at, for telling the user to zoom in.
     pub fn rasters_below_min_zoom(&self, cam: &Camera) -> Vec<(String, u8)> {
+        // Only sources a layer shows at this zoom: a layer that starts at a higher zoom
+        // (NAIP over Sentinel-2) is simply not on yet.
+        let shown: HashSet<&str> = self
+            .layers
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Style(l) if l.shown_at(cam.zoom) => l.source.as_deref(),
+                _ => None,
+            })
+            .collect();
         self.sources
             .iter()
-            .filter_map(|(_, s)| match s {
-                MapSource::Raster(r) if self.raster_zoom(&r.src, cam) < r.src.min_zoom => Some((r.src.name.clone(), r.src.min_zoom)),
+            .filter_map(|(id, s)| match s {
+                MapSource::Raster(r) if shown.contains(id.as_str()) && self.raster_zoom(&r.src, cam) < r.src.min_zoom => {
+                    Some((r.src.name.clone(), r.src.min_zoom))
+                }
                 _ => None,
             })
             .collect()
@@ -2593,6 +2605,22 @@ mod tests {
         map.view(&cam).render(area, &mut buf);
         let f = map.take_pixels().unwrap();
         assert!(!f.new.is_empty() && !f.new.iter().any(red), "redrawn without the highlight");
+    }
+
+    #[test]
+    fn zoom_in_hints_only_for_shown_layers() {
+        // Sentinel-2 always on (its tiles from zoom 9) with NAIP over it from 12: NAIP's layer
+        // isn't on below 12, so only Sentinel-2 asks to zoom in, and only below 9.
+        let mut map = Map::new();
+        for (id, name, min) in [("s2", "sentinel2", 0.0), ("naip", "naip", 12.0)] {
+            let src = crate::raster::RasterSource::from_preset(crate::raster::preset(name).unwrap(), None).unwrap();
+            map.add_source(id, MapSource::raster(Arc::new(src))).unwrap();
+            map.add_layer(StyleLayer::raster(id, id).min_zoom(min)).unwrap();
+        }
+        let names = |z: f64| map.rasters_below_min_zoom(&Camera::new(0.0, 0.0, z)).into_iter().map(|(n, _)| n).collect::<Vec<_>>();
+        assert_eq!(names(5.0), vec!["sentinel2"]);
+        assert!(names(10.0).is_empty(), "{:?}", names(10.0));
+        assert!(names(16.0).is_empty());
     }
 
     #[test]

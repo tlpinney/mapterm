@@ -279,6 +279,42 @@ pub const PRESETS: &[Preset] = &[
 /// Google Map Tiles API 2D tiles. `{session}` comes from [`RasterSource::start_session`].
 const GOOGLE_2D: &str = "https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session={session}&key={key}";
 
+/// Imagery from several providers by zoom (`--raster planetary`), drawn bottom to top.
+#[derive(Clone, Copy, Debug)]
+pub struct Stack {
+    /// The name used with `--raster`.
+    pub name: &'static str,
+    /// What it is.
+    pub about: &'static str,
+    /// Its layers, bottom first.
+    pub layers: &'static [StackLayer],
+}
+
+/// One provider in a [`Stack`].
+#[derive(Clone, Copy, Debug)]
+pub struct StackLayer {
+    /// The provider ([`preset`]).
+    pub preset: &'static str,
+    /// The layer shows from this zoom on (0: always; the provider's own lowest zoom still
+    /// applies, and the viewer says to zoom in below it).
+    pub min_zoom: u8,
+    /// Fetch tiles up to this zoom at most, scaled up past it (coarse imagery gains
+    /// nothing from finer tiles).
+    pub max_zoom: Option<u8>,
+}
+
+/// The stacks `--raster` knows.
+pub const STACKS: &[Stack] = &[Stack {
+    name: "planetary",
+    about: "Microsoft Planetary Computer, free: Sentinel-2 (global, ~10 m) from zoom 9, with NAIP aerial photos (US, ~60 cm) on top from zoom 12; Sentinel-2 shows where NAIP has none",
+    layers: &[StackLayer { preset: "sentinel2", min_zoom: 0, max_zoom: Some(14) }, StackLayer { preset: "naip", min_zoom: 12, max_zoom: None }],
+}];
+
+/// A stack by name (any case).
+pub fn stack(name: &str) -> Option<&'static Stack> {
+    STACKS.iter().find(|s| s.name.eq_ignore_ascii_case(name))
+}
+
 /// A provider by name (any case).
 pub fn preset(name: &str) -> Option<&'static Preset> {
     PRESETS.iter().find(|p| p.name.eq_ignore_ascii_case(name) || (name.eq_ignore_ascii_case("maxar") && p.name == "vantor"))
@@ -927,6 +963,18 @@ mod tests {
         s.set_param("session", "SESS");
         assert_eq!(s.fill_key(&s.url(3, 2, 1)), "https://tile.googleapis.com/v1/2dtiles/3/2/1?session=SESS&key=k3y-123");
         assert!(!RasterSource::from_preset(preset("osm").unwrap(), None).unwrap().is_google());
+    }
+
+    #[test]
+    fn stacks_name_real_providers() {
+        let st = stack("Planetary").unwrap();
+        assert_eq!(st.layers.iter().map(|l| (l.preset, l.min_zoom)).collect::<Vec<_>>(), vec![("sentinel2", 0), ("naip", 12)], "bottom first");
+        for st in STACKS {
+            assert!(preset(st.name).is_none(), "{}: a stack can't share a provider's name", st.name);
+            for l in st.layers {
+                assert!(preset(l.preset).is_some(), "{}: no provider {}", st.name, l.preset);
+            }
+        }
     }
 
     #[test]
