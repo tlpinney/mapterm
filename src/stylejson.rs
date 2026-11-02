@@ -189,6 +189,28 @@ impl Map {
 /// Open a style's raster source: `tiles` templates, a TileJSON `url`, or `pmtiles://`.
 async fn open_raster(s: &Json) -> Result<crate::raster::RasterSource> {
     use crate::raster::RasterSource;
+    // A built-in provider by name (`--raster-list`): `{"type": "raster", "mapterm:raster":
+    // "naip"}`, with its key from the provider's environment variable.
+    if let Some(name) = s["mapterm:raster"].as_str() {
+        let p = crate::raster::preset(name).with_context(|| format!("\"mapterm:raster\": {name}: not a provider name (see mapterm --raster-list)"))?;
+        let mut key = crate::raster::find_key(None, p.key_env)?;
+        if key.is_none() && p.name == "mapbox" {
+            key = crate::mapbox::access_token();
+        }
+        let mut src = RasterSource::from_preset(p, key)?;
+        if let Some(z) = s["maxzoom"].as_u64() {
+            src.max_zoom = src.max_zoom.min(z.min(30) as u8);
+        }
+        if let Some(a) = s["attribution"].as_str() {
+            src.attribution = a.to_string();
+        }
+        src.start_session().await?;
+        let missing = src.missing_params();
+        if !missing.is_empty() {
+            bail!("\"mapterm:raster\": {name} needs {}", missing.join(", "));
+        }
+        return Ok(src);
+    }
     let max_zoom = s["maxzoom"].as_u64().unwrap_or(22).min(30) as u8;
     let tms = s["scheme"].as_str() == Some("tms");
     let mut src = match (s["url"].as_str(), s["tiles"].get(0).and_then(Json::as_str)) {
@@ -466,6 +488,24 @@ mod tests {
         assert_eq!(style_location("liberty"), "https://tiles.openfreemap.org/styles/liberty");
         assert_eq!(style_location("./mine.json"), "./mine.json");
         assert_eq!(style_location("https://x/style.json"), "https://x/style.json");
+    }
+
+    #[tokio::test]
+    async fn raster_providers_by_name() {
+        // `mapterm:raster` names a built-in provider; `maxzoom` caps it. (OSM needs no
+        // session, so this stays offline.)
+        let style = json!({"version": 8, "sources": {"o": {"type": "raster", "mapterm:raster": "osm", "maxzoom": 12}},
+            "layers": [{"id": "o", "type": "raster", "source": "o", "minzoom": 3}]});
+        let map = Map::from_style_json(&style).await.unwrap();
+        let Some(MapSource::Raster(r)) = map.source("o") else { panic!("o") };
+        assert_eq!(r.src.max_zoom, 12);
+        assert!(r.src.attribution.contains("OpenStreetMap"));
+        let bad = json!({"version": 8, "sources": {"x": {"type": "raster", "mapterm:raster": "nope"}}, "layers": []});
+        let err = match Map::from_style_json(&bad).await {
+            Err(e) => format!("{e:#}"),
+            Ok(m) => m.warnings().join(" "),
+        };
+        assert!(err.contains("not a provider name"), "{err}");
     }
 
     #[tokio::test]

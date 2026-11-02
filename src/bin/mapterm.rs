@@ -45,7 +45,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 names from a `name` property; inspect shows properties)
   --at          start position (default: fit the GeoJSON layers, else the source's center)
   -z            start zoom
-  --raster      an image tile layer under the vector map: a provider name (--raster-list),
+  --raster      an image tile layer under the vector map: a provider or stack name
+                (--raster-list; `planetary` is Sentinel-2 with NAIP on top when zoomed in),
                 a URL with {z}/{x}/{y} ({-y} or --tms for TMS rows, {key} for an API key),
                 or a .pmtiles file or URL of PNG/JPEG/WebP tiles;
                 real images with kitty graphics (Ghostty, kitty, WezTerm, herdr), cell colors
@@ -195,6 +196,18 @@ fn args() -> Result<Args> {
                     let key = if p.key_env.is_empty() { "no key".to_string() } else { format!("key: {}", p.key_env.join(" or ")) };
                     println!("  {:<w$} {}\n  {:<w$} {key}", p.name, p.about, "");
                 }
+                println!("\nstacks (several providers by zoom):\n");
+                for st in mapterm::raster::STACKS {
+                    // From the later of the layer's zoom and the provider's own lowest.
+                    let from = |l: &mapterm::raster::StackLayer| {
+                        let own = mapterm::raster::preset(l.preset)
+                            .and_then(|p| mapterm::raster::RasterSource::from_preset(p, Some(String::new())).ok())
+                            .map_or(0, |r| r.min_zoom);
+                        l.min_zoom.max(own)
+                    };
+                    let parts: Vec<String> = st.layers.iter().map(|l| format!("{} from zoom {}", l.preset, from(l))).collect();
+                    println!("  {:<w$} {}\n  {:<w$} {}", st.name, st.about, "", parts.join(", then "));
+                }
                 println!("\nKeys can also come from --raster-key-cmd, a command that prints the key (e.g. a password manager's CLI).");
                 std::process::exit(0);
             }
@@ -258,6 +271,11 @@ const RASTER: &str = "mapterm-raster";
 const VECTOR_SLOTS: usize = 6;
 /// Imagery downloads at once: tile servers like OSM's ask for at most two connections.
 const RASTER_SLOTS: usize = 2;
+
+/// Whether a layer is the imagery under the map (`RASTER`, or a lower layer of a stack).
+fn is_imagery(id: &str) -> bool {
+    id == RASTER || id.strip_prefix(RASTER).is_some_and(|r| r.starts_with('-'))
+}
 const OVERLAYS: &str = "mapterm-overlays";
 
 /// Debug log for troubleshooting (MAPTERM_LOG=path); a no-op unless set.
@@ -596,6 +614,32 @@ async fn main() -> Result<()> {
 
     // Optional raster layer under the vector map.
     let raster = match &a.raster {
+        // Several providers by zoom (`planetary`): each its own source and layer, bottom
+        // first; the top one is "the" imagery for the status bar.
+        Some(spec) if let Some(st) = mapterm::raster::stack(spec) => {
+            let bottom = map.layer_ids().first().map(|s| s.to_string());
+            let mut layers = Vec::new();
+            let mut top = None;
+            for (i, sl) in st.layers.iter().enumerate() {
+                let p = mapterm::raster::preset(sl.preset).context("stack names an unknown provider")?;
+                let key = mapterm::raster::find_key(a.raster_key_cmd.as_deref(), p.key_env)?;
+                let mut r = mapterm::raster::RasterSource::from_preset(p, key)?;
+                if let Some(z) = sl.max_zoom {
+                    r.max_zoom = r.max_zoom.min(z);
+                }
+                r.start_session().await?;
+                if let Some(c) = a.raster_cache {
+                    r.cache = c;
+                }
+                let id = if i + 1 == st.layers.len() { RASTER.to_string() } else { format!("{RASTER}-{i}") };
+                let r = Arc::new(r);
+                map.add_source(&id, MapSource::raster(r.clone()))?;
+                layers.push(StyleLayer::raster(&id, &id).min_zoom(sl.min_zoom as f64));
+                top = Some(r);
+            }
+            map.add_layers(layers, bottom.as_deref())?;
+            top
+        }
         Some(spec) => {
             let mut r = match mapterm::raster::preset(spec) {
                 None if spec.ends_with(".pmtiles") => mapterm::raster::RasterSource::from_pmtiles(spec).await?,
@@ -1250,7 +1294,7 @@ async fn main() -> Result<()> {
                                 }
                                 basemap_sources = new.sources().map(|(id, _)| id.to_string()).collect();
                                 let warnings = new.warnings().len();
-                                let before = map.layer_ids().into_iter().find(|id| *id != RASTER).map(str::to_string);
+                                let before = map.layer_ids().into_iter().find(|id| !is_imagery(id)).map(str::to_string);
                                 basemap_ids = map.add_map(new, before.as_deref())?;
                                 base = base_visibility(&map);
                                 apply_toggles(&mut map, &base, labels, vector, raster.is_some());
@@ -1438,7 +1482,7 @@ async fn main() -> Result<()> {
                                             let (layers, _) = stylejson::style_layers(&stylejson::terminal_style(schema, !dark))?;
                                             let ids: Vec<&str> = basemap_ids.iter().map(String::as_str).collect();
                                             map.remove_layers(&ids);
-                                            let before = map.layer_ids().into_iter().find(|id| *id != RASTER).map(str::to_string);
+                                            let before = map.layer_ids().into_iter().find(|id| !is_imagery(id)).map(str::to_string);
                                             basemap_ids = layers.iter().map(|l| l.id.clone()).collect();
                                             map.add_layers(layers, before.as_deref())?;
                                             base = base_visibility(&map);
