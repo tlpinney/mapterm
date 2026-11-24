@@ -36,16 +36,14 @@ pub fn style_location(spec: &str) -> String {
 pub async fn read_style(spec: &str) -> Result<Json> {
     if crate::mapbox::is_mapbox_url(spec) {
         let url = crate::mapbox::resolve(spec)?;
-        let bytes = crate::source::get_with(crate::source::keyed_client(), &url, None, &[])
-            .await
-            .map_err(crate::mapbox::redact)?
-            .with_context(|| format!("{spec}: not found"))?;
+        let bytes =
+            crate::source::get_doc(crate::source::keyed_client(), &url).await.map_err(crate::mapbox::redact)?.with_context(|| format!("{spec}: not found"))?;
         return serde_json::from_slice(&bytes).with_context(|| format!("{spec}: not a JSON style"));
     }
     let loc = style_location(spec);
     let bytes = if loc.starts_with("http://") || loc.starts_with("https://") {
         let http = crate::source::http_client();
-        crate::source::get_with(&http, &loc, None, &[]).await?.with_context(|| format!("{loc}: not found"))?
+        crate::source::get_doc(&http, &loc).await?.with_context(|| format!("{loc}: not found"))?
     } else {
         let len = std::fs::metadata(&loc).with_context(|| format!("reading {loc}"))?.len();
         if len as usize > MAX_STYLE_BYTES {
@@ -220,7 +218,7 @@ async fn open_raster(s: &Json) -> Result<crate::raster::RasterSource> {
         }
         (Some(url), None) => {
             let http = crate::source::http_client();
-            let bytes = crate::source::get_with(&http, url, None, &[]).await?.with_context(|| format!("{url}: not found"))?;
+            let bytes = crate::source::get_doc(&http, url).await?.with_context(|| format!("{url}: not found"))?;
             let tj: Json = serde_json::from_slice(&bytes).with_context(|| format!("{url}: not TileJSON"))?;
             let t = tj["tiles"].get(0).and_then(Json::as_str).with_context(|| format!("{url}: no tiles"))?;
             let tms = tms || tj["scheme"].as_str() == Some("tms");

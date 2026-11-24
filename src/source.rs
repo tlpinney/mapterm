@@ -93,6 +93,42 @@ fn decompress(b: Vec<u8>, compression: u8) -> Result<Vec<u8>> {
     }
 }
 
+/// A small document fetched at start (a style, a TileJSON), kept in the document cache:
+/// used as is for a day ([`crate::tilecache::DOC_FRESH`]), then asked for again with
+/// `If-None-Match` (a 304 keeps the copy); if the server can't be reached, the last copy is
+/// used, so a known map still opens offline.
+pub(crate) async fn get_doc(http: &reqwest::Client, url: &str) -> Result<Option<Vec<u8>>> {
+    get_doc_in(crate::tilecache::DocCache::at(&cache_root()), http, url).await
+}
+
+/// [`get_doc`] with a given cache (or none).
+pub(crate) async fn get_doc_in(cache: Option<&crate::tilecache::DocCache>, http: &reqwest::Client, url: &str) -> Result<Option<Vec<u8>>> {
+    let cached = cache.and_then(|c| c.get(url));
+    if let Some(d) = &cached
+        && d.age < crate::tilecache::DOC_FRESH
+    {
+        return Ok(Some(d.data.clone()));
+    }
+    let r = match get_revalidated(http, url, &[], cached.as_ref().and_then(|d| d.etag.as_deref())).await {
+        Ok(r) => r,
+        Err(e) => return cached.map(|d| Some(d.data)).ok_or(e),
+    };
+    if r.not_modified {
+        let Some(d) = cached else { bail!("{url}: HTTP 304 without a cached copy") };
+        if let Some(c) = cache {
+            c.put(url, &d.data, r.etag.as_deref().or(d.etag.as_deref()));
+        }
+        return Ok(Some(d.data));
+    }
+    if let Some(c) = cache {
+        match &r.bytes {
+            Some(b) if !r.policy.no_store => c.put(url, b, r.etag.as_deref()),
+            _ => c.forget(url),
+        }
+    }
+    Ok(r.bytes)
+}
+
 pub(crate) async fn get(http: &reqwest::Client, url: &str, range: Option<(u64, u64)>) -> Result<Option<Vec<u8>>> {
     get_with(http, url, range, &[]).await
 }
@@ -398,7 +434,7 @@ impl Source {
         if !is_http {
             bail!("{spec}: expected a .pmtiles or .mbtiles file, an XYZ URL with {{z}}/{{x}}/{{y}}, or a TileJSON URL");
         }
-        let body = get(&http, spec, None).await?.ok_or_else(|| anyhow!("{spec}: not found"))?;
+        let body = get_doc(&http, spec).await?.ok_or_else(|| anyhow!("{spec}: not found"))?;
         let tj: serde_json::Value = serde_json::from_slice(&body).with_context(|| format!("{spec}: not TileJSON"))?;
         let template = tj["tiles"][0].as_str().ok_or_else(|| anyhow!("{spec}: TileJSON has no tiles URL"))?;
         if !template.starts_with("https://") && !template.starts_with("http://") {
@@ -571,6 +607,73 @@ pub(crate) async fn fetch_by_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// A local server for one document with ETag `"v1"`: 304 when asked with that tag, and
+    /// while `down` is set, closes connections without answering. Counts requests.
+    async fn doc_server(body: &'static str, no_store: bool) -> (String, Arc<AtomicUsize>, Arc<AtomicBool>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/style.json", l.local_addr().unwrap());
+        let (hits, down) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicBool::new(false)));
+        let (h, d) = (hits.clone(), down.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = l.accept().await else { return };
+                let mut buf = vec![0u8; 4096];
+                let n = c.read(&mut buf).await.unwrap_or(0);
+                if d.load(Ordering::SeqCst) {
+                    continue;
+                }
+                h.fetch_add(1, Ordering::SeqCst);
+                let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                let cc = if no_store { "Cache-Control: no-store\r\n" } else { "" };
+                let reply = if req.contains("if-none-match: \"v1\"") {
+                    "HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n".to_string()
+                } else {
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"v1\"\r\n{cc}Connection: close\r\n\r\n{body}", body.len())
+                };
+                let _ = c.write_all(reply.as_bytes()).await;
+            }
+        });
+        (url, hits, down)
+    }
+
+    #[tokio::test]
+    async fn documents_are_cached_revalidated_and_used_offline() {
+        let path = std::env::temp_dir().join(format!("mapterm-docs-{}.sqlite", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let cache = crate::tilecache::DocCache::open(&path).unwrap();
+        let http = reqwest::Client::new();
+        let style = &b"{\"version\":8}"[..];
+        let (url, hits, down) = doc_server("{\"version\":8}", false).await;
+        assert_eq!(get_doc_in(Some(&cache), &http, &url).await.unwrap().as_deref(), Some(style));
+        assert_eq!(get_doc_in(Some(&cache), &http, &url).await.unwrap().as_deref(), Some(style));
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "the second start uses the copy without asking");
+        // A day later: asked again with the ETag; the 304 keeps the copy and restarts the day.
+        cache.age_by(&url, crate::tilecache::DOC_FRESH + 1);
+        assert_eq!(get_doc_in(Some(&cache), &http, &url).await.unwrap().as_deref(), Some(style));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+        assert!(cache.get(&url).unwrap().age < 60, "confirmed unchanged: fresh again");
+        // Stale and the server is down: the last copy, so a known map opens offline.
+        cache.age_by(&url, crate::tilecache::DOC_FRESH + 1);
+        down.store(true, Ordering::SeqCst);
+        assert_eq!(get_doc_in(Some(&cache), &http, &url).await.unwrap().as_deref(), Some(style));
+        // A document the server says not to store isn't kept.
+        let (url2, hits2, _) = doc_server("{}", true).await;
+        assert!(get_doc_in(Some(&cache), &http, &url2).await.unwrap().is_some());
+        assert!(get_doc_in(Some(&cache), &http, &url2).await.unwrap().is_some());
+        assert_eq!(hits2.load(Ordering::SeqCst), 2, "no-store: fetched every time");
+        assert!(cache.get(&url2).is_none());
+        // Keys are hashes: the URL (and any token in it) isn't stored.
+        drop(cache);
+        let raw = std::fs::read(&path).unwrap();
+        assert!(!raw.windows(10).any(|w| w == b"style.json"));
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+    }
 
     #[test]
     fn entries_outside_their_section_are_refused() {

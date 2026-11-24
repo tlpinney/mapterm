@@ -2,7 +2,7 @@
 //! limits) and `--cache-clear` (empty one or all).
 //!
 //! Map tiles and imagery are SQLite (MBTiles) files, one per source; GeoParquet ranges one
-//! SQLite file (see [`crate::tilecache`]). Microsoft building pieces and STAC indexes are
+//! SQLite file and fetched styles and TileJSON another (see [`crate::tilecache`]). Microsoft building pieces and STAC indexes are
 //! plain files. `old` is what earlier versions left (a file per tile), no longer read.
 
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ pub struct Cache {
 }
 
 /// The cache names, in report order.
-pub const NAMES: [&str; 6] = ["tiles", "imagery", "geoparquet", "buildings", "stac", "old"];
+pub const NAMES: [&str; 7] = ["tiles", "imagery", "geoparquet", "docs", "buildings", "stac", "old"];
 
 /// Folders under the root that belong to a named cache (anything else there is old).
 const KNOWN: [&str; 3] = ["raster", "msbuildings", "stac"];
@@ -44,6 +44,7 @@ pub fn caches_in(root: &Path) -> Vec<Cache> {
                 "tiles" => ("map tiles, an MBTiles file per source", size(crate::tilecache::tile_limit())),
                 "imagery" => ("imagery tiles (--raster), an MBTiles file per source", size(crate::tilecache::imagery_limit())),
                 "geoparquet" => ("parts of remote GeoParquet files already read", size(crate::geoparquet::cache_limit())),
+                "docs" => ("styles and TileJSON, so a known map opens fast and offline", "re-checked after a day".to_string()),
                 "buildings" => ("Microsoft building tiles, split into pieces", size(crate::msbuildings::cache_limit())),
                 "stac" => ("STAC collection indexes (which file covers where)", "re-read after 7 days".to_string()),
                 _ => ("left by earlier versions (a file per tile), no longer read", "none: clear it".to_string()),
@@ -85,6 +86,10 @@ fn paths_of(root: &Path, name: &str) -> Vec<PathBuf> {
         "geoparquet" => entries(root)
             .into_iter()
             .filter(|p| p.is_file() && is_db(p, "sqlite") && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("geoparquet.")))
+            .collect(),
+        "docs" => entries(root)
+            .into_iter()
+            .filter(|p| p.is_file() && is_db(p, "sqlite") && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("docs.")))
             .collect(),
         "buildings" => dir("msbuildings"),
         "stac" => dir("stac"),
@@ -179,20 +184,21 @@ mod tests {
         w("1e77e06f15af9955.mbtiles-wal", 50);
         w("raster/abc.mbtiles", 400);
         w("geoparquet.sqlite", 10);
+        w("docs.sqlite", 3);
         w("stac/x.json", 7);
         w("2ebdc32559b3691b/14/1/2.mvt", 30);
         w("raster/def/1/2/3.img", 20);
         let c = caches_in(&root);
         let by = |n: &str| c.iter().find(|x| x.name == n).unwrap().clone();
         assert_eq!((by("tiles").bytes, by("tiles").files), (150, 2));
-        assert_eq!((by("imagery").bytes, by("geoparquet").bytes, by("stac").bytes, by("buildings").bytes), (400, 10, 7, 0));
+        assert_eq!((by("imagery").bytes, by("geoparquet").bytes, by("stac").bytes, by("buildings").bytes, by("docs").bytes), (400, 10, 7, 0, 3));
         assert_eq!((by("old").bytes, by("old").files), (50, 2), "the file-per-tile folders of earlier versions");
         assert_eq!(clear_in(&root, "old").unwrap(), 50);
         assert!(root.join("1e77e06f15af9955.mbtiles").exists() && root.join("raster/abc.mbtiles").exists(), "only the old folders went");
         assert!(!caches_in(&root).iter().any(|c| c.name == "old"), "nothing old left: not listed");
         assert_eq!(clear_in(&root, "tiles").unwrap(), 150);
         assert!(clear_in(&root, "nope").is_err());
-        assert_eq!(clear_in(&root, "all").unwrap(), 417);
+        assert_eq!(clear_in(&root, "all").unwrap(), 420);
         let left: Vec<_> = entries(&root).into_iter().filter(|p| p.is_file()).collect();
         assert!(left.is_empty(), "{left:?}");
         for d in ["raster", "stac"] {

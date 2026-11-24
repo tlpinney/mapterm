@@ -12,7 +12,12 @@ All notable changes to mapterm are listed here. The format follows
   `--raster ortho.mbtiles` for image MBTiles (png, jpg, webp), with the name, zoom range,
   center or bounds, and attribution from the `metadata` table; rows are flipped from TMS.
   Local files, read-only (`mapterm::mbtiles`; SQLite via `rusqlite`, bundled).
-- `mapterm --cache` lists the disk caches (tiles, imagery, geoparquet, buildings, stac) with
+- Styles and TileJSON are cached in `~/.cache/mapterm/docs.sqlite`: used for a day without
+  asking (whatever shorter cache time the server gives), then checked with `If-None-Match`;
+  if the server can't be reached the last copy is used, so a known map opens offline.
+  Not kept when the server says `no-store`; keyed by a hash of the URL (Mapbox URLs carry
+  tokens). A warm start of the liberty style takes ~0.06 s, from ~0.3 s.
+- `mapterm --cache` lists the disk caches (tiles, imagery, geoparquet, docs, buildings, stac) with
   sizes, file counts and limits; `--cache-clear NAME|all` empties one or all (only inside
   `~/.cache/mapterm`, never following links; `mapterm::cache`).
 - A STAC collection read within the week is opened from its saved index, without asking

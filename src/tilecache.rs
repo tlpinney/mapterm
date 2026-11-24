@@ -244,6 +244,68 @@ fn trim_dbs(files: &[PathBuf], table: &str, limit: u64, delete: impl Fn(&Connect
     Ok(freed)
 }
 
+// ---- documents (styles, TileJSON) ----
+
+/// How long a cached document is used without asking its server (styles and TileJSON
+/// change rarely; this overrides shorter server cache times).
+pub(crate) const DOC_FRESH: u64 = 24 * 3600;
+
+/// Small documents fetched at start (styles, TileJSON) in `docs.sqlite`, keyed by a hash
+/// of the URL (URLs can carry access tokens).
+pub(crate) struct DocCache {
+    conn: Mutex<Connection>,
+}
+
+/// The cached copy of a document.
+pub(crate) struct Doc {
+    pub data: Vec<u8>,
+    /// Seconds since it was fetched or last confirmed unchanged.
+    pub age: u64,
+    pub etag: Option<String>,
+}
+
+impl DocCache {
+    /// The document cache under `root` (one connection per process).
+    pub(crate) fn at(root: &Path) -> Option<&'static DocCache> {
+        static OPEN: OnceLock<Option<DocCache>> = OnceLock::new();
+        OPEN.get_or_init(|| DocCache::open(&root.join("docs.sqlite"))).as_ref()
+    }
+
+    /// Open (creating) the document cache at `path`.
+    pub(crate) fn open(path: &Path) -> Option<DocCache> {
+        let c = connect(path).ok()?;
+        c.execute_batch("CREATE TABLE IF NOT EXISTS docs (key TEXT PRIMARY KEY, data BLOB, fetched INTEGER, etag TEXT) WITHOUT ROWID;").ok()?;
+        Some(DocCache { conn: Mutex::new(c) })
+    }
+
+    /// Make the copy of `url` look `secs` older (tests).
+    #[cfg(test)]
+    pub(crate) fn age_by(&self, url: &str, secs: u64) {
+        let c = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        c.execute("UPDATE docs SET fetched = fetched - ?2 WHERE key = ?1", params![crate::source::hash(url), secs as i64]).unwrap();
+    }
+
+    pub(crate) fn get(&self, url: &str) -> Option<Doc> {
+        let c = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let (data, fetched, etag): (Vec<u8>, i64, Option<String>) = c
+            .query_row("SELECT data, fetched, etag FROM docs WHERE key = ?1", [crate::source::hash(url)], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .optional()
+            .ok()
+            .flatten()?;
+        Some(Doc { data, age: now().saturating_sub(fetched.max(0) as u64), etag })
+    }
+
+    pub(crate) fn put(&self, url: &str, data: &[u8], etag: Option<&str>) {
+        let c = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = c.execute("INSERT OR REPLACE INTO docs VALUES (?1, ?2, ?3, ?4)", params![crate::source::hash(url), data, now() as i64, etag]);
+    }
+
+    pub(crate) fn forget(&self, url: &str) {
+        let c = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = c.execute("DELETE FROM docs WHERE key = ?1", [crate::source::hash(url)]);
+    }
+}
+
 // ---- GeoParquet ranges ----
 
 /// The ranges read from remote GeoParquet files: one SQLite file.
