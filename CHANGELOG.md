@@ -6,6 +6,14 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `microsoft-buildings` follows Microsoft's newest release by itself: the
+  `dataset-links.csv` with the latest date linked from their README, checked once a day,
+  falling back to the last found and then a built-in one (`msbuildings::latest`). Each
+  release's index is kept on disk, so later starts don't download its 6 MB again
+  (3.7 s -> 0.2 s to open).
+
 ### Fixed
 
 - Pixel mode (`MAPTERM_PIXELS=1`) now redraws after `Map::set_data`, `set_paint`,

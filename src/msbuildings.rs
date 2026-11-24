@@ -16,9 +16,86 @@ use serde_json::{Value as Json, json};
 
 use crate::geoparquet::Bbox;
 
-/// The current release's index (Microsoft moves it with each refresh; the README's list of
-/// updates links the newest).
+/// A known release's index, used when the newest can't be found (Microsoft moves the index
+/// with each refresh; see [`latest`]).
 pub const LATEST: &str = "https://bfppub.blob.core.windows.net/$web/2026-08-13/dataset-links.csv";
+
+/// Microsoft's README, whose list of updates links each release's `dataset-links.csv`.
+pub const README: &str = "https://raw.githubusercontent.com/microsoft/GlobalMLBuildingFootprints/main/README.md";
+
+/// How long a found release is used before the README is read again.
+const LATEST_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
+/// The newest `dataset-links.csv` linked from the README text: the link with the latest
+/// date (YYYY-MM-DD) in its path.
+pub fn newest_link(readme: &str) -> Option<String> {
+    let mut best: Option<(String, String)> = None;
+    for (i, _) in readme.match_indices("https://") {
+        let rest = &readme[i..];
+        let end = rest.find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '"' | '\'' | '<' | '>')).unwrap_or(rest.len());
+        let url = &rest[..end];
+        if !url.ends_with("dataset-links.csv") {
+            continue;
+        }
+        let Some(date) = url
+            .split('/')
+            .find(|seg| seg.len() == 10 && seg.as_bytes()[4] == b'-' && seg.as_bytes()[7] == b'-' && seg.chars().filter(char::is_ascii_digit).count() == 8)
+        else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(d, _)| date > d.as_str()) {
+            best = Some((date.to_string(), url.to_string()));
+        }
+    }
+    best.map(|(_, u)| u)
+}
+
+/// The newest release's index URL: from Microsoft's README (read at most once a day; the
+/// answer is kept in the cache), else the last one found, else [`LATEST`].
+pub async fn latest() -> String {
+    let saved = crate::source::cache_root().join("msbuildings").join("latest.txt");
+    let fresh = std::fs::metadata(&saved).ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|a| a < LATEST_MAX_AGE);
+    let known = std::fs::read_to_string(&saved).ok().map(|s| s.trim().to_string()).filter(|s| s.starts_with("https://"));
+    if fresh && let Some(u) = &known {
+        return u.clone();
+    }
+    let found = async {
+        let r = crate::source::http_client().get(README).timeout(std::time::Duration::from_secs(8)).send().await.ok()?;
+        newest_link(&r.error_for_status().ok()?.text().await.ok()?)
+    }
+    .await;
+    match found {
+        Some(u) => {
+            if let Some(d) = saved.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            let _ = std::fs::write(&saved, &u);
+            u
+        }
+        None => known.unwrap_or_else(|| LATEST.to_string()),
+    }
+}
+
+/// A release's index (CSV). Each release has its own dated URL, so once fetched it's kept.
+pub async fn index(url: &str) -> Result<String> {
+    let path = crate::source::cache_root().join("msbuildings").join(format!("index-{}.csv", crate::source::hash(url)));
+    if let Ok(s) = std::fs::read_to_string(&path)
+        && parse_index(&s).is_ok()
+    {
+        return Ok(s);
+    }
+    let b = crate::geojson::fetch(url).await?.with_context(|| format!("{url}: not found"))?;
+    let s = String::from_utf8_lossy(&b).to_string();
+    parse_index(&s).with_context(|| url.to_string())?;
+    if let Some(d) = path.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let tmp = path.with_extension("part");
+    if std::fs::write(&tmp, &s).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+    Ok(s)
+}
 
 /// Pieces per tile side: zoom-9 tiles split at zoom 13.
 pub const SPLIT: u32 = 16;
@@ -128,9 +205,10 @@ pub fn is_spec(spec: &str) -> bool {
     spec.eq_ignore_ascii_case("microsoft-buildings") || spec.split(['?', '#']).next().unwrap_or(spec).ends_with("dataset-links.csv")
 }
 
-/// The index's URL for a spec ([`LATEST`] for `microsoft-buildings`).
-pub fn index_url(spec: &str) -> &str {
-    if spec.eq_ignore_ascii_case("microsoft-buildings") { LATEST } else { spec }
+/// The index's URL for a spec: the newest release for `microsoft-buildings` ([`latest`]),
+/// else the URL given.
+pub async fn index_url(spec: &str) -> String {
+    if spec.eq_ignore_ascii_case("microsoft-buildings") { latest().await } else { spec.to_string() }
 }
 
 /// Parse `dataset-links.csv` (Location,QuadKey,Url,Size,UploadDate).
@@ -271,6 +349,19 @@ pub fn read_piece(dir: &Path, piece: usize) -> Result<Vec<crate::geojson::Featur
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newest_release_from_the_readme() {
+        let md = "* 2026-08-13 - Refreshed. [dataset-links.csv](https://bfppub.blob.core.windows.net/%24web/2026-08-13/dataset-links.csv) updated.\n\
+                  * 2026-09-30 - Added. [dataset-links.csv](https://bfppub.blob.core.windows.net/%24web/2026-09-30/dataset-links.csv) updated.\n\
+                  * moved: https://minedbuildings.z5.web.core.windows.net/global-buildings/dataset-links.csv (no date)\n";
+        assert_eq!(
+            newest_link(md).as_deref(),
+            Some("https://bfppub.blob.core.windows.net/%24web/2026-09-30/dataset-links.csv"),
+            "the latest date, wherever it is"
+        );
+        assert_eq!(newest_link("no links here"), None);
+    }
 
     #[test]
     fn quadkeys() {

@@ -137,7 +137,9 @@ Overture's 257 GB. With `--bbox W,S,E,N` a layer is instead read once for that a
 
 `microsoft-buildings` is Microsoft's Global ML Building Footprints as Microsoft keeps
 them current (refreshed every few weeks, with height estimates; the Planetary
-Computer's copy stopped in 2023). They come as one gzipped file per ~78 km tile,
+Computer's copy stopped in 2023). It always uses the newest release: the one Microsoft's
+README links with the latest date, checked once a day (a release's `dataset-links.csv`
+URL also works). They come as one gzipped file per ~78 km tile,
 which can't be read in parts: the first view of a tile downloads it once (DC's is
 78 MB, about 15 s) and splits it into 256 pieces under `~/.cache/mapterm/msbuildings`,
 so later views there load in a second or two. Those tiles take at most 2 GB of disk

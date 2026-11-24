@@ -526,9 +526,9 @@ impl Dataset {
         let world = [-180.0, -90.0, 180.0, 90.0];
         let path = spec.split(['?', '#']).next().unwrap_or(spec).to_ascii_lowercase();
         if crate::msbuildings::is_spec(spec) {
-            let url = crate::msbuildings::index_url(spec);
-            let csv = crate::geojson::fetch(url).await?.with_context(|| format!("{url}: not found"))?;
-            let tiles = crate::msbuildings::parse_index(&String::from_utf8_lossy(&csv)).with_context(|| url.to_string())?;
+            let url = crate::msbuildings::index_url(spec).await;
+            let csv = crate::msbuildings::index(&url).await?;
+            let tiles = crate::msbuildings::parse_index(&csv).with_context(|| url.clone())?;
             let files = tiles
                 .into_iter()
                 .map(|t| {
