@@ -47,7 +47,7 @@ Docs, a tour and the full guide: [mapterm.com](https://mapterm.com)
 
 ## Install
 
-With Cargo (Rust 1.89 or newer, from [rustup.rs](https://rustup.rs)):
+With Cargo (Rust 1.95 or newer, from [rustup.rs](https://rustup.rs)):
 
 ```sh
 cargo install mapterm

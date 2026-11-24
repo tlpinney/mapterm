@@ -37,7 +37,7 @@ shasum -a 256 -c SHA256SUMS --ignore-missing
 tar xzf mapterm-$version-*.tar.gz
 \`\`\`
 
-Or build it with Cargo (Rust 1.89 or newer):
+Or build it with Cargo (Rust 1.95 or newer):
 
 \`\`\`sh
 cargo install --git https://github.com/tlpinney/mapterm --tag $tag
