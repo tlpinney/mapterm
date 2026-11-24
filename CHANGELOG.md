@@ -12,6 +12,10 @@ All notable changes to mapterm are listed here. The format follows
   `--raster ortho.mbtiles` for image MBTiles (png, jpg, webp), with the name, zoom range,
   center or bounds, and attribution from the `metadata` table; rows are flipped from TMS.
   Local files, read-only (`mapterm::mbtiles`; SQLite via `rusqlite`, bundled).
+- Style files can name local tiles: `"url": "mbtiles://city.mbtiles"` (vector or image,
+  as in MapLibre Native; `mbtiles:///abs/path` for an absolute path). Relative paths in a
+  local style, `pmtiles://` and bare paths included, are now read from the style file's
+  folder rather than the current one.
 - Styles and TileJSON are cached in `~/.cache/mapterm/docs.sqlite`: used for a day without
   asking (whatever shorter cache time the server gives), then checked with `If-None-Match`;
   if the server can't be reached the last copy is used, so a known map opens offline.

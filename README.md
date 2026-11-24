@@ -81,6 +81,12 @@ braille dots thick and dashed lines dotted; imagery opacity blends with the
 background in cell-color mode; blur, patterns and 3D are skipped. The
 built-in style shows points of interest from zoom 15, more as you zoom in.
 
+A style file can use local tiles: a source `"url"` of `mbtiles://city.mbtiles` or
+`pmtiles://city.pmtiles` (or a bare path) is read from the style file's folder, and
+`mbtiles:///abs/path.mbtiles` from anywhere, as in MapLibre Native. Vector files are map
+sources, image files raster sources. Point a style like liberty at a downloaded region
+and the whole map works offline. Styles from a URL can't name local files.
+
 ## Controls
 
 They follow the MapLibre GL / Mapbox GL defaults:

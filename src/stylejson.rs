@@ -54,17 +54,28 @@ pub async fn read_style(spec: &str) -> Result<Json> {
     serde_json::from_slice(&bytes).with_context(|| format!("{loc}: not a JSON style"))
 }
 
+/// A source URL as something [`Source::open`] takes: `pmtiles://` and `mbtiles://`
+/// prefixes dropped (`mbtiles:///abs/path`, `mbtiles://rel/path`, as in MapLibre Native),
+/// and a relative local path made relative to the style file's folder `base`.
+fn source_path(url: &str, base: Option<&std::path::Path>) -> String {
+    let u = url.strip_prefix("pmtiles://").or_else(|| url.strip_prefix("mbtiles://")).unwrap_or(url);
+    match base {
+        Some(dir) if !is_remote(u) && !u.contains("://") && std::path::Path::new(u).is_relative() => dir.join(u).to_string_lossy().into_owned(),
+        _ => u.to_string(),
+    }
+}
+
 fn is_remote(loc: &str) -> bool {
     loc.starts_with("http://") || loc.starts_with("https://") || crate::mapbox::is_mapbox_url(loc)
 }
 
 /// A style from the web may only point at the web: its sources can't read local files
-/// (`pmtiles:///path`, a bare path), which only the person running mapterm should name.
+/// (`pmtiles:///path`, `mbtiles://`, a bare path), which only the person running mapterm should name.
 pub fn remote_sources_only(doc: &Json) -> Result<()> {
     for (id, s) in doc["sources"].as_object().into_iter().flatten() {
         let urls = [&s["url"], &s["data"]].into_iter().chain(s["tiles"].as_array().into_iter().flatten());
         for u in urls.filter_map(Json::as_str) {
-            if !is_remote(u.strip_prefix("pmtiles://").unwrap_or(u)) {
+            if !is_remote(&source_path(u, None)) {
                 bail!("source \"{id}\": a style from a URL can't use the local file {u:?}");
             }
         }
@@ -98,10 +109,14 @@ impl Map {
             return Map::terminal(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles, dark);
         }
         let doc = read_style(spec).await?;
-        if is_remote(&style_location(spec)) {
+        let loc = style_location(spec);
+        if is_remote(&loc) {
             remote_sources_only(&doc)?;
+            return Map::from_style_json(&doc).await;
         }
-        Map::from_style_json(&doc).await
+        // A local style's relative tile files are next to it.
+        let base = std::path::Path::new(&loc).parent().map(std::path::Path::to_path_buf);
+        Map::from_style_doc(&doc, base.as_deref()).await
     }
 
     /// A map drawing `src` with the built-in terminal style for its schema.
@@ -114,12 +129,18 @@ impl Map {
 
     /// A map from a parsed style document. Vector sources that fail to open are errors;
     /// source types mapterm can't draw yet (raster, raster-dem, image, video) become warnings.
+    /// Relative file paths in it are taken from the current folder.
     pub async fn from_style_json(doc: &Json) -> Result<Map> {
+        Map::from_style_doc(doc, None).await
+    }
+
+    /// [`Map::from_style_json`] with relative file paths taken from `base`.
+    async fn from_style_doc(doc: &Json, base: Option<&std::path::Path>) -> Result<Map> {
         let mut map = Map::new();
         for (id, s) in doc["sources"].as_object().into_iter().flatten() {
             match s["type"].as_str() {
                 Some("vector") => {
-                    let src = open_vector(s).await.with_context(|| format!("source \"{id}\""))?;
+                    let src = open_vector(s, base).await.with_context(|| format!("source \"{id}\""))?;
                     let mut src = MapSource::Vector(src);
                     if let Some(p) = s["promoteId"].as_str() {
                         src = src.with_promote_id(p);
@@ -148,7 +169,7 @@ impl Map {
                     }
                     map.add_source(id, src)?;
                 }
-                Some("raster") => match open_raster(s).await {
+                Some("raster") => match open_raster(s, base).await {
                     Ok(r) => map.add_source(id, MapSource::raster(std::sync::Arc::new(r)))?,
                     Err(e) => map.warn(format!("source \"{id}\": {e:#}")),
                 },
@@ -184,8 +205,9 @@ impl Map {
     }
 }
 
-/// Open a style's raster source: `tiles` templates, a TileJSON `url`, or `pmtiles://`.
-async fn open_raster(s: &Json) -> Result<crate::raster::RasterSource> {
+/// Open a style's raster source: `tiles` templates, a TileJSON `url`, `pmtiles://` or
+/// `mbtiles://` (relative paths from `base`).
+async fn open_raster(s: &Json, base: Option<&std::path::Path>) -> Result<crate::raster::RasterSource> {
     use crate::raster::RasterSource;
     // A built-in provider by name (`--raster-list`): `{"type": "raster", "mapterm:raster":
     // "naip"}`, with its key from the provider's environment variable.
@@ -213,9 +235,8 @@ async fn open_raster(s: &Json) -> Result<crate::raster::RasterSource> {
     let tms = s["scheme"].as_str() == Some("tms");
     let mut src = match (s["url"].as_str(), s["tiles"].get(0).and_then(Json::as_str)) {
         (_, Some(t)) => RasterSource::new(t, tms, max_zoom)?,
-        (Some(url), None) if url.starts_with("pmtiles://") || url.ends_with(".pmtiles") => {
-            RasterSource::from_pmtiles(url.strip_prefix("pmtiles://").unwrap_or(url)).await?
-        }
+        (Some(url), None) if url.starts_with("pmtiles://") || url.ends_with(".pmtiles") => RasterSource::from_pmtiles(&source_path(url, base)).await?,
+        (Some(url), None) if url.starts_with("mbtiles://") || crate::mbtiles::is_mbtiles(url) => RasterSource::from_mbtiles(&source_path(url, base))?,
         (Some(url), None) => {
             let http = crate::source::http_client();
             let bytes = crate::source::get_doc(&http, url).await?.with_context(|| format!("{url}: not found"))?;
@@ -234,10 +255,11 @@ async fn open_raster(s: &Json) -> Result<crate::raster::RasterSource> {
     Ok(src)
 }
 
-/// Open a style's vector source: TileJSON `url`, `tiles` templates, or `pmtiles://` URLs.
-async fn open_vector(s: &Json) -> Result<crate::map::VectorSource> {
+/// Open a style's vector source: TileJSON `url`, `tiles` templates, or `pmtiles://` and
+/// `mbtiles://` URLs (relative paths from `base`).
+async fn open_vector(s: &Json, base: Option<&std::path::Path>) -> Result<crate::map::VectorSource> {
     let spec = match (s["url"].as_str(), s["tiles"].get(0).and_then(Json::as_str)) {
-        (Some(url), _) => url.strip_prefix("pmtiles://").unwrap_or(url).to_string(),
+        (Some(url), _) => source_path(url, base),
         (None, Some(t)) => t.to_string(),
         _ => bail!("vector source without \"url\" or \"tiles\""),
     };
@@ -556,6 +578,46 @@ mod tests {
         assert!(format!("{:#}", mapbox.err().expect("an error")).contains("mapbox://"));
         let missing = read_style("/nonexistent/style.json").await;
         assert!(missing.is_err());
+    }
+
+    #[tokio::test]
+    async fn mbtiles_sources_next_to_the_style() {
+        // A style in a folder with its MBTiles files, named relative to it (as MapLibre
+        // Native's mbtiles://), opened from elsewhere: vector as a source, image as raster.
+        let dir = std::env::temp_dir().join(format!("mapterm-style-mbt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mvt = crate::mvt::tests_support::square_tile_with_id("water", 4096, Some(1));
+        let v = crate::mbtiles::tests::write("pbf", &[((0, 0, 0), mvt)], &[("name", "Squares")]);
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let r = crate::mbtiles::tests::write("png", &[((0, 0, 0), png)], &[]);
+        std::fs::rename(&v, dir.join("city.mbtiles")).unwrap();
+        std::fs::rename(&r, dir.join("ortho.mbtiles")).unwrap();
+        let style = dir.join("style.json");
+        std::fs::write(
+            &style,
+            r#"{"version": 8, "sources": {"city": {"type": "vector", "url": "mbtiles://city.mbtiles"},
+                "ortho": {"type": "raster", "url": "mbtiles://./ortho.mbtiles", "tileSize": 256}},
+              "layers": [{"id": "o", "type": "raster", "source": "ortho"}, {"id": "w", "type": "fill", "source": "city", "source-layer": "water"}]}"#,
+        )
+        .unwrap();
+        let map = Map::from_style(style.to_str().unwrap()).await.unwrap();
+        assert!(map.warnings().is_empty(), "{:?}", map.warnings());
+        let Some(MapSource::Vector(src)) = map.source("city") else { panic!("city is a vector source") };
+        assert_eq!((src.min_zoom, src.max_zoom), (0, 0), "the file's zoom range, from its tiles");
+        assert!(matches!(map.source("ortho"), Some(MapSource::Raster(_))));
+        // An absolute path works too (three slashes).
+        let abs =
+            format!(r#"{{"version": 8, "sources": {{"c": {{"type": "vector", "url": "mbtiles://{}"}}}}, "layers": []}}"#, dir.join("city.mbtiles").display());
+        assert!(Map::from_style_json(&serde_json::from_str(&abs).unwrap()).await.unwrap().source("c").is_some());
+        // A style from the web can't name local files.
+        let web = json!({"sources": {"c": {"type": "vector", "url": "mbtiles://city.mbtiles"}}});
+        assert!(remote_sources_only(&web).is_err());
+        assert_eq!(source_path("pmtiles://https://x/y.pmtiles", Some(&dir)), "https://x/y.pmtiles");
+        for f in ["city.mbtiles", "ortho.mbtiles", "style.json"] {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[tokio::test]
