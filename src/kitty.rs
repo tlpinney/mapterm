@@ -1,5 +1,5 @@
 //! The kitty terminal graphics protocol, for drawing raster tiles as real images underneath
-//! the text layer (Ghostty, kitty, WezTerm; herdr relays it). Every command sets `q=2`, so the
+//! the text layer (Ghostty, kitty, WezTerm, Rex; herdr relays it). Every command sets `q=2`, so the
 //! terminal sends no replies that would show up as input.
 //! Spec: <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
 
@@ -18,7 +18,32 @@ pub fn supported() -> bool {
     }
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default().to_ascii_lowercase();
     let term = std::env::var("TERM").unwrap_or_default().to_ascii_lowercase();
-    ["ghostty", "kitty", "wezterm", "herdr"].iter().any(|t| term_program.contains(t) || term.contains(t))
+    ["ghostty", "kitty", "wezterm", "herdr", "rex"].iter().any(|t| term_program.contains(t) || term.contains(t))
+}
+
+/// Whether to send image tiles through POSIX shared memory (`t=s`) instead of inline base64:
+/// the terminal reads the pixels straight from memory, which skips encoding and parsing a
+/// third more bytes per tile. Only for a local terminal known to read shared memory (Rex,
+/// kitty), never over SSH or through herdr, since a terminal that can't read the object
+/// shows nothing and leaves it behind. `MAPTERM_KITTY_MEDIUM=shm` or `direct` overrides it.
+pub fn shm_supported() -> bool {
+    if !cfg!(unix) {
+        return false;
+    }
+    match std::env::var("MAPTERM_KITTY_MEDIUM").as_deref() {
+        Ok("shm") => return true,
+        Ok("direct") => return false,
+        _ => {}
+    }
+    if ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"].iter().any(|v| std::env::var_os(v).is_some()) {
+        return false;
+    }
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default().to_ascii_lowercase();
+    let term = std::env::var("TERM").unwrap_or_default().to_ascii_lowercase();
+    if term_program.contains("herdr") || term.contains("herdr") {
+        return false;
+    }
+    std::env::var_os("KITTY_WINDOW_ID").is_some() || ["rex", "kitty"].iter().any(|t| term_program.contains(t) || term.contains(t))
 }
 
 /// Standard base64 (RFC 4648), for image data and OSC 52.
@@ -49,6 +74,25 @@ pub fn transmit(id: u32, png: &[u8]) -> String {
         }
     }
     out
+}
+
+/// Send a PNG as image `id` through a new POSIX shared memory object, which the terminal
+/// reads and unlinks (see [`shm_supported`]). `None` if the object couldn't be made (or not
+/// on Unix); send it with [`transmit`] then.
+pub fn transmit_shm(id: u32, png: &[u8]) -> Option<String> {
+    #[cfg(unix)]
+    {
+        if png.is_empty() {
+            return None;
+        }
+        let name = shm_write(png)?;
+        Some(format!("\x1b_Ga=t,f=100,t=s,S={},i={id},q=2;{}\x1b\\", png.len(), base64(name.as_bytes())))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (id, png);
+        None
+    }
 }
 
 /// Show source rectangle `src` (x, y, w, h pixels) of image `id`, scaled to `cols` x `rows`
@@ -186,6 +230,39 @@ mod tests {
         assert_eq!(base64(b"fo"), "Zm8=");
         assert_eq!(base64(b"foo"), "Zm9v");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transmit_shm_names_a_readable_object() {
+        let png = b"\x89PNG fake tile bytes".to_vec();
+        let cmd = transmit_shm(9, &png).expect("shm_open works here");
+        let prefix = format!("\x1b_Ga=t,f=100,t=s,S={},i=9,q=2;", png.len());
+        assert!(cmd.starts_with(&prefix) && cmd.ends_with("\x1b\\"));
+        let b64 = &cmd[prefix.len()..cmd.len() - 2];
+        const B64: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bits: Vec<u8> = b64.bytes().filter(|&c| c != b'=').map(|c| B64.find(c as char).unwrap() as u8).collect();
+        let name: Vec<u8> = bits
+            .chunks(4)
+            .flat_map(|q| {
+                let n = q.iter().enumerate().fold(0u32, |n, (i, &v)| n | (v as u32) << (18 - 6 * i));
+                [(n >> 16) as u8, (n >> 8) as u8, n as u8].into_iter().take(q.len() - 1)
+            })
+            .collect();
+        let name = String::from_utf8(name).unwrap();
+        assert!(name.starts_with("/mapterm-") && name.len() <= 31, "{name}");
+        // Read it back as the terminal would, then unlink it as the terminal does.
+        let c = std::ffi::CString::new(name).unwrap();
+        unsafe {
+            let fd = libc::shm_open(c.as_ptr(), libc::O_RDONLY, 0);
+            assert!(fd >= 0);
+            let p = libc::mmap(std::ptr::null_mut(), png.len(), libc::PROT_READ, libc::MAP_SHARED, fd, 0);
+            assert_ne!(p, libc::MAP_FAILED);
+            assert_eq!(std::slice::from_raw_parts(p.cast::<u8>(), png.len()), &png[..]);
+            libc::munmap(p, png.len());
+            libc::close(fd);
+            assert_eq!(libc::shm_unlink(c.as_ptr()), 0);
+        }
     }
 
     #[test]

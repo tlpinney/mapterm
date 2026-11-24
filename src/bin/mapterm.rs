@@ -71,8 +71,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 (--raster-list; `planetary` is Sentinel-2 with NAIP on top when zoomed in),
                 a URL with {z}/{x}/{y} ({-y} or --tms for TMS rows, {key} for an API key),
                 a .pmtiles file or URL, or a .mbtiles file, of PNG/JPEG/WebP tiles;
-                real images with kitty graphics (Ghostty, kitty, WezTerm, herdr), cell colors
-                elsewhere (MAPTERM_GRAPHICS=kitty|cells overrides)
+                real images with kitty graphics (Ghostty, kitty, WezTerm, Rex, herdr), cell colors
+                elsewhere (MAPTERM_GRAPHICS=kitty|cells overrides; MAPTERM_KITTY_MEDIUM=shm|direct
+                picks shared memory or inline image data)
   --raster-list           show the provider names and the keys they need
   --raster-key-cmd CMD    print the API key with a command, e.g. your password manager's
                           CLI: 'security find-generic-password -s vantor -w' (macOS)
@@ -1012,6 +1013,7 @@ async fn main() -> Result<()> {
     demo.sort_by(|a, b| b.0.total_cmp(&a.0));
     let demo_start = Instant::now();
     let mut kstate = KittyState::default();
+    kstate.shm = kitty && mapterm::kitty::shm_supported();
     // Terminal image memory to stay within (herdr keeps 64 MiB per pane).
     if let Some(mb) = std::env::var("MAPTERM_KITTY_BUDGET_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
         kstate.budget = mb.max(1) << 20;

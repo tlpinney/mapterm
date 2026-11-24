@@ -6,6 +6,14 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Rex is recognized as a kitty graphics terminal, so imagery draws as real images there.
+- In a local Rex or kitty window, imagery tiles go to the terminal through POSIX shared
+  memory (kitty `t=s`) instead of inline base64; anywhere else, or if the object can't be
+  made, they're sent inline. `MAPTERM_KITTY_MEDIUM=shm|direct` overrides the guess
+  (`kitty::shm_supported`, `kitty::transmit_shm`, `KittyState::shm`).
+
 ### Fixed
 
 - `mapterm --help` lists `.mbtiles` files for the map source and `--raster`.

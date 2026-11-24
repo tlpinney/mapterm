@@ -234,11 +234,14 @@ pub struct KittyState {
     /// Most decoded image bytes to keep in the terminal (default 48 MiB, under herdr's 64 MiB;
     /// `MAPTERM_KITTY_BUDGET_MB` overrides it in the viewer).
     pub budget: usize,
+    /// Send image tiles through POSIX shared memory instead of inline base64 (see
+    /// [`crate::kitty::shm_supported`]); falls back to inline if an object can't be made.
+    pub shm: bool,
 }
 
 impl Default for KittyState {
     fn default() -> Self {
-        Self { sent: HashMap::new(), frame: 0, budget: 48 << 20 }
+        Self { sent: HashMap::new(), frame: 0, budget: 48 << 20, shm: false }
     }
 }
 
@@ -1318,7 +1321,8 @@ impl Map {
                 Some(entry) => entry.1 = frame,
                 None => {
                     state.sent.insert(b.tile.id, (w as usize * h as usize * 4, frame));
-                    cmds.push_str(&kitty::transmit(b.tile.id, &b.tile.png));
+                    let shm = if state.shm { kitty::transmit_shm(b.tile.id, &b.tile.png) } else { None };
+                    cmds.push_str(&shm.unwrap_or_else(|| kitty::transmit(b.tile.id, &b.tile.png)));
                 }
             }
             cmds.push_str(&kitty::place(b.tile.id, placement as u32 + 1, b.cells.x, b.cells.y, b.src, b.cells.width, b.cells.height, -1000 + *i as i32));
