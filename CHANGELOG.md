@@ -6,6 +6,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Pixel mode (`MAPTERM_PIXELS=1`) now redraws after `Map::set_data`, `set_paint`,
+  `set_layout` and `set_filter`; the tiles kept showing the old data or style. The old
+  images stay up until the new ones are drawn.
+
 ## [0.2.0] - 2026-11-23
 
 The library's `formats::Format` gains variants (Shapefile, GeoParquet), and `spec::Kind`

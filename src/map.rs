@@ -1026,6 +1026,9 @@ impl Map {
             Some(_) => bail!("source \"{id}\" is not a GeoJSON source"),
             None => bail!("no source \"{id}\""),
         }
+        // Old and new features can be anywhere (and clusters, strokes and icons reach past
+        // their boxes): every pixel tile is drawn again, the old image shown until then.
+        self.pixels_stale([0.0, 0.0, 1.0, 1.0]);
         Ok(())
     }
 
@@ -1519,6 +1522,8 @@ impl Map {
 
     /// Re-evaluate the style for every loaded vector tile.
     fn restyle(&mut self) {
+        // Paint, layout and filters aren't in the pixel tiles' key: draw them all again.
+        self.pixels_stale([0.0, 0.0, 1.0, 1.0]);
         let layers = &self.layers;
         for (sid, src) in &mut self.sources {
             if let MapSource::Vector(v) = src {
@@ -2811,6 +2816,51 @@ mod tests {
         map.view(&cam).render(area, &mut buf);
         let f = map.take_pixels().unwrap();
         assert!(!f.new.is_empty() && !f.new.iter().any(red), "redrawn without the highlight");
+    }
+
+    #[test]
+    fn pixels_redraw_after_set_data() {
+        // New data for a GeoJSON source: the pixel tiles are drawn again with it (they were
+        // kept as they were, showing the old data).
+        let sq = |x0: f64| json!({"type": "Polygon", "coordinates": [[[x0, 0.0], [x0 + 20.0, 0.0], [x0 + 20.0, 20.0], [x0, 20.0], [x0, 0.0]]]});
+        let mut map = Map::new();
+        map.add_source("sq", MapSource::geojson(&sq(-60.0)).unwrap()).unwrap();
+        map.add_layer(StyleLayer::background("bg").color("#808080")).unwrap();
+        map.add_layer(StyleLayer::fill("fill", "sq").color("#ff0000")).unwrap();
+        map.pixel_mode = Some((10.0, 20.0));
+        map.pixcache.lock().unwrap().budget = Some(std::time::Duration::from_secs(60));
+        let (cam, area) = (Camera::new(0.0, 0.0, 2.0), Rect::new(0, 0, 40, 20));
+        let mut buf = Buffer::empty(area);
+        let red = |img: &crate::pixels::PixImage| img.rgba.chunks(4).filter(|p| *p == [255, 0, 0, 255]).count();
+        map.view(&cam).render(area, &mut buf);
+        let first = map.take_pixels().unwrap();
+        let before: usize = first.new.iter().map(red).sum();
+        assert!(before > 0);
+        // Move the square east: tiles redrawn, the old images freed.
+        map.set_data("sq", &sq(40.0)).unwrap();
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(!f.new.is_empty(), "redrawn after set_data");
+        assert_eq!(f.freed.len(), f.new.len(), "each redrawn tile replaces its old image");
+        assert_eq!(f.placed.len(), first.placed.len());
+        // Empty it: no red anywhere.
+        map.set_data("sq", &json!({"type": "FeatureCollection", "features": []})).unwrap();
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(!f.new.is_empty() && f.new.iter().all(|i| red(i) == 0), "the square is gone");
+        // The same for paint and filters (not in the tiles' key): back, then blue, then none.
+        map.set_data("sq", &sq(40.0)).unwrap();
+        map.view(&cam).render(area, &mut buf);
+        assert!(map.take_pixels().unwrap().new.iter().any(|i| red(i) > 0));
+        let blue = |img: &crate::pixels::PixImage| img.rgba.chunks(4).any(|p| p == [0, 0, 255, 255]);
+        map.set_paint("fill", "fill-color", &json!("#0000ff")).unwrap();
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(f.new.iter().any(blue) && f.new.iter().all(|i| red(i) == 0), "repainted blue");
+        map.set_filter("fill", Some(&json!(["==", "x", 1]))).unwrap();
+        map.view(&cam).render(area, &mut buf);
+        let f = map.take_pixels().unwrap();
+        assert!(!f.new.is_empty() && !f.new.iter().any(blue), "filtered out");
     }
 
     #[test]
