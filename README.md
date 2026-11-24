@@ -106,6 +106,10 @@ So: the description alone by default; add the PNG when shapes matter. The same f
 JSON, protobuf text or base64 protobuf scored no better and cost more tokens (base64
 protobuf about twice the prose). The road set is small (8 questions), and its answers
 come from road colors in the render, so "major" there doesn't always match a road's class.
+The same questions over the Protomaps planet (`--format describe` from Protomaps tiles at the
+same views) score about the same: areas 87% / 77% and roads 75% / 62%, against 90% / 80%
+and 75% / 62% from OpenMapTiles in the same run. The answers come from OpenMapTiles
+renders, and the two datasets differ on a few small green spaces (Georgetown, Paris).
 
 Without `--style`, mapterm draws the source with its own terminal style (OpenMapTiles
 or Protomaps schema, detected from the tiles; `--light` or `t` for the light theme).

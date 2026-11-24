@@ -691,6 +691,33 @@ impl Map {
         h.finish()
     }
 
+    /// The grid zoom of pixel mode's tiles: fine enough that each is about 512 pixels
+    /// across for cells `cpx` pixels in size.
+    fn pixel_grid_zoom(cam: &Camera, cpx: (f64, f64)) -> u8 {
+        let sx = cpx.0.max(1.0) / 2.0;
+        (cam.zoom + (sx / 2.0).log2()).floor().clamp(0.0, 24.0) as u8
+    }
+
+    /// In pixel mode, a view (camera and area in cells) covering every grid tile the view
+    /// `cam` x `area` draws, plus the cell each one's drawing reaches past it.
+    fn pixel_extent(&self, cam: &Camera, area: Rect) -> Option<(Camera, Rect)> {
+        let cpx = self.pixel_mode?;
+        let gz = Self::pixel_grid_zoom(cam, cpx);
+        let n = (1u64 << gz) as f64;
+        let vp = Viewport::new(cam, area);
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for (_, tx, ty) in vp.tiles(gz) {
+            let (a, b) = (vp.dot(tx as f64 / n, ty as f64 / n), vp.dot((tx + 1) as f64 / n, (ty + 1) as f64 / n));
+            (x0, y0, x1, y1) = (x0.min(a.0), y0.min(a.1), x1.max(b.0), y1.max(b.1));
+        }
+        if x0 > x1 {
+            return None;
+        }
+        let (lon, lat) = vp.dot_to_lonlat((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let (cols, rows) = (((x1 - x0) / 2.0).ceil() + 4.0, ((y1 - y0) / 4.0).ceil() + 4.0);
+        Some((Camera::new(lon, lat, cam.zoom), Rect::new(0, 0, cols.min(u16::MAX as f64) as u16, rows.min(u16::MAX as f64) as u16)))
+    }
+
     /// Pixel mode: draw (or reuse) the grid tiles over the view and plan where each goes.
     fn pixel_tiles(&self, cam: &Camera, area: Rect, cpx: (f64, f64)) -> crate::pixels::PixFrame {
         use crate::pixels::{BACKDROP_SCALE, CachedTile, DRAW_BUDGET, PIX_BUDGET, Pix, PixFrame, PixPlacement, next_image_id};
@@ -719,7 +746,7 @@ impl Map {
         let bg_rgb = if imagery { None } else { self.background(zoom).map(|c| c.to_u8()) };
         // A grid fine enough that each tile is about 512 pixels across (braille's tiles would
         // be thousands of pixels wide on a Retina screen).
-        let gz = (cam.zoom + (sx / 2.0).log2()).floor().clamp(0.0, 24.0) as u8;
+        let gz = Self::pixel_grid_zoom(cam, cpx);
         let zkey = (cam.zoom * 64.0).round() as i64;
         let sig = self.pixel_signature();
         let vp = Viewport::new(cam, area);
@@ -1136,6 +1163,9 @@ impl Map {
     /// map can fetch itself (vector sources from [`MapSource::vector`], raster sources).
     pub fn tile_requests(&self, cam: &Camera, area: Rect) -> Vec<TileRequest> {
         let vp = Viewport::new(cam, area);
+        // Pixel mode draws whole grid tiles, which reach past the view, and only once every
+        // vector tile under them is in: ask for those too.
+        let vector_vp = self.pixel_extent(cam, area).map_or(vp, |(c, a)| Viewport::new(&c, a));
         let used: HashSet<&str> = self
             .layers
             .iter()
@@ -1153,7 +1183,7 @@ impl Map {
                 MapSource::Vector(v) => {
                     let Some(f) = &v.fetch else { continue };
                     let z = cam.tile_zoom(v.min_zoom, v.max_zoom);
-                    out.extend(vp.tiles(z).into_iter().filter(|t| !v.tiles.map.contains_key(t) && self.due(id, t)).map(|t| TileRequest {
+                    out.extend(vector_vp.tiles(z).into_iter().filter(|t| !v.tiles.map.contains_key(t) && self.due(id, t)).map(|t| TileRequest {
                         source: id.clone(),
                         id: t,
                         fetch: Fetch::Vector(f.clone()),
@@ -2595,6 +2625,36 @@ mod tests {
         assert!(k.bytes() <= k.budget);
         // Back to the north-west: it is sent again rather than assumed loaded.
         assert_eq!(map.kitty_commands(&nw, area, &mut k).matches("a=t,").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn pixel_mode_asks_for_the_tiles_under_its_grid() {
+        // Pixel grid tiles reach past the view; the vector tiles under them are wanted too,
+        // or a grid tile over the edge is never drawn (and a snapshot waits forever).
+        let mut map = Map::new();
+        map.add_source("v", MapSource::vector(Source::open("https://t.example/{z}/{x}/{y}.pbf").await.unwrap())).unwrap();
+        map.add_layer(StyleLayer::fill("f", "v").source_layer("water")).unwrap();
+        // A view whose east edge is a dot short of a zoom-14 tile edge: the grid tile there
+        // ends at that edge, and its drawing reaches a cell into the next tile.
+        let area = Rect::new(0, 0, 20, 8);
+        let s = crate::render::TILE_DOTS * 2f64.powi(14);
+        let (bx, by) = (8415.0 / 16384.0, 5384.5 / 16384.0);
+        let (lon, lat) = crate::render::to_lonlat(bx - (area.width as f64 + 1.0) / s, by);
+        let cam = Camera::new(lon, lat, 14.0);
+        let plain: HashSet<TileId> = map.tile_requests(&cam, area).into_iter().map(|r| r.id).collect();
+        map.pixel_mode = Some((16.0, 34.0));
+        let pixel: HashSet<TileId> = map.tile_requests(&cam, area).into_iter().map(|r| r.id).collect();
+        assert!(pixel.is_superset(&plain) && pixel.len() > plain.len(), "{plain:?} {pixel:?}");
+        let (gcam, garea) = map.pixel_extent(&cam, area).unwrap();
+        let gvp = Viewport::new(&gcam, garea);
+        let gz = Map::pixel_grid_zoom(&cam, (16.0, 34.0));
+        for t in Viewport::new(&cam, area).tiles(gz) {
+            let n = (1u64 << gz) as f64;
+            for corner in [(t.1 as f64 / n, t.2 as f64 / n), ((t.1 + 1) as f64 / n, (t.2 + 1) as f64 / n)] {
+                let d = gvp.dot(corner.0, corner.1);
+                assert!(d.0 >= 0.0 && d.1 >= 0.0 && d.0 <= garea.width as f64 * 2.0 && d.1 <= garea.height as f64 * 4.0, "grid tile {t:?} inside");
+            }
+        }
     }
 
     #[test]

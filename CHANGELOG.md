@@ -31,6 +31,9 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- Pixel mode (`MAPTERM_PIXELS=1`) asks for the vector tiles under its whole grid tiles,
+  not only the view's: a grid tile at the view's edge whose drawing reached into a tile
+  not loaded stayed blank (and kept the viewer redrawing).
 - Over imagery, flat 3D buildings (`fill-extrusion`) are hidden like other fills; they
   covered the imagery in the viewer since buildings got their own layer kind.
 - `mapterm --help` lists `.mbtiles` files for the map source and `--raster`.

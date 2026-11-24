@@ -937,16 +937,14 @@ async fn main() -> Result<()> {
         if a.format == "png" {
             map.raster_mode = RasterMode::Kitty { cell_px: (PNG_CELL.0 as f64, PNG_CELL.1 as f64) };
         }
-        // Pixel drawing goes by grid tiles (~512 px) that reach past the view's edges, and
-        // draws one only when every vector tile under it is in: load a grid tile's margin.
-        let pixel_snapshot = a.format == "png" || std::env::var_os("MAPTERM_PIXELS_PNG").is_some();
-        let load_area = if pixel_snapshot {
-            let (mc, mr) = ((512 / PNG_CELL.0) as u16 + 1, (512 / PNG_CELL.1) as u16 + 1);
-            Rect::new(0, 0, w.saturating_add(2 * mc), h.saturating_add(2 * mr))
-        } else {
-            area
-        };
-        for req in map.tile_requests(&cam, load_area) {
+        // MAPTERM_PIXELS_PNG=FILE: also save pixel mode's image (fills and lines; labels are
+        // text) for a Retina-sized terminal, to check the drawing without one. Set before
+        // loading: pixel mode needs the tiles under its whole grid tiles.
+        let png = std::env::var("MAPTERM_PIXELS_PNG").ok();
+        if png.is_some() || a.format == "png" {
+            map.pixel_mode = Some((PNG_CELL.0 as f64, PNG_CELL.1 as f64));
+        }
+        for req in map.tile_requests(&cam, area) {
             let r = req.load().await;
             if let Err(e) = map.insert_loaded(&req.source, req.id, r) {
                 eprintln!("{e:#}");
@@ -982,12 +980,6 @@ async fn main() -> Result<()> {
                 println!("{}", p.to_json());
             }
             return Ok(());
-        }
-        // MAPTERM_PIXELS_PNG=FILE: also save pixel mode's image (fills and lines; labels are
-        // text) for a Retina-sized terminal, to check the drawing without one.
-        let png = std::env::var("MAPTERM_PIXELS_PNG").ok();
-        if png.is_some() || a.format == "png" {
-            map.pixel_mode = Some((PNG_CELL.0 as f64, PNG_CELL.1 as f64));
         }
         let mut buf = Buffer::empty(area);
         let t = Instant::now();
