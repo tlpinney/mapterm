@@ -48,6 +48,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 moves: only the chunks under the view, from zoom 14. `microsoft-buildings`
                 (or a dataset-links.csv URL) is Microsoft's current building footprints, each
                 ~78 km tile downloaded once and kept split in ~/.cache/mapterm
+  --cache       show mapterm's disk caches (tiles, imagery, geoparquet, buildings, stac):
+                where, how big, and their limits; then exit
+  --cache-clear NAME|all  empty one cache, or all of them, then exit
   --geoparquet-cache SIZE  disk for parts of remote GeoParquet files already read
                 (footers and chunks; least recently used out first; default 2GB, 0 keeps
                 none; also MAPTERM_GEOPARQUET_CACHE)
@@ -203,6 +206,23 @@ fn args() -> Result<Args> {
             "--tms" => a.tms = true,
             "--geojson" => a.geojson.push(it.next().context("--geojson FILE|URL")?),
             "--all-columns" => mapterm::geoparquet::set_all_columns(true),
+            "--cache" => {
+                let caches = mapterm::cache::caches();
+                let total: u64 = caches.iter().map(|c| c.bytes).sum();
+                println!("mapterm's caches in {} ({} in all):\n", mapterm::cache::caches_root().display(), mapterm::cache::size(total));
+                for c in &caches {
+                    println!("  {:<11} {:>8}  {:>6} files  {}", c.name, mapterm::cache::size(c.bytes), c.files, c.about);
+                    println!("  {:<11} {:>8}  limit: {}", "", "", c.limit);
+                }
+                println!("\nEmpty one with --cache-clear NAME, or all with --cache-clear all.");
+                std::process::exit(0);
+            }
+            "--cache-clear" => {
+                let name = it.next().context("--cache-clear NAME|all")?;
+                let freed = mapterm::cache::clear(&name)?;
+                println!("cleared {name}: {} freed", mapterm::cache::size(freed));
+                std::process::exit(0);
+            }
             "--geoparquet-cache" => {
                 let v = it.next().context("--geoparquet-cache SIZE")?;
                 mapterm::geoparquet::set_cache_limit(mapterm::msbuildings::parse_size(&v).context("--geoparquet-cache")?);

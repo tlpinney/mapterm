@@ -68,6 +68,7 @@
 
 #![warn(missing_docs)]
 
+pub mod cache;
 pub mod cluster;
 pub mod events;
 pub mod export;

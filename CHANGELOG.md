@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- `mapterm --cache` lists the disk caches (tiles, imagery, geoparquet, buildings, stac) with
+  sizes, file counts and limits; `--cache-clear NAME|all` empties one or all (only inside
+  `~/.cache/mapterm`, never following links; `mapterm::cache`).
+- A STAC collection read within the week is opened from its saved index, without asking
+  the catalog: revisiting San Salvador in Overture's buildings takes ~1.1 s (from ~1.6 s;
+  the basemap alone ~0.3 s).
 - Remote GeoParquet reads are cached on disk (`~/.cache/mapterm/geoparquet`): the byte
   ranges fetched, footers and chunks, keyed by URL and ETag so a changed file is read
   afresh (files without an ETag aren't cached). `--geoparquet-cache SIZE` /

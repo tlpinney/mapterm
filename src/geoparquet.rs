@@ -372,6 +372,11 @@ pub fn set_cache_limit(bytes: u64) {
     CACHE_LIMIT.store(bytes, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The limit set with [`set_cache_limit`].
+pub fn cache_limit() -> u64 {
+    CACHE_LIMIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Where the cache lives (tests point it elsewhere).
 static CACHE_ROOT: std::sync::OnceLock<std::sync::Mutex<Option<std::path::PathBuf>>> = std::sync::OnceLock::new();
 
@@ -736,6 +741,24 @@ impl Dataset {
             let f = DFile { item: None, unread: false, url: Some(spec.to_string()), bbox: world, meta: None, tile: None, len: 0, etag: None, failed: false };
             return Ok(Dataset { name, files: vec![f], client, min_zoom: 14.0, loaded: Default::default() });
         }
+        // A collection read within the week: its saved index, without fetching anything.
+        if let Some((name, rows)) = fresh_index(spec) {
+            let files = rows
+                .into_iter()
+                .map(|(item, url, bbox)| DFile {
+                    url: Some(url),
+                    bbox,
+                    item: Some(item),
+                    unread: false,
+                    meta: None,
+                    tile: None,
+                    len: 0,
+                    etag: None,
+                    failed: false,
+                })
+                .collect();
+            return Ok(Dataset { name, files, client, min_zoom: 14.0, loaded: Default::default() });
+        }
         let doc = get_json(&client, spec).await?;
         if doc["type"] != "Collection" {
             bail!("{spec}: not a GeoParquet file or a STAC collection");
@@ -982,7 +1005,7 @@ impl Dataset {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, serde_json::to_vec(&json!({"files": rows})).unwrap_or_default());
+        let _ = std::fs::write(path, serde_json::to_vec(&json!({"id": self.name, "files": rows})).unwrap_or_default());
     }
 }
 
@@ -1073,6 +1096,34 @@ async fn get_json(client: &reqwest::Client, url: &str) -> Result<Json> {
         bail!("{url}: over 32 MB");
     }
     serde_json::from_slice(&b).with_context(|| format!("{url}: not JSON"))
+}
+
+/// A collection index entry: STAC item, Parquet URL, lon/lat box.
+type IndexRow = (String, String, Bbox);
+
+/// How long a saved collection index is used without looking at the collection again
+/// (catalogs that add files are seen within this; `--cache-clear stac` reads them now).
+const INDEX_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+
+/// A saved index of collection `spec` younger than [`INDEX_MAX_AGE`]: its name and
+/// (item, Parquet URL, box) for every item, in order.
+fn fresh_index(spec: &str) -> Option<(String, Vec<IndexRow>)> {
+    let path = items_cache_path(spec);
+    let age = std::fs::metadata(&path).ok()?.modified().ok()?.elapsed().ok()?;
+    if age > INDEX_MAX_AGE {
+        return None;
+    }
+    let doc: Json = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let name = doc["id"].as_str()?.to_string();
+    let rows: Vec<IndexRow> = doc["files"]
+        .as_array()?
+        .iter()
+        .filter_map(|r| {
+            let bbox = [0, 1, 2, 3].map(|k| r["bbox"][k].as_f64().unwrap_or(f64::NAN));
+            bbox.iter().all(|v| v.is_finite()).then_some((r["item"].as_str()?.to_string(), r["url"].as_str()?.to_string(), bbox))
+        })
+        .collect();
+    (!rows.is_empty()).then_some((name, rows))
 }
 
 fn items_cache_path(spec: &str) -> std::path::PathBuf {
@@ -1212,6 +1263,22 @@ mod tests {
         assert!(ds.evict(view, 10).is_empty(), "in view: kept");
         assert_eq!(ds.evict([100.0, 50.0, 101.0, 51.0], 10), vec![key(0, 0)]);
         assert_eq!(ds.features_loaded(), 0);
+    }
+
+    #[test]
+    fn saved_index_is_used_for_a_week() {
+        let spec = format!("https://example.invalid/test-{}/collection.json", std::process::id());
+        let path = items_cache_path(&spec);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, br#"{"id": "things", "files": [{"item": "i0", "url": "https://x/a.parquet", "bbox": [1, 2, 3, 4]}]}"#).unwrap();
+        let (name, rows) = fresh_index(&spec).expect("fresh");
+        assert_eq!((name.as_str(), rows), ("things", vec![("i0".to_string(), "https://x/a.parquet".to_string(), [1.0, 2.0, 3.0, 4.0])]));
+        let f = std::fs::File::options().append(true).open(&path).unwrap();
+        f.set_modified(std::time::SystemTime::now() - INDEX_MAX_AGE - std::time::Duration::from_secs(60)).unwrap();
+        assert!(fresh_index(&spec).is_none(), "over a week old: read the collection again");
+        std::fs::write(&path, br#"{"files": [{"item": "i0", "url": "u", "bbox": [1, 2, 3, 4]}]}"#).unwrap();
+        assert!(fresh_index(&spec).is_none(), "an index from before names were saved");
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

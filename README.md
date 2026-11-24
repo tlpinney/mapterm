@@ -130,12 +130,17 @@ GeoParquet is read only where needed. A GeoParquet URL, or a STAC collection of
 GeoParquet files (its `collection.json`, as Overture publishes), loads as the map
 moves: from zoom 14, the chunks under the view are fetched with HTTP range
 requests, nearest the center first, and the farthest are dropped past 600,000
-features. A collection's file index is read once and kept in `~/.cache/mapterm`, and the
+features. A collection's file index is read once and kept in `~/.cache/mapterm` (used
+without asking the catalog again for a week), and the
 parts of files already read (footers and chunks) are kept in
 `~/.cache/mapterm/geoparquet`, keyed by each file's ETag so a changed file is read
 afresh: revisiting an area needs only a quick check per file. That cache takes at most
 2 GB, least recently used out first; set it with `--geoparquet-cache SIZE` or
 `MAPTERM_GEOPARQUET_CACHE` (`0` turns it off).
+
+`mapterm --cache` lists the caches (map tiles, imagery, GeoParquet, Microsoft buildings,
+STAC indexes) with their sizes and limits; `--cache-clear NAME` empties one, `all` every
+one.
 Over San Salvador that's one footer and one 4 MB chunk, about 3 s, out of
 Overture's 257 GB. With `--bbox W,S,E,N` a layer is instead read once for that area
 (local files are read once, in place).
