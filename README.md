@@ -1,11 +1,9 @@
-<img align="right" src="https://raw.githubusercontent.com/tlpinney/mapterm/main/assets/wordmark.png" alt="mapterm, written in braille" width="220">
-
 # mapterm
 
 [![CI](https://github.com/tlpinney/mapterm/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tlpinney/mapterm/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/mapterm.svg)](https://crates.io/crates/mapterm)
 [![docs.rs](https://img.shields.io/docsrs/mapterm)](https://docs.rs/mapterm)
-[![MSRV 1.89](https://img.shields.io/crates/msrv/mapterm)](Cargo.toml)
+[![MSRV](https://img.shields.io/crates/msrv/mapterm)](Cargo.toml)
 [![License: MIT](https://img.shields.io/crates/l/mapterm.svg)](LICENSE)
 [![mapterm.com](https://img.shields.io/badge/site-mapterm.com-blue)](https://mapterm.com)
 
@@ -24,7 +22,7 @@ https://github.com/user-attachments/assets/8bf59b7f-3156-4820-aeeb-2b138fc5bc2b
 </details>
 
 - **Any vector tiles:** OpenFreeMap out of the box (no key), PMTiles files locally or over
-  HTTP, XYZ URLs and TileJSON, drawn in braille with cell-color fills and labels that
+  HTTP, MBTiles files, XYZ URLs and TileJSON, drawn in braille with cell-color fills and labels that
   don't collide.
 - **MapLibre styles:** liberty, positron and the other OpenFreeMap styles, or your own,
   with expressions, filters, fonts and point icons.
@@ -311,12 +309,15 @@ mapterm --at 38.8895,-77.0353 -z 16 --snapshot 100x40 --pick 50,20
 ## What it reads
 
 - **PMTiles v3**, from a local file or over HTTP range requests (own reader)
+- **MBTiles** files (SQLite), vector or raster, from the command line or a style's
+  `mbtiles://` source
 - **XYZ** URL templates (`…/{z}/{x}/{y}.pbf`) and **TileJSON** endpoints
 - Vector tiles in the **OpenMapTiles** schema (OpenFreeMap, MapTiler) or the
   **Protomaps** basemap schema, in dark and light styles
 
 Every download has a 30 s timeout and an 8 MB cap, decompression is capped at
-32 MB, and HTTP tiles are cached on disk for 30 days (`~/.cache/mapterm`).
+32 MB, and HTTP tiles are cached on disk for up to 30 days, an MBTiles file per source in
+`~/.cache/mapterm` with a size limit (`mapterm --cache` lists the caches).
 
 ## Rendering
 
