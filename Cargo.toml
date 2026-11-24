@@ -2,8 +2,8 @@
 name = "mapterm"
 version = "0.1.2"
 edition = "2024"
-# The oldest Rust that builds it (the uuid dependency needs 1.89; mapterm itself 1.88).
-rust-version = "1.89"
+# The oldest Rust that builds it (geoparquet and geoarrow-array 0.10 need 1.95).
+rust-version = "1.95"
 description = "A map in your terminal: vector tiles, MapLibre styles, imagery and your own data, as a ratatui widget and the mapterm viewer"
 license = "MIT"
 authors = ["Travis Pinney <travis.pinney@gmail.com>"]
@@ -19,19 +19,19 @@ exclude = [".github/", "tests/", "deny.toml", "about.toml", "about.hbs", "releas
 
 [dependencies]
 anyhow = "1.0.104"
-arrow-array = "59.3"
-arrow-cast = { version = "59.3", default-features = false }
-arrow-schema = "59.3"
+arrow-array = "60.1"
+arrow-cast = { version = "60.1", default-features = false }
+arrow-schema = "60.1"
 bytes = "1.12"
 crossterm = "0.29.0"
 flate2 = "1.1.10"
 futures = "0.3"
 geo-traits = "0.3"
 geo-types = "0.7"
-geoarrow-array = "0.9"
-geoparquet = { version = "0.9", features = ["async"] }
+geoarrow-array = "0.10"
+geoparquet = { version = "0.10", features = ["async"] }
 image = { version = "0.25.6", default-features = false, features = ["png", "jpeg", "webp"] }
-parquet = { version = "59.3", default-features = false, features = ["arrow", "async", "snap", "zstd"] }
+parquet = { version = "60.2", default-features = false, features = ["arrow", "async", "snap", "zstd"] }
 ratatui = "0.30.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 serde_json = "1.0.154"
