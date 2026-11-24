@@ -69,17 +69,36 @@ mapterm --style mapbox://styles/mapbox/streets-v12 --mapbox-token-cmd 'pass show
 mapterm --snapshot 120x40 --at 38.8895,-77.0353         # print one frame as text and exit
 mapterm --snapshot 120x40 --format html > map.html       #   ... or as colored ANSI text or HTML
 mapterm --snapshot 100x30 --format describe              #   ... or in words (for a language model)
+mapterm --snapshot 100x30 --format png > view.png        #   ... or as an image (no labels)
 ```
 
-`--format describe` describes the view instead of drawing it: its center, size and bounds,
+`--format describe` describes the view instead of drawing it: its center, size and bounds;
 every visible label with what it is (`transportation_name/primary`, `poi/cafe`, ...), its
-cell, lon/lat and direction and distance from the center, and each data layer's features
-nearest the center with their properties. Language models read that far better than the
-picture. Asked 30 spatial questions about six street-level views (which place is further
-north, which is closest to the center, which way one is from another), Claude Haiku 5.5
-answered 60% right from the braille text, 87% from an image of the same render, and 100%
-from the description, on questions about places close together; Sonnet 5.5 80%, 83% and
-100%.
+cell, lon/lat and direction and distance from the center; what covers the view (water,
+parks, buildings: their shares and a 25 x 10 grid); the major roads and which way they
+run; and each data layer's features nearest the center with their properties. Language
+models read that better than any picture of the map, for few tokens: about 1,700 for a
+busy street view (500 for a quiet one), against ~6,600 for the braille text.
+
+`--format png` draws the view as an image, 16 x 34 pixels per cell (100 x 30 is 1600 x
+1020; ~1,600-2,000 tokens to a model), with smooth fills and lines but no labels. Pair it
+with `--format describe` when road layout or other shapes matter.
+
+Tested with Claude Sonnet 5.5 and Haiku 5.5 on street-level views with known answers:
+close-call questions about where labelled places are (30), and, with labels off, where
+water and parks are (30) and which way major roads run (8):
+
+| given | labels (S / H) | areas (S / H) | roads (S / H) |
+|---|---|---|---|
+| braille text | 80% / 60% | 67% / 40% | 38% / 38% |
+| image of the terminal render | 83% / 87% | 87% / 70% | 62% / 12% |
+| `--format describe` | 100% / 100% | 93% / 83% | 38% / 25% |
+| `--format png` | | 83% / 70% | 75% / 75% |
+| `--format png` + `--format describe` | | 93% / 90% | 62% / 75% |
+
+So: the description alone by default; add the PNG when shapes matter. The same facts as
+JSON, protobuf text or base64 protobuf scored no better and cost more tokens (base64
+protobuf about twice the prose). The road set is small (8 questions).
 
 Without `--style`, mapterm draws the source with its own terminal style (OpenMapTiles
 or Protomaps schema, detected from the tiles; `--light` or `t` for the light theme).

@@ -95,7 +95,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 frame of map lines and fills only
   --snapshot   render one frame to stdout as text and exit
   --format      with --snapshot: text (default), ansi (24-bit color), html (a <pre> fragment),
-                or llm (the view as a list of labels and features with positions, for an LLM)
+                describe (the view in words: labels, areas and roads with positions) or
+                png (the view as an image, 16 x 34 pixels per cell, no labels; to stdout)
   --pick        with --snapshot: print the features under that cell as JSON lines instead
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
@@ -301,9 +302,9 @@ fn args() -> Result<Args> {
                 a.snapshot = Some((c.parse()?, r.parse()?));
             }
             "--format" => {
-                let v = it.next().context("--format text|ansi|html|llm")?;
-                if !matches!(v.as_str(), "text" | "ansi" | "html" | "llm") {
-                    bail!("--format {v}: use text, ansi, html or llm");
+                let v = it.next().context("--format text|ansi|html|describe|png")?;
+                if !matches!(v.as_str(), "text" | "ansi" | "html" | "describe" | "png") {
+                    bail!("--format {v}: use text, ansi, html, describe or png");
                 }
                 a.format = v;
             }
@@ -360,6 +361,41 @@ struct Loading {
     inflight: HashSet<mapterm::geoparquet::Job>,
     /// The STAC index has been saved.
     saved: bool,
+}
+
+/// Pixels per cell for PNG snapshots (a Retina-sized terminal cell): 100 columns x 30 rows
+/// make a 1600 x 1020 image.
+const PNG_CELL: (u32, u32) = (16, 34);
+
+/// A pixel-mode frame put together from its tiles as the terminal would place them, over
+/// white: RGBA rows and the size.
+fn compose_png(f: &mapterm::pixels::PixFrame, area: Rect) -> (Vec<u8>, u32, u32) {
+    let (cw, ch) = PNG_CELL;
+    let (w, h) = (area.width as u32 * cw, area.height as u32 * ch);
+    let mut img = vec![255u8; (w * h * 4) as usize];
+    let images: std::collections::HashMap<u32, &mapterm::pixels::PixImage> = f.new.iter().map(|i| (i.id, i)).collect();
+    for p in &f.placed {
+        let Some(src) = images.get(&p.id) else { continue };
+        let (sx, sy, sw, sh) = p.src;
+        let (dx, dy) = ((p.col - area.x) as u32 * cw + p.x_off, (p.row - area.y) as u32 * ch + p.y_off);
+        for y in 0..sh {
+            for x in 0..sw {
+                let (tx, ty) = (dx + x, dy + y);
+                if tx >= w || ty >= h || sx + x >= src.width || sy + y >= src.height {
+                    continue;
+                }
+                let s = ((sy + y) * src.width + sx + x) as usize * 4;
+                let o = (ty * w + tx) as usize * 4;
+                // Over what's there (white at first), by the tile's alpha.
+                let a = src.rgba[s + 3] as u32;
+                for c in 0..3 {
+                    img[o + c] = ((src.rgba[s + c] as u32 * a + img[o + c] as u32 * (255 - a)) / 255) as u8;
+                }
+                img[o + 3] = 255;
+            }
+        }
+    }
+    (img, w, h)
 }
 
 /// A count with thousands separators: 12,345.
@@ -935,8 +971,8 @@ async fn main() -> Result<()> {
         // MAPTERM_PIXELS_PNG=FILE: also save pixel mode's image (fills and lines; labels are
         // text) for a Retina-sized terminal, to check the drawing without one.
         let png = std::env::var("MAPTERM_PIXELS_PNG").ok();
-        if png.is_some() {
-            map.pixel_mode = Some((16.0, 34.0));
+        if png.is_some() || a.format == "png" {
+            map.pixel_mode = Some((PNG_CELL.0 as f64, PNG_CELL.1 as f64));
         }
         let mut buf = Buffer::empty(area);
         let t = Instant::now();
@@ -954,30 +990,20 @@ async fn main() -> Result<()> {
             sent.append(&mut f.new);
             f.new = std::mem::take(&mut sent);
         }
-        if let (Some(path), Some(f)) = (png, last) {
-            // The frame put together from its tiles as the terminal would place them.
-            let (cw, ch) = (16u32, 34u32);
-            let (w, h) = (area.width as u32 * cw, area.height as u32 * ch);
-            let mut img = vec![0u8; (w * h * 4) as usize];
-            let images: std::collections::HashMap<u32, &mapterm::pixels::PixImage> = f.new.iter().map(|i| (i.id, i)).collect();
-            for p in &f.placed {
-                let Some(src) = images.get(&p.id) else { continue };
-                let (sx, sy, sw, sh) = p.src;
-                let (dx, dy) = ((p.col - area.x) as u32 * cw + p.x_off, (p.row - area.y) as u32 * ch + p.y_off);
-                for y in 0..sh {
-                    for x in 0..sw {
-                        let (tx, ty) = (dx + x, dy + y);
-                        if tx >= w || ty >= h || sx + x >= src.width || sy + y >= src.height {
-                            continue;
-                        }
-                        let s = ((sy + y) * src.width + sx + x) as usize * 4;
-                        let o = (ty * w + tx) as usize * 4;
-                        img[o..o + 4].copy_from_slice(&src.rgba[s..s + 4]);
-                    }
-                }
+        if let Some(f) = &last {
+            let (img, w, h) = compose_png(f, area);
+            if let Some(path) = &png {
+                image::save_buffer(path, &img, w, h, image::ExtendedColorType::Rgba8)?;
+                eprintln!("pixels: {} tiles drawn, {} placed, {:.1} ms -> {path}", f.new.len(), f.placed.len(), t.elapsed().as_secs_f64() * 1000.0);
             }
-            image::save_buffer(&path, &img, w, h, image::ExtendedColorType::Rgba8)?;
-            eprintln!("pixels: {} tiles drawn, {} placed, {:.1} ms -> {path}", f.new.len(), f.placed.len(), t.elapsed().as_secs_f64() * 1000.0);
+            if a.format == "png" {
+                // The view as an image on stdout: fills and lines, no labels (--format describe
+                // lists those).
+                let mut bytes = Vec::new();
+                image::write_buffer_with_format(&mut std::io::Cursor::new(&mut bytes), &img, w, h, image::ExtendedColorType::Rgba8, image::ImageFormat::Png)?;
+                std::io::stdout().write_all(&bytes)?;
+                return Ok(());
+            }
         }
         let out = match a.format.as_str() {
             "ansi" => mapterm::export::to_ansi(&buf),

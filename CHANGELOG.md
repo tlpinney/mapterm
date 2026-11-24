@@ -13,12 +13,16 @@ All notable changes to mapterm are listed here. The format follows
   memory (kitty `t=s`) instead of inline base64; anywhere else, or if the object can't be
   made, they're sent inline. `MAPTERM_KITTY_MEDIUM=shm|direct` overrides the guess
   (`kitty::shm_supported`, `kitty::transmit_shm`, `KittyState::shm`).
-- `--snapshot ... --format describe`: the view described for a language model, with every
-  visible label's kind, cell, lon/lat and direction and distance from the center, and each
-  data layer's nearest features with their properties (`mapterm::describe`,
-  `Map::features_in_view_list`). In a 30-question test on six views, models answered 100%
-  of close-call spatial questions from it, against 60-80% from braille text and 83-87%
-  from an image of the same render.
+- `--snapshot ... --format describe`: the view described for a language model: every visible
+  label's kind, cell, lon/lat and direction and distance from the center; what covers the
+  view (water, parks, buildings: shares and a 25 x 10 grid); the major roads and which way
+  they run; and each data layer's nearest features with their properties
+  (`mapterm::describe`, `Map::features_in_view_list`). Tested on street-level views with
+  Claude Sonnet 5.5 and Haiku 5.5: 100% on close-call questions about labelled places
+  (60-87% from braille text or an image) and 83-93% on water and parks (40-87%), at ~1,700
+  tokens for a busy view (image ~800, braille text ~6,600).
+- `--snapshot ... --format png`: the view as an image on stdout (16 x 34 pixels per cell,
+  fills and lines drawn smoothly, no labels).
 
 ### Fixed
 
