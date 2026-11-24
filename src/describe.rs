@@ -58,6 +58,9 @@ pub fn describe(map: &Map, cam: &Camera, area: Rect) -> String {
         let _ = writeln!(out, "- {text}{kind}: cell ({}, {}), {lat:.5}, {lon:.5}, {}", (x / 2.0) as i64, (y / 4.0) as i64, heading(lon0, lat0, *lon, *lat));
     }
 
+    areas(map, cam, area, &mut out);
+    roads(map, cam, area, &vp, &mut out);
+
     // Data layers (GeoJSON, GeoParquet, ...): how many in view, and the nearest ones.
     for (id, src) in map.sources() {
         let MapSource::GeoJson(_) = src else { continue };
@@ -90,6 +93,103 @@ pub fn describe(map: &Map, cam: &Camera, area: Rect) -> String {
         }
     }
     out
+}
+
+/// Grid squares across and down in the area grid.
+const GRID: (usize, usize) = (25, 10);
+
+/// What a basemap feature is, for the area grid: water, park (green space) or building.
+fn area_class(p: &crate::pick::Pick) -> Option<char> {
+    let class = p.props.iter().find(|(k, _)| k == "class").map(|(_, v)| v.to_string()).unwrap_or_default();
+    match (&*p.layer, class.as_str()) {
+        ("water" | "waterway", _) | (_, "water" | "river" | "lake" | "ocean" | "sea" | "canal" | "reservoir") => Some('W'),
+        ("building", _) => Some('B'),
+        ("park", _)
+        | ("landcover", "grass" | "wood" | "farmland" | "wetland" | "scrub")
+        | ("landuse", "park" | "cemetery" | "grass" | "pitch" | "garden" | "playground") => Some('P'),
+        _ => None,
+    }
+}
+
+/// A grid of what covers each part of the view (W water, P park or green, B buildings,
+/// . none of them), and each one's share, from what's under points in each square.
+fn areas(map: &Map, cam: &Camera, area: Rect, out: &mut String) {
+    let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
+    let (gw, gh) = GRID;
+    let mut grid = vec![vec!['.'; gw]; gh];
+    let mut count = std::collections::HashMap::new();
+    for (gy, row) in grid.iter_mut().enumerate() {
+        for (gx, cell) in row.iter_mut().enumerate() {
+            let mut votes = std::collections::HashMap::new();
+            for (fx, fy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                let dot = ((gx as f64 + fx) * w / gw as f64, (gy as f64 + fy) * h / gh as f64);
+                let picks = map.query_rendered_features(cam, area, dot, None);
+                // Buildings stand on everything; then water, then green.
+                let c = ['B', 'W', 'P'].into_iter().find(|c| picks.iter().any(|p| area_class(p) == Some(*c))).unwrap_or('.');
+                *votes.entry(c).or_insert(0) += 1;
+            }
+            *cell = votes.into_iter().max_by_key(|(c, n)| (*n, *c != '.')).map(|(c, _)| c).unwrap_or('.');
+            *count.entry(*cell).or_insert(0) += 1;
+        }
+    }
+    let share = |c: char| 100 * count.get(&c).copied().unwrap_or(0) / (gw * gh);
+    let _ = writeln!(out, "\n# Areas");
+    let _ = writeln!(out, "water {}%, parks and green {}%, buildings {}% of the view", share('W'), share('P'), share('B'));
+    let _ = writeln!(out, "grid ({gw} x {gh}, north up; W water, P park or green, B buildings, . other):");
+    for row in grid {
+        let _ = writeln!(out, "{}", row.into_iter().collect::<String>());
+    }
+}
+
+/// Major roads in the view: name, class, which way they run and where.
+fn roads(map: &Map, cam: &Camera, area: Rect, vp: &Viewport, out: &mut String) {
+    const MAJOR: [&str; 4] = ["motorway", "trunk", "primary", "secondary"];
+    let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
+    // Road -> (class, points in view in dots).
+    let mut found: std::collections::BTreeMap<String, (String, Vec<(f64, f64)>)> = Default::default();
+    let mut y = 2.0;
+    while y < h {
+        let mut x = 2.0;
+        while x < w {
+            for p in map.query_rendered_features(cam, area, (x, y), None) {
+                let get = |k: &str| p.props.iter().find(|(key, _)| key == k).map(|(_, v)| v.to_string());
+                let Some(class) = get("class").filter(|c| MAJOR.contains(&c.as_str())) else { continue };
+                if p.geom != crate::mvt::GeomType::Line {
+                    continue;
+                }
+                let name = get("name").or_else(|| get("ref")).unwrap_or_else(|| format!("unnamed {class} road"));
+                let e = found.entry(name).or_insert_with(|| (class.clone(), Vec::new()));
+                for &(lon, lat) in p.lonlat.iter().flatten() {
+                    let d = vp.dot_ll(lon, lat);
+                    if d.0 >= 0.0 && d.1 >= 0.0 && d.0 < w && d.1 < h {
+                        e.1.push(d);
+                    }
+                }
+            }
+            x += 4.0;
+        }
+        y += 8.0;
+    }
+    let _ = writeln!(out, "\n# Major roads ({})", found.values().filter(|(_, pts)| pts.len() >= 2).count());
+    for (name, (class, pts)) in found {
+        if pts.len() < 2 {
+            continue;
+        }
+        let (x0, x1) = pts.iter().fold((f64::MAX, f64::MIN), |a, p| (a.0.min(p.0), a.1.max(p.0)));
+        let (y0, y1) = pts.iter().fold((f64::MAX, f64::MIN), |a, p| (a.0.min(p.1), a.1.max(p.1)));
+        let (sx, sy) = ((x1 - x0) / w, (y1 - y0) / h);
+        let third = |v: f64, n: f64, names: [&'static str; 3]| names[((v / n * 3.0) as usize).min(2)];
+        let (dir, at) = if sx > 2.0 * sy {
+            ("east-west", format!("in the {} third", third((y0 + y1) / 2.0, h, ["top", "middle", "bottom"])))
+        } else if sy > 2.0 * sx {
+            ("north-south", format!("in the {} third", third((x0 + x1) / 2.0, w, ["left", "center", "right"])))
+        } else {
+            ("diagonally", String::new())
+        };
+        let span = sx.max(sy);
+        let how = if span > 0.7 { "across the whole view" } else { "partway" };
+        let _ = writeln!(out, "- {name} [{class}]: runs {dir} {how}{}", if at.is_empty() { String::new() } else { format!(", {at}") });
+    }
 }
 
 /// What a label labels: the layer and class of a feature under it that has that name.
@@ -147,6 +247,25 @@ mod tests {
         assert_eq!(heading(0.0, 0.0, 0.0, 0.003), "330 m north");
         assert_eq!(heading(0.0, 0.0, -0.002, -0.002), "310 m south-west");
         assert_eq!(heading(0.0, 0.0, 0.02, 0.0), "2.2 km east");
+    }
+
+    #[test]
+    fn area_grid() {
+        // Water over the west half of the view: W on the left of the grid, . on the right.
+        let mut map = Map::new();
+        let doc = serde_json::json!({"type": "Polygon", "coordinates": [[[-0.01, -0.01], [0.0, -0.01], [0.0, 0.01], [-0.01, 0.01], [-0.01, -0.01]]]});
+        map.add_source("water", MapSource::geojson(&doc).unwrap()).unwrap();
+        map.add_layer(crate::StyleLayer::fill("water", "water").color("#0000ff")).unwrap();
+        let (cam, area) = (Camera::new(0.0, 0.0, 15.0), Rect::new(0, 0, 60, 20));
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(map.view(&cam), area, &mut buf);
+        let d = describe(&map, &cam, area);
+        let rows: Vec<&str> = d.lines().skip_while(|l| !l.starts_with("grid")).skip(1).take(GRID.1).collect();
+        assert_eq!(rows.len(), GRID.1, "{d}");
+        for r in rows {
+            assert!(r.starts_with("WWWWWWWWWWWW") && r.ends_with("............"), "{r}");
+        }
+        assert!(d.contains("water 4") || d.contains("water 5"), "about half: {d}");
     }
 
     #[test]
