@@ -70,3 +70,11 @@ reason = "fixed in zstd-safe 7.4.0 (zstd-rs f48548be: check InBuffer::pos before
 id = "RUSTSEC-2026-0406"
 ignoreUntil = 2027-02-01
 reason = "fixed in zstd-safe 7.4.0 (zstd-rs d6a1fc43: no dictionary unload under unfinished zstdmt jobs)"
+
+# chrono (via arrow and geoparquet) is flagged unmaintained, with no replacement release.
+# mapterm only reads GeoParquet; arrow/parquet own the dependency, so it goes when they drop it.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-02-01
+reason = "chrono unmaintained; transitive via arrow/geoparquet with no upgrade available"
