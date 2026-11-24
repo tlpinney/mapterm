@@ -96,7 +96,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --snapshot   render one frame to stdout as text and exit
   --format      with --snapshot: text (default), ansi (24-bit color), html (a <pre> fragment),
                 describe (the view in words: labels, areas and roads with positions) or
-                png (the view as an image, 16 x 34 pixels per cell, no labels; to stdout)
+                png (the view as an image, 16 x 34 pixels per cell, over any --raster
+                imagery, no labels; to stdout)
   --pick        with --snapshot: print the features under that cell as JSON lines instead
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
@@ -368,11 +369,11 @@ struct Loading {
 const PNG_CELL: (u32, u32) = (16, 34);
 
 /// A pixel-mode frame put together from its tiles as the terminal would place them, over
-/// white: RGBA rows and the size.
-fn compose_png(f: &mapterm::pixels::PixFrame, area: Rect) -> (Vec<u8>, u32, u32) {
+/// `under` (imagery from [`mapterm::Map::raster_rgba`]) or white: RGBA rows and the size.
+fn compose_png(f: &mapterm::pixels::PixFrame, area: Rect, under: Option<Vec<u8>>) -> (Vec<u8>, u32, u32) {
     let (cw, ch) = PNG_CELL;
     let (w, h) = (area.width as u32 * cw, area.height as u32 * ch);
-    let mut img = vec![255u8; (w * h * 4) as usize];
+    let mut img = under.filter(|u| u.len() == (w * h * 4) as usize).unwrap_or_else(|| vec![255u8; (w * h * 4) as usize]);
     let images: std::collections::HashMap<u32, &mapterm::pixels::PixImage> = f.new.iter().map(|i| (i.id, i)).collect();
     for p in &f.placed {
         let Some(src) = images.get(&p.id) else { continue };
@@ -677,7 +678,8 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
         if basemap && l.kind != Kind::Symbol && vector >= 1 {
             on = false;
         }
-        if raster && l.kind == Kind::Fill && (basemap || geojson) {
+        // Fills (and flat 3D buildings) would hide the imagery under them.
+        if raster && matches!(l.kind, Kind::Fill | Kind::FillExtrusion) && (basemap || geojson) {
             on = false;
         }
         let _ = map.set_visibility(&id, on);
@@ -931,6 +933,10 @@ async fn main() -> Result<()> {
 
     if let Some((w, h)) = a.snapshot {
         let area = Rect::new(0, 0, w, h);
+        // An image export fetches imagery at image resolution, not one color per cell.
+        if a.format == "png" {
+            map.raster_mode = RasterMode::Kitty { cell_px: (PNG_CELL.0 as f64, PNG_CELL.1 as f64) };
+        }
         for req in map.tile_requests(&cam, area) {
             let r = req.load().await;
             if let Err(e) = map.insert_loaded(&req.source, req.id, r) {
@@ -991,7 +997,9 @@ async fn main() -> Result<()> {
             f.new = std::mem::take(&mut sent);
         }
         if let Some(f) = &last {
-            let (img, w, h) = compose_png(f, area);
+            // Over the imagery when there is any, else over white.
+            let under = map.raster_rgba(&cam, area, area.width as u32 * PNG_CELL.0, area.height as u32 * PNG_CELL.1);
+            let (img, w, h) = compose_png(f, area, under);
             if let Some(path) = &png {
                 image::save_buffer(path, &img, w, h, image::ExtendedColorType::Rgba8)?;
                 eprintln!("pixels: {} tiles drawn, {} placed, {:.1} ms -> {path}", f.new.len(), f.placed.len(), t.elapsed().as_secs_f64() * 1000.0);

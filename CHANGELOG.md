@@ -13,6 +13,8 @@ All notable changes to mapterm are listed here. The format follows
   memory (kitty `t=s`) instead of inline base64; anywhere else, or if the object can't be
   made, they're sent inline. `MAPTERM_KITTY_MEDIUM=shm|direct` overrides the guess
   (`kitty::shm_supported`, `kitty::transmit_shm`, `KittyState::shm`).
+- `--format png` draws `--raster` imagery under the map, fetched at the image's resolution
+  and sampled smoothly, with `raster-opacity` (`Map::raster_rgba`).
 - `--snapshot ... --format describe`: the view described for a language model: every visible
   label's kind, cell, lon/lat and direction and distance from the center; what covers the
   view (water, parks, buildings: shares and a 25 x 10 grid); the major roads and which way
@@ -26,6 +28,8 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- Over imagery, flat 3D buildings (`fill-extrusion`) are hidden like other fills; they
+  covered the imagery in the viewer since buildings got their own layer kind.
 - `mapterm --help` lists `.mbtiles` files for the map source and `--raster`.
 
 ## [0.3.0] - 2026-11-23

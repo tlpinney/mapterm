@@ -70,6 +70,7 @@ mapterm --snapshot 120x40 --at 38.8895,-77.0353         # print one frame as tex
 mapterm --snapshot 120x40 --format html > map.html       #   ... or as colored ANSI text or HTML
 mapterm --snapshot 100x30 --format describe              #   ... or in words (for a language model)
 mapterm --snapshot 100x30 --format png > view.png        #   ... or as an image (no labels)
+mapterm --raster esri --snapshot 100x30 --format png > sat.png  # ... over satellite imagery
 ```
 
 `--format describe` describes the view instead of drawing it: its center, size and bounds;
@@ -81,7 +82,9 @@ models read that better than any picture of the map, for few tokens: about 1,700
 busy street view (500 for a quiet one), against ~6,600 for the braille text.
 
 `--format png` draws the view as an image, 16 x 34 pixels per cell (100 x 30 is 1600 x
-1020; ~1,600-2,000 tokens to a model), with smooth fills and lines but no labels. Pair it
+1020; ~1,600-2,000 tokens to a model), with smooth fills and lines but no labels, over
+any `--raster` imagery (fetched at the image's resolution; fills that would hide it are
+left out, as in the viewer). Pair it
 with `--format describe` when road layout or other shapes matter.
 
 Tested with Claude Sonnet 5.5 and Haiku 5.5 on street-level views with known answers:

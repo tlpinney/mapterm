@@ -358,6 +358,27 @@ impl GeoJsonSource {
     }
 }
 
+/// A raster tile found for an id: itself or a loaded ancestor, with the ancestor's id.
+type StandIn = Option<(TileId, Arc<RasterTile>)>;
+
+/// A pixel of `img` at fractional (x, y), blending the four around it (edges clamped).
+fn bilinear(img: &image::RgbaImage, x: f64, y: f64) -> [u8; 4] {
+    let (w, h) = img.dimensions();
+    let cx = |v: f64| (v.max(0.0) as u32).min(w - 1);
+    let cy = |v: f64| (v.max(0.0) as u32).min(h - 1);
+    let (x0, y0) = (x.floor(), y.floor());
+    let (tx, ty) = ((x - x0).clamp(0.0, 1.0), (y - y0).clamp(0.0, 1.0));
+    let p = |xx: f64, yy: f64| img.get_pixel(cx(xx), cy(yy)).0;
+    let (a, b, c, d) = (p(x0, y0), p(x0 + 1.0, y0), p(x0, y0 + 1.0), p(x0 + 1.0, y0 + 1.0));
+    let mut out = [0u8; 4];
+    for k in 0..4 {
+        let top = a[k] as f64 * (1.0 - tx) + b[k] as f64 * tx;
+        let bot = c[k] as f64 * (1.0 - tx) + d[k] as f64 * tx;
+        out[k] = (top * (1.0 - ty) + bot * ty).round() as u8;
+    }
+    out
+}
+
 /// What a style layer resolved to for one feature.
 #[derive(Clone, Debug)]
 enum Resolved {
@@ -1189,6 +1210,78 @@ impl Map {
             RasterMode::Cells => 2.0,
         };
         crate::raster::raster_zoom(cam, src.tile_px, dots_per_px, src.max_zoom)
+    }
+
+    /// The shown raster layers (imagery) drawn into a `w` x `h` image of this view, over the
+    /// style's background (white without one), each blended by its `raster-opacity` and
+    /// sampled smoothly; a tile not loaded is stood in for by a loaded ancestor. RGBA rows,
+    /// or None when no raster layer is shown. For image exports (`--format png`).
+    pub fn raster_rgba(&self, cam: &Camera, area: Rect, w: u32, h: u32) -> Option<Vec<u8>> {
+        let ctx = Ctx { zoom: cam.zoom, geom: GeomType::Unknown, props: &[], state: &[] };
+        let layers: Vec<(&RasterTiles, f64)> = self
+            .layers
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(cam.zoom) => {
+                    let Some(MapSource::Raster(r)) = self.source(l.source.as_deref()?) else { return None };
+                    let o = l.paint_expr("raster-opacity").and_then(|e| e.eval(&ctx).as_num()).unwrap_or(1.0).clamp(0.0, 1.0);
+                    (o > 0.0).then_some((r, o))
+                }
+                _ => None,
+            })
+            .collect();
+        if layers.is_empty() || w == 0 || h == 0 {
+            return None;
+        }
+        let (r0, g0, b0) = self.background(cam.zoom).map(|c| c.to_u8()).unwrap_or((255, 255, 255));
+        let mut img: Vec<u8> = std::iter::repeat_n([r0, g0, b0, 255], (w * h) as usize).flatten().collect();
+        let vp = Viewport::new(cam, area);
+        let (dw, dh) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
+        // World x by column and y by row (Mercator: x is linear, y isn't).
+        let wx: Vec<f64> = (0..w)
+            .map(|px| {
+                let (lon, lat) = vp.dot_to_lonlat((px as f64 + 0.5) / w as f64 * dw, 0.0);
+                to_world(lon, lat).0
+            })
+            .collect();
+        let wy: Vec<f64> = (0..h)
+            .map(|py| {
+                let (lon, lat) = vp.dot_to_lonlat(0.0, (py as f64 + 0.5) / h as f64 * dh);
+                to_world(lon, lat).1
+            })
+            .collect();
+        for (r, opacity) in layers {
+            let rz = self.raster_zoom(&r.src, cam);
+            let n = (1u64 << rz) as f64;
+            let mut last: Option<(TileId, StandIn)> = None;
+            for (py, &y) in wy.iter().enumerate() {
+                for (px, &x) in wx.iter().enumerate() {
+                    if !(0.0..1.0).contains(&x) || !(0.0..1.0).contains(&y) {
+                        continue;
+                    }
+                    let id = (rz, (x * n) as u32, (y * n) as u32);
+                    let found = match &last {
+                        Some((k, t)) if *k == id => t.clone(),
+                        _ => {
+                            let t = r.tiles.get_or_ancestor(id);
+                            last = Some((id, t.clone()));
+                            t
+                        }
+                    };
+                    let Some(((az, ax, ay), tile)) = found else { continue };
+                    let m = (1u64 << az) as f64;
+                    let (tw, th) = tile.size();
+                    let (fx, fy) = ((x * m - ax as f64) * tw as f64 - 0.5, (y * m - ay as f64) * th as f64 - 0.5);
+                    let c = bilinear(&tile.rgba, fx, fy);
+                    let o = (py * w as usize + px) * 4;
+                    let a = opacity * c[3] as f64 / 255.0;
+                    for k in 0..3 {
+                        img[o + k] = (c[k] as f64 * a + img[o + k] as f64 * (1.0 - a)).round() as u8;
+                    }
+                }
+            }
+        }
+        Some(img)
     }
 
     /// Store a tile loaded with [`TileRequest::load`]. A failed load returns its error and the
@@ -2911,6 +3004,24 @@ mod tests {
         map.add_part("d", 8, crate::geojson::features(&json!({"type": "Point", "coordinates": [1, 1]})).unwrap().0).unwrap();
         assert_eq!(map.features_in_view("d", &cam, area), Some(1));
         assert_eq!(map.features_in_view("d", &Camera::new(120.0, 0.0, 6.0), area), Some(0), "elsewhere");
+    }
+
+    #[test]
+    fn raster_layers_draw_into_an_image() {
+        let mut map = Map::new();
+        assert!(map.raster_rgba(&Camera::new(0.0, 0.0, 2.0), Rect::new(0, 0, 10, 5), 160, 170).is_none(), "no imagery: none");
+        let src = crate::raster::RasterSource::from_preset(crate::raster::preset("osm").unwrap(), None).unwrap();
+        map.add_source("img", MapSource::raster(Arc::new(src))).unwrap();
+        map.add_layer(StyleLayer::raster("img", "img")).unwrap();
+        map.raster_mode = RasterMode::Kitty { cell_px: (16.0, 34.0) };
+        // One red tile at zoom 0 stands in for every tile the view needs.
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(256, 256, image::Rgba([255, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let Some((_, MapSource::Raster(r))) = map.sources.iter_mut().find(|(id, _)| id == "img") else { panic!() };
+        r.tiles.insert((0, 0, 0), Some(crate::raster::decode(&png).unwrap()));
+        let img = map.raster_rgba(&Camera::new(0.0, 0.0, 2.0), Rect::new(0, 0, 10, 5), 160, 170).unwrap();
+        assert_eq!(img.len(), 160 * 170 * 4);
+        assert_eq!(&img[(85 * 160 + 80) * 4..(85 * 160 + 80) * 4 + 4], &[255, 0, 0, 255], "the middle is the tile's red");
     }
 
     #[test]
