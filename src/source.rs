@@ -26,14 +26,22 @@ pub(crate) const DISK_TTL: Duration = Duration::from_secs(30 * 86400);
 /// and archive hosts redirect to storage URLs) but never sends a `Referer`, which would carry
 /// the previous URL, query and all, to the next host. For requests that carry an API key, use
 /// [`keyed_client`].
+///
+/// Every call returns a handle to the same client, so connections (and their TLS sessions)
+/// are reused across tiles, footers and chunks instead of set up again each time.
 pub fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .user_agent(concat!("mapterm/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
-        .referer(false)
-        .build()
-        .expect("http client")
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .user_agent(concat!("mapterm/", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .referer(false)
+                .build()
+                .expect("http client")
+        })
+        .clone()
 }
 
 /// The client for requests that carry an API key (in a header or the URL): like

@@ -96,6 +96,51 @@ fn geo_metadata(meta: &parquet::file::metadata::FileMetaData) -> Result<(geoparq
     Ok((geo, raw))
 }
 
+static ALL_COLUMNS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Read every column, not just the light ones. Off by default: when the chunks read come to
+/// more than 1 MB, a column over 5% of their bytes (ids and provenance records, not what's
+/// drawn) is skipped.
+pub fn set_all_columns(on: bool) {
+    ALL_COLUMNS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A column heavier than this share of the chunks read is skipped (unless
+/// [`set_all_columns`]): such columns are ids and provenance records, not what's drawn.
+const HEAVY_SHARE: f64 = 0.05;
+
+/// Heavy columns are skipped only when the chunks read come to more than this (bytes).
+const SKIP_ABOVE: i64 = 1 << 20;
+
+/// Which top-level columns to read from `groups`: the geometry; not the covering bbox column
+/// (bookkeeping for skipping chunks); and no other column over [`HEAVY_SHARE`] of their bytes.
+/// In Overture's buildings that drops `id`, `bbox` and `sources`, about a third of each
+/// chunk. Returns the mask and the kept columns' indices.
+fn projection(meta: &ParquetMetaData, groups: &[usize], geometry: &str, covering: Option<&str>) -> (parquet::arrow::ProjectionMask, Vec<usize>) {
+    let descr = meta.file_metadata().schema_descr();
+    let roots: Vec<String> = descr.root_schema().get_fields().iter().map(|f| f.name().to_string()).collect();
+    let mut size = vec![0i64; roots.len()];
+    for &g in groups {
+        let Some(rg) = meta.row_groups().get(g) else { continue };
+        for c in rg.columns() {
+            if let Some(i) = c.column_path().parts().first().and_then(|top| roots.iter().position(|r| r == top)) {
+                size[i] += c.compressed_size();
+            }
+        }
+    }
+    let total = size.iter().sum::<i64>().max(1) as f64;
+    // Small reads keep every column: skipping saves little there, and in a small file every
+    // column is a large share.
+    let all = ALL_COLUMNS.load(std::sync::atomic::Ordering::Relaxed) || total < SKIP_ABOVE as f64;
+    let keep: Vec<usize> = roots
+        .iter()
+        .enumerate()
+        .filter(|(i, name)| *name == geometry || (Some(name.as_str()) != covering && (all || size[*i] as f64 / total <= HEAVY_SHARE)))
+        .map(|(i, _)| i)
+        .collect();
+    (parquet::arrow::ProjectionMask::roots(descr, keep.iter().copied()), keep)
+}
+
 /// What [`collect`] needs to know about a read.
 struct Read {
     /// The geometry column.
@@ -130,6 +175,17 @@ fn prepare<T>(builder: ArrowReaderBuilder<T>, bbox: Option<Bbox>) -> Result<(Arr
     }
     // The covering's bbox column is bookkeeping for skipping, not a property.
     let covering = col["covering"]["bbox"]["xmin"][0].as_str().map(str::to_string);
+    // The chunks being read: those in the box when the file could skip by bbox, else all.
+    let groups: Vec<usize> = match bbox {
+        Some([w, s, e, n]) if keep.is_none() => {
+            let rect = geo_types::Rect::new(geo_types::coord! { x: w, y: s }, geo_types::coord! { x: e, y: n });
+            builder.intersecting_row_groups(rect, &geo, None).unwrap_or_default()
+        }
+        _ => (0..builder.metadata().num_row_groups()).collect(),
+    };
+    let (mask, cols) = projection(builder.metadata(), &groups, &geo.primary_column, covering.as_deref());
+    let schema = Arc::new(schema.project(&cols)?);
+    let builder = builder.with_projection(mask);
     Ok((builder, Read { column: geo.primary_column.clone(), keep, covering }, schema))
 }
 
@@ -305,9 +361,12 @@ pub fn bytes_fetched() -> u64 {
     FETCHED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Large ranges are fetched in pieces of this size, at once (see [`HttpReader::range`]).
+const PIECE: u64 = 512 << 10;
+
 /// Ranges closer than this are read in one request (the bytes between are cheaper than
-/// another round trip).
-const MERGE_GAP: u64 = 1 << 20;
+/// another round trip). Small, so columns skipped by [`projection`] aren't fetched anyway.
+const MERGE_GAP: u64 = 64 << 10;
 
 /// A remote file read with HTTP range requests.
 struct HttpReader {
@@ -336,7 +395,23 @@ impl HttpReader {
         HttpReader { client, url: url.to_string(), len }
     }
 
+    /// Bytes `range`. A large range is fetched as [`PIECE`]-sized pieces at once: one
+    /// connection to an object store manages about 1 MB/s from afar, several manage several.
     async fn range(&self, range: Range<u64>) -> parquet::errors::Result<Bytes> {
+        if range.end - range.start <= 2 * PIECE {
+            return self.one(range).await;
+        }
+        let pieces: Vec<Range<u64>> = (range.start..range.end).step_by(PIECE as usize).map(|s| s..(s + PIECE).min(range.end)).collect();
+        let parts = futures::future::try_join_all(pieces.into_iter().map(|r| self.one(r))).await?;
+        let mut out = bytes::BytesMut::with_capacity((range.end - range.start) as usize);
+        for p in parts {
+            out.extend_from_slice(&p);
+        }
+        Ok(out.freeze())
+    }
+
+    /// One range request.
+    async fn one(&self, range: Range<u64>) -> parquet::errors::Result<Bytes> {
         let err = |e: String| parquet::errors::ParquetError::External(e.into());
         if range.start >= range.end {
             return Ok(Bytes::new());
@@ -687,6 +762,9 @@ impl Dataset {
                         let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(reader, m.arrow.clone()).with_row_groups(vec![g]);
                         let (geo, _) = geo_metadata(builder.metadata().file_metadata())?;
                         let schema = builder.geoarrow_schema(&geo, false, Default::default()).map_err(|e| anyhow!("GeoParquet schema: {e}"))?;
+                        let (mask, cols) = projection(builder.metadata(), &[g], &geo.primary_column, m.read.covering.as_deref());
+                        let schema = Arc::new(schema.project(&cols)?);
+                        let builder = builder.with_projection(mask);
                         let stream = GeoParquetRecordBatchStream::try_new(builder.build()?, schema)?;
                         let batches: Vec<RecordBatch> = stream.try_collect().await?;
                         let doc = collect(&batches, &m.read)?;
@@ -1035,6 +1113,56 @@ mod tests {
             json!({"assets": {"azure": {"href": "abfs://x.parquet"}, "aws": {"href": "https://s3/x.zstd.parquet", "type": "application/vnd.apache.parquet"}}});
         assert_eq!(parquet_asset(&item).as_deref(), Some("https://s3/x.zstd.parquet"));
         assert_eq!(parquet_asset(&json!({"assets": {"t": {"href": "https://x/thumb.png"}}})), None);
+    }
+
+    #[test]
+    fn heavy_columns_are_skipped_past_a_megabyte() {
+        // 20,000 points with a large, incompressible `id` and a small `name`.
+        let schema = Type::group_type_builder("schema")
+            .with_fields(
+                ["geometry", "id", "name"]
+                    .iter()
+                    .map(|n| Arc::new(Type::primitive_type_builder(n, PhysicalType::BYTE_ARRAY).with_repetition(Repetition::REQUIRED).build().unwrap()))
+                    .collect(),
+            )
+            .build()
+            .unwrap();
+        let props = WriterProperties::builder().set_key_value_metadata(Some(vec![KeyValue::new("geo".into(), WKB_GEO.to_string())])).build();
+        let mut out = Vec::new();
+        let mut w = SerializedFileWriter::new(&mut out, Arc::new(schema), Arc::new(props)).unwrap();
+        let mut rg = w.next_row_group().unwrap();
+        let n = 20_000u64;
+        let geoms: Vec<ByteArray> = (0..n).map(|i| le_point(i as f64 * 1e-4, 0.0).into()).collect();
+        let mut x = 0x9e3779b97f4a7c15u64;
+        let ids: Vec<ByteArray> = (0..n)
+            .map(|_| {
+                (0..8)
+                    .map(|_| {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        format!("{x:016x}")
+                    })
+                    .collect::<String>()
+                    .into_bytes()
+                    .into()
+            })
+            .collect();
+        let names: Vec<ByteArray> = (0..n).map(|i| ByteArray::from(if i % 2 == 0 { "a" } else { "b" })).collect();
+        for col in [&geoms, &ids, &names] {
+            let mut c = rg.next_column().unwrap().unwrap();
+            c.typed::<ByteArrayType>().write_batch(col, None, None).unwrap();
+            c.close().unwrap();
+        }
+        rg.close().unwrap();
+        w.close().unwrap();
+        let meta = parquet::file::metadata::ParquetMetaDataReader::new().parse_and_finish(&Bytes::from(out)).unwrap();
+        let (_, kept) = projection(&meta, &[0], "geometry", None);
+        assert_eq!(kept, vec![0, 2], "geometry and name kept, the heavy id skipped");
+        set_all_columns(true);
+        let (_, kept) = projection(&meta, &[0], "geometry", None);
+        set_all_columns(false);
+        assert_eq!(kept, vec![0, 1, 2], "--all-columns keeps it");
     }
 
     #[test]

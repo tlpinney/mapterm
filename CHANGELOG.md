@@ -13,6 +13,12 @@ All notable changes to mapterm are listed here. The format follows
   falling back to the last found and then a built-in one (`msbuildings::latest`). Each
   release's index is kept on disk, so later starts don't download its 6 MB again
   (3.7 s -> 0.2 s to open).
+- GeoParquet loads faster: a large range is fetched as 512 KB pieces at once (one
+  connection to a distant object store manages about 1 MB/s); one HTTP client is shared,
+  so connections are reused; and heavy columns not drawn (over 5% of a chunk, e.g.
+  Overture's `id` and `sources`; the covering `bbox` always) are skipped once a read
+  passes 1 MB (`--all-columns` keeps them). A cold Overture view of San Salvador went
+  from ~3.3 s (3.1 to 5.1) to ~2.3 s, and 4.3 MB to 2.7 MB per chunk.
 
 ### Fixed
 
