@@ -380,69 +380,22 @@ pub fn cache_limit() -> u64 {
 /// Where the cache lives (tests point it elsewhere).
 static CACHE_ROOT: std::sync::OnceLock<std::sync::Mutex<Option<std::path::PathBuf>>> = std::sync::OnceLock::new();
 
-fn cache_root() -> std::path::PathBuf {
+/// The range cache file: `~/.cache/mapterm/geoparquet.sqlite`.
+fn cache_file() -> std::path::PathBuf {
     let over = CACHE_ROOT.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).clone();
-    over.unwrap_or_else(|| crate::source::cache_root().join("geoparquet"))
+    over.unwrap_or_else(crate::source::cache_root).join("geoparquet.sqlite")
 }
 
-/// A file's cache directory: by URL and ETag, so a new version of the file starts empty.
-fn cache_dir(url: &str, etag: Option<&str>) -> Option<std::path::PathBuf> {
+/// The range store, if it can be opened.
+fn ranges() -> Option<Arc<crate::tilecache::RangeCache>> {
+    crate::tilecache::RangeCache::at(&cache_file())
+}
+
+/// A file's key in the range cache: by URL and ETag, so a new version of the file starts
+/// empty. None without an ETag, or with the cache off.
+fn cache_key(url: &str, etag: Option<&str>) -> Option<String> {
     let etag = etag?;
-    if CACHE_LIMIT.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-        return None;
-    }
-    let dir = cache_root().join(crate::source::hash(&format!("{url}\n{etag}")));
-    if !dir.join("etag").is_file() {
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("etag"), etag);
-    }
-    Some(dir)
-}
-
-fn touch(f: &std::path::Path) {
-    if let Ok(file) = std::fs::File::options().append(true).open(f) {
-        let _ = file.set_modified(std::time::SystemTime::now());
-    }
-}
-
-/// Write `bytes` as `file` (through a temporary name, so a cut write is never read as
-/// whole), then keep the cache under its limit.
-fn keep(dir: &std::path::Path, file: &std::path::Path, bytes: &[u8]) {
-    let tmp = file.with_extension("part");
-    if std::fs::create_dir_all(dir).is_ok() && std::fs::write(&tmp, bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, file);
-    }
-    trim_cache(file);
-}
-
-/// Remove the least recently used cached ranges until the cache fits its limit, keeping
-/// `keep` (the one just written). Only range files (named START-END) are removed.
-fn trim_cache(keep: &std::path::Path) {
-    let limit = CACHE_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
-    let Ok(dirs) = std::fs::read_dir(cache_root()) else { return };
-    let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = Vec::new();
-    for d in dirs.flatten() {
-        for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
-            let name = f.file_name().to_string_lossy().to_string();
-            let is_range = name.split_once('-').is_some_and(|(a, b)| a.parse::<u64>().is_ok() && b.parse::<u64>().is_ok());
-            if let (true, Ok(m)) = (is_range, f.metadata()) {
-                files.push((m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), f.path()));
-            }
-        }
-    }
-    let mut total: u64 = files.iter().map(|f| f.1).sum();
-    if total <= limit {
-        return;
-    }
-    files.sort_by_key(|f| f.0);
-    for (_, size, path) in files {
-        if total <= limit {
-            break;
-        }
-        if path != keep && std::fs::remove_file(&path).is_ok() {
-            total -= size;
-        }
-    }
+    (cache_limit() > 0).then(|| crate::source::hash(&format!("{url}\n{etag}")))
 }
 
 /// Large ranges are fetched in pieces of this size, at once (see [`HttpReader::range`]).
@@ -457,9 +410,11 @@ struct HttpReader {
     client: reqwest::Client,
     url: String,
     len: u64,
-    /// Where fetched ranges are kept on disk: per URL and version (ETag), so a changed file
-    /// never serves old bytes. None for files without an ETag (no way to tell a change).
-    cache: Option<std::path::PathBuf>,
+    /// The file's version (ETag), if the server gives one.
+    etag: Option<String>,
+    /// The key its fetched ranges are kept under: URL and ETag, so a changed file never
+    /// serves old bytes. None without an ETag (no way to tell a change) or with the cache off.
+    cache: Option<String>,
 }
 
 impl HttpReader {
@@ -475,33 +430,32 @@ impl HttpReader {
             .and_then(|v| v.to_str().ok()?.parse().ok())
             .with_context(|| format!("{url}: no Content-Length, so it can't be read in parts"))?;
         let etag = r.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_string);
-        Ok(HttpReader { client, url: url.to_string(), len, cache: cache_dir(url, etag.as_deref()) })
+        Ok(HttpReader { client, url: url.to_string(), len, cache: cache_key(url, etag.as_deref()), etag })
     }
 
     /// The file's version (ETag), for readers made later with [`HttpReader::known`].
     fn etag(&self) -> Option<String> {
-        self.cache.as_ref().and_then(|d| std::fs::read_to_string(d.join("etag")).ok())
+        self.etag.clone()
     }
 
     /// A reader for a file whose length is known (no HEAD request).
     fn known(client: reqwest::Client, url: &str, len: u64, etag: Option<&str>) -> HttpReader {
-        HttpReader { client, url: url.to_string(), len, cache: cache_dir(url, etag) }
+        HttpReader { client, url: url.to_string(), len, cache: cache_key(url, etag), etag: etag.map(str::to_string) }
     }
 
     /// Bytes `range`. A large range is fetched as [`PIECE`]-sized pieces at once: one
     /// connection to an object store manages about 1 MB/s from afar, several manage several.
     async fn range(&self, range: Range<u64>) -> parquet::errors::Result<Bytes> {
-        let file = self.cache.as_ref().map(|d| d.join(format!("{}-{}", range.start, range.end)));
-        if let Some(f) = &file
-            && let Ok(b) = std::fs::read(f)
+        let store = self.cache.as_ref().and_then(|_| ranges());
+        if let (Some(key), Some(st)) = (&self.cache, &store)
+            && let Some(b) = st.get(key, range.start, range.end)
             && b.len() as u64 == range.end - range.start
         {
-            touch(f);
             return Ok(Bytes::from(b));
         }
-        let b = self.fetch(range).await?;
-        if let (Some(f), Some(dir)) = (&file, &self.cache) {
-            keep(dir, f, &b);
+        let b = self.fetch(range.clone()).await?;
+        if let (Some(key), Some(st)) = (&self.cache, &store) {
+            st.put(key, range.start, range.end, &b, cache_limit());
         }
         Ok(b)
     }
@@ -1401,11 +1355,8 @@ mod tests {
         read_url(&url3, None).await.unwrap();
         assert_eq!(gets3.load(std::sync::atomic::Ordering::SeqCst), 2 * n, "without an ETag every read fetches");
         // Remove what the test wrote (file by file).
-        for d in std::fs::read_dir(&root).unwrap().flatten() {
-            for f in std::fs::read_dir(d.path()).unwrap().flatten() {
-                let _ = std::fs::remove_file(f.path());
-            }
-            let _ = std::fs::remove_dir(d.path());
+        for f in std::fs::read_dir(&root).unwrap().flatten() {
+            let _ = std::fs::remove_file(f.path());
         }
         let _ = std::fs::remove_dir(&root);
     }

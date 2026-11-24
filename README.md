@@ -141,7 +141,11 @@ afresh: revisiting an area needs only a quick check per file. That cache takes a
 
 `mapterm --cache` lists the caches (map tiles, imagery, GeoParquet, Microsoft buildings,
 STAC indexes) with their sizes and limits; `--cache-clear NAME` empties one, `all` every
-one.
+one. Map tiles and imagery are kept in SQLite, an MBTiles file per source in
+`~/.cache/mapterm` (so a cache opens like any MBTiles file), each kind within 2 GB by
+default (`--tile-cache SIZE`, `--imagery-cache SIZE`), least recently used out first.
+Caches from earlier versions (a file per tile) show as `old`: `--cache-clear old`
+removes them.
 Over San Salvador that's one footer and one 4 MB chunk, about 3 s, out of
 Overture's 257 GB. With `--bbox W,S,E,N` a layer is instead read once for that area
 (local files are read once, in place).

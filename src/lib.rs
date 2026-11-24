@@ -101,6 +101,7 @@ pub mod source;
 pub mod spec;
 pub mod store;
 pub mod stylejson;
+pub mod tilecache;
 
 pub use interact::{Click, Controller};
 pub use layer::{CustomLayer, DrawContext, Markers, PickContext};

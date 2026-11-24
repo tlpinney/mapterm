@@ -6,9 +6,9 @@ use std::{
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     io::Read,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -424,14 +424,11 @@ impl Source {
             && crate::mapbox::is_mapbox_host(t)
         {
             let url = t.replace("{z}", &z.to_string()).replace("{x}", &x.to_string()).replace("{y}", &y.to_string());
-            let file = dir.join(format!("{z}/{x}/{y}.pbf"));
-            let bytes = fetch_by_headers(&self.http, &file, &url, &[], true).await.map_err(crate::mapbox::redact)?;
+            let bytes = fetch_by_headers(&self.http, crate::tilecache::for_dir(dir), (z, x, y), &url, &[]).await.map_err(crate::mapbox::redact)?;
             return bytes.map(maybe_gunzip).transpose();
         }
-        let path = self.cache_dir.as_ref().map(|d| d.join(format!("{z}/{x}/{y}.mvt")));
-        if let Some(p) = &path
-            && let Some(b) = read_fresh(p)
-        {
+        let cache = self.cache_dir.as_deref().and_then(crate::tilecache::for_dir);
+        if let Some(b) = cache.as_ref().and_then(|c| c.fresh(z, x, y)) {
             return Ok(if b.is_empty() { None } else { Some(b) });
         }
         let tile = match &self.kind {
@@ -445,11 +442,8 @@ impl Source {
                 }
             }
         };
-        if let Some(p) = &path {
-            if let Some(d) = p.parent() {
-                let _ = std::fs::create_dir_all(d);
-            }
-            let _ = std::fs::write(p, tile.as_deref().unwrap_or(&[]));
+        if let Some(c) = &cache {
+            c.put(z, x, y, tile.as_deref().unwrap_or(&[]), crate::tilecache::now() + DISK_TTL.as_secs(), None);
         }
         Ok(tile)
     }
@@ -535,65 +529,43 @@ pub(crate) async fn get_revalidated(http: &reqwest::Client, url: &str, headers: 
     Ok(Revalidated { bytes: Some(out), not_modified: false, policy, etag })
 }
 
-/// A tile cached by its HTTP headers at `file` (with a `.meta` beside it: "expires etag"):
-/// used as is until its `max-age` runs out (at most 30 days), then asked for again with
-/// `If-None-Match`, so an unchanged tile comes back as a 304 and is kept. `no-store` and
-/// `no-cache` responses aren't kept. Bytes are stored as received. With `cache` off it
-/// only fetches.
-pub(crate) async fn fetch_by_headers(http: &reqwest::Client, file: &Path, url: &str, headers: &[(String, String)], cache: bool) -> Result<Option<Vec<u8>>> {
-    let meta = file.with_extension("meta");
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let cached = if cache { read_meta(&meta).zip(std::fs::read(file).ok()) } else { None };
-    if let Some(((expires, _), bytes)) = &cached
-        && now < *expires
+/// A tile cached by its HTTP headers in `cache` (see [`crate::tilecache`]): used as is
+/// until its `max-age` runs out (at most 30 days), then asked for again with `If-None-Match`,
+/// so an unchanged tile comes back as a 304 and is kept. `no-store` and `no-cache` responses
+/// aren't kept. Bytes are stored as received. Without a cache it only fetches.
+pub(crate) async fn fetch_by_headers(
+    http: &reqwest::Client,
+    cache: Option<std::sync::Arc<crate::tilecache::TileCache>>,
+    (z, x, y): (u8, u32, u32),
+    url: &str,
+    headers: &[(String, String)],
+) -> Result<Option<Vec<u8>>> {
+    let now = crate::tilecache::now();
+    let cached = cache.as_ref().and_then(|c| c.get(z, x, y));
+    if let Some(e) = &cached
+        && now < e.expires
     {
-        return Ok(Some(bytes.clone()));
+        return Ok(Some(e.data.clone()));
     }
-    let etag = cached.as_ref().and_then(|((_, e), _)| e.clone());
-    let r = get_revalidated(http, url, headers, etag.as_deref()).await?;
+    let r = get_revalidated(http, url, headers, cached.as_ref().and_then(|e| e.etag.as_deref())).await?;
     let keep = r.policy.max_age.min(DISK_TTL.as_secs());
     if r.not_modified {
-        let Some(((_, old_etag), bytes)) = cached else { bail!("{url}: HTTP 304 without a cached tile") };
-        if cache && !r.policy.no_store {
-            let _ = write_meta(&meta, now + keep, r.etag.as_deref().or(old_etag.as_deref()));
+        let Some(e) = cached else { bail!("{url}: HTTP 304 without a cached tile") };
+        if let Some(c) = &cache
+            && !r.policy.no_store
+        {
+            c.put(z, x, y, &e.data, now + keep, r.etag.as_deref().or(e.etag.as_deref()));
         }
-        return Ok(Some(bytes));
+        return Ok(Some(e.data));
     }
-    if cache {
+    if let Some(c) = &cache {
         match &r.bytes {
-            Some(b) if !r.policy.no_store && keep > 0 => {
-                if let Some(d) = file.parent() {
-                    let _ = std::fs::create_dir_all(d);
-                }
-                if std::fs::write(file, b).is_ok() {
-                    let _ = write_meta(&meta, now + keep, r.etag.as_deref());
-                }
-            }
-            _ => {
-                // Not to be kept (or no tile): drop any older copy.
-                let _ = std::fs::remove_file(file);
-                let _ = std::fs::remove_file(&meta);
-            }
+            Some(b) if !r.policy.no_store && keep > 0 => c.put(z, x, y, b, now + keep, r.etag.as_deref()),
+            // Not to be kept (or no tile): drop any older copy.
+            _ => c.remove(z, x, y),
         }
     }
     Ok(r.bytes)
-}
-
-/// "expires etag" from a `.meta` file (etag may be absent).
-pub(crate) fn read_meta(p: &Path) -> Option<(u64, Option<String>)> {
-    let s = std::fs::read_to_string(p).ok()?;
-    let mut it = s.trim().splitn(2, ' ');
-    let expires = it.next()?.parse().ok()?;
-    Some((expires, it.next().map(str::to_string).filter(|e| !e.is_empty())))
-}
-
-pub(crate) fn write_meta(p: &Path, expires: u64, etag: Option<&str>) -> std::io::Result<()> {
-    std::fs::write(p, format!("{expires} {}", etag.unwrap_or("")))
-}
-
-pub(crate) fn read_fresh(p: &Path) -> Option<Vec<u8>> {
-    let age = SystemTime::now().duration_since(std::fs::metadata(p).ok()?.modified().ok()?).ok()?;
-    (age < DISK_TTL).then(|| std::fs::read(p).ok()).flatten()
 }
 
 #[cfg(test)]

@@ -48,9 +48,12 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 moves: only the chunks under the view, from zoom 14. `microsoft-buildings`
                 (or a dataset-links.csv URL) is Microsoft's current building footprints, each
                 ~78 km tile downloaded once and kept split in ~/.cache/mapterm
-  --cache       show mapterm's disk caches (tiles, imagery, geoparquet, buildings, stac):
-                where, how big, and their limits; then exit
+  --cache       show mapterm's disk caches (tiles, imagery, geoparquet, buildings, stac,
+                and old files from earlier versions): how big, and their limits; then exit
   --cache-clear NAME|all  empty one cache, or all of them, then exit
+  --tile-cache SIZE, --imagery-cache SIZE  disk for map tiles and for imagery (default
+                2GB each, least recently used out first; also MAPTERM_TILE_CACHE,
+                MAPTERM_IMAGERY_CACHE). Each source's cache is an MBTiles file
   --geoparquet-cache SIZE  disk for parts of remote GeoParquet files already read
                 (footers and chunks; least recently used out first; default 2GB, 0 keeps
                 none; also MAPTERM_GEOPARQUET_CACHE)
@@ -181,6 +184,12 @@ fn args() -> Result<Args> {
         }
     };
     // Before the arguments, so --buildings-cache wins over it.
+    if let Ok(v) = std::env::var("MAPTERM_TILE_CACHE") {
+        mapterm::tilecache::set_tile_limit(mapterm::msbuildings::parse_size(&v).context("MAPTERM_TILE_CACHE")?);
+    }
+    if let Ok(v) = std::env::var("MAPTERM_IMAGERY_CACHE") {
+        mapterm::tilecache::set_imagery_limit(mapterm::msbuildings::parse_size(&v).context("MAPTERM_IMAGERY_CACHE")?);
+    }
     if let Ok(v) = std::env::var("MAPTERM_GEOPARQUET_CACHE") {
         mapterm::geoparquet::set_cache_limit(mapterm::msbuildings::parse_size(&v).context("MAPTERM_GEOPARQUET_CACHE")?);
     }
@@ -222,6 +231,14 @@ fn args() -> Result<Args> {
                 let freed = mapterm::cache::clear(&name)?;
                 println!("cleared {name}: {} freed", mapterm::cache::size(freed));
                 std::process::exit(0);
+            }
+            "--tile-cache" => {
+                let v = it.next().context("--tile-cache SIZE")?;
+                mapterm::tilecache::set_tile_limit(mapterm::msbuildings::parse_size(&v).context("--tile-cache")?);
+            }
+            "--imagery-cache" => {
+                let v = it.next().context("--imagery-cache SIZE")?;
+                mapterm::tilecache::set_imagery_limit(mapterm::msbuildings::parse_size(&v).context("--imagery-cache")?);
             }
             "--geoparquet-cache" => {
                 let v = it.next().context("--geoparquet-cache SIZE")?;

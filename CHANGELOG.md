@@ -36,6 +36,17 @@ All notable changes to mapterm are listed here. The format follows
   passes 1 MB (`--all-columns` keeps them). A cold Overture view of San Salvador went
   from ~3.3 s (3.1 to 5.1) to ~2.3 s, and 4.3 MB to 2.7 MB per chunk.
 
+### Changed
+
+- Map tile, imagery and GeoParquet caches are SQLite now, not a file per tile: an MBTiles
+  file per tile source (`~/.cache/mapterm/<source>.mbtiles`, `raster/<source>.mbtiles`)
+  that opens like any MBTiles, with each tile's expiry, ETag and last use beside it, and
+  `geoparquet.sqlite` for GeoParquet ranges. Map tiles and imagery get size limits
+  (`--tile-cache SIZE`, `--imagery-cache SIZE`, `MAPTERM_TILE_CACHE`,
+  `MAPTERM_IMAGERY_CACHE`; 2 GB each by default), least recently used out first. WAL
+  mode lets several mapterm windows share them. The old file caches aren't read; they
+  show in `--cache` as `old` and `--cache-clear old` removes them (`mapterm::tilecache`).
+
 ### Fixed
 
 - Pixel mode (`MAPTERM_PIXELS=1`) now redraws after `Map::set_data`, `set_paint`,

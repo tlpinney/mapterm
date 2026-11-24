@@ -16,7 +16,7 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Color, widgets::Widget};
 
 use crate::{
     render::{Camera, to_world},
-    source::{PmArchive, cache_root, get_with, hash, http_client, read_fresh},
+    source::{PmArchive, cache_root, get_with, hash, http_client},
     store::TileId,
 };
 
@@ -645,10 +645,8 @@ impl RasterSource {
         if self.by_headers {
             return self.tile_by_headers(z, x, y).await;
         }
-        let path = self.cache_dir.join(format!("{z}/{x}/{y}.img"));
-        if self.cache
-            && let Some(b) = read_fresh(&path)
-        {
+        let cache = if self.cache { crate::tilecache::for_dir(&self.cache_dir) } else { None };
+        if let Some(b) = cache.as_ref().and_then(|c| c.fresh(z, x, y)) {
             return Ok(if b.is_empty() { None } else { Some(b) });
         }
         let url = self.fill_key(&self.url(z, x, y));
@@ -656,11 +654,8 @@ impl RasterSource {
         // A key in a header or the URL must not follow a redirect to another host.
         let http = if self.key.is_some() || !headers.is_empty() { crate::source::keyed_client() } else { &self.http };
         let bytes = get_with(http, &url, None, &headers).await.map_err(|e| self.redact(e))?;
-        if self.cache {
-            if let Some(d) = path.parent() {
-                let _ = std::fs::create_dir_all(d);
-            }
-            let _ = std::fs::write(&path, bytes.as_deref().unwrap_or(&[]));
+        if let Some(c) = &cache {
+            c.put(z, x, y, bytes.as_deref().unwrap_or(&[]), crate::tilecache::now() + crate::source::DISK_TTL.as_secs(), None);
         }
         Ok(bytes)
     }
@@ -669,10 +664,10 @@ impl RasterSource {
 impl RasterSource {
     /// A tile cached by its HTTP headers (see [`crate::source::fetch_by_headers`]).
     async fn tile_by_headers(&self, z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>> {
-        let file = self.cache_dir.join(format!("{z}/{x}/{y}.img"));
         let url = self.fill_key(&self.url(z, x, y));
         let headers: Vec<(String, String)> = self.headers.iter().map(|(k, v)| (k.clone(), self.fill_key(v))).collect();
-        crate::source::fetch_by_headers(crate::source::keyed_client(), &file, &url, &headers, self.cache).await.map_err(|e| self.redact(e))
+        let cache = if self.cache { crate::tilecache::for_dir(&self.cache_dir) } else { None };
+        crate::source::fetch_by_headers(crate::source::keyed_client(), cache, (z, x, y), &url, &headers).await.map_err(|e| self.redact(e))
     }
 }
 
@@ -1110,28 +1105,28 @@ mod tests {
         // Within max-age: from disk, no request.
         assert_eq!(s.tile(3, 2, 1).await.unwrap().as_deref(), Some(&b"tile"[..]));
         assert_eq!(hits.load(Ordering::SeqCst), 1, "served from the cache");
-        let meta = dir.join("3/2/1.meta");
-        let (expires, etag) = crate::source::read_meta(&meta).unwrap();
-        assert_eq!(etag.as_deref(), Some("\"v1\""));
+        let cache = crate::tilecache::for_dir(&dir).unwrap();
+        let e = cache.get(3, 2, 1).unwrap();
+        assert_eq!(e.etag.as_deref(), Some("\"v1\""));
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-        assert!(expires > now + 86000 && expires <= now + 86400, "kept for the header's max-age");
+        assert!(e.expires > now + 86000 && e.expires <= now + 86400, "kept for the header's max-age");
         // Expired: asked again with If-None-Match, 304 keeps the bytes and renews the expiry.
-        crate::source::write_meta(&meta, 0, etag.as_deref()).unwrap();
+        cache.set_expires(3, 2, 1, 0);
         assert_eq!(s.tile(3, 2, 1).await.unwrap().as_deref(), Some(&b"tile"[..]));
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert!(crate::source::read_meta(&meta).unwrap().0 > now, "renewed");
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(cache.get(3, 2, 1).unwrap().expires > now, "renewed");
+        let _ = std::fs::remove_file(dir.with_extension("mbtiles"));
 
         // no-store: nothing kept, every use asks again.
-        let dir2 = dir.with_extension("nostore");
+        let dir2 = std::env::temp_dir().join(format!("mapterm-hdrcache-nostore-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir2);
         let (port, hits) = tile_server("no-cache, no-store, max-age=0");
         let s = header_cached_source(port, &dir2);
         s.tile(3, 2, 1).await.unwrap();
         s.tile(3, 2, 1).await.unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 2);
-        assert!(!dir2.join("3/2/1.img").exists());
-        let _ = std::fs::remove_dir_all(&dir2);
+        assert!(crate::tilecache::for_dir(&dir2).unwrap().get(3, 2, 1).is_none(), "nothing kept");
+        let _ = std::fs::remove_file(dir2.with_extension("mbtiles"));
     }
 
     #[test]
