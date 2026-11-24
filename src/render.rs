@@ -316,10 +316,11 @@ impl Canvas {
                 let (ya, yb) = (y0.min(y1), y0.max(y1));
                 let r0 = (ya - 0.5).ceil().max(0.0) as usize;
                 let r1 = ((yb - 0.5).ceil().min(hd as f64)) as usize;
-                for row in r0..r1.min(hd) {
+                let r1 = r1.min(hd);
+                for (row, xs) in self.rows.iter_mut().enumerate().take(r1).skip(r0) {
                     let yc = row as f64 + 0.5;
                     let x = x0 + (yc - y0) * (x1 - x0) / (y1 - y0);
-                    self.rows[row].push(x as f32);
+                    xs.push(x as f32);
                     any = true;
                 }
             }
