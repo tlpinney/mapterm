@@ -1651,6 +1651,12 @@ impl Map {
     /// row), top layer first and, within a layer, points before lines before polygons.
     /// `layers` limits the search to those layer ids. Custom layers answer with their `pick`.
     pub fn query_rendered_features(&self, cam: &Camera, area: Rect, target: (f64, f64), layers: Option<&[&str]>) -> Vec<Pick> {
+        self.query_features_with(cam, area, target, layers, false)
+    }
+
+    /// [`Map::query_rendered_features`], with `hidden` also layers switched off (in zoom
+    /// range): street names from label layers when labels are hidden, for describing the view.
+    pub(crate) fn query_features_with(&self, cam: &Camera, area: Rect, target: (f64, f64), layers: Option<&[&str]>, hidden: bool) -> Vec<Pick> {
         let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
         if target.0 < 0.0 || target.1 < 0.0 || target.0 >= w || target.1 >= h {
             return Vec::new();
@@ -1673,7 +1679,9 @@ impl Map {
                     continue;
                 }
             };
-            if !l.shown_at(cam.zoom) || matches!(l.kind, Kind::Background | Kind::Raster | Kind::Other(_)) {
+            if !(l.shown_at(cam.zoom) || hidden && cam.zoom >= l.min_zoom && cam.zoom < l.max_zoom)
+                || matches!(l.kind, Kind::Background | Kind::Raster | Kind::Other(_))
+            {
                 continue;
             }
             let Some(sid) = l.source.as_deref() else { continue };

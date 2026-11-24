@@ -76,8 +76,10 @@ mapterm --raster esri --snapshot 100x30 --format png > sat.png  # ... over satel
 `--format describe` describes the view instead of drawing it: its center, size and bounds;
 every visible label with what it is (`transportation_name/primary`, `poi/cafe`, ...), its
 cell, lon/lat and direction and distance from the center; what covers the view (water,
-parks, buildings: their shares and a 25 x 10 grid); the major roads and which way they
-run; and each data layer's features nearest the center with their properties. Language
+parks, buildings: their shares and a 25 x 10 grid); the named roads, most
+important first, each with its class, which way it runs, its ends as cells and its length
+in view (`- 17th Street Northwest [primary]: runs north-south, from cell (25, 0) to (25,
+39), about 580 m in view`), also with `--no-labels`; and each data layer's features nearest the center with their properties. Language
 models read that better than any picture of the map, for few tokens: about 1,700 for a
 busy street view (500 for a quiet one), against ~6,600 for the braille text.
 
@@ -95,13 +97,14 @@ water and parks are (30) and which way major roads run (8):
 |---|---|---|---|
 | braille text | 80% / 60% | 67% / 40% | 38% / 38% |
 | image of the terminal render | 83% / 87% | 87% / 70% | 62% / 12% |
-| `--format describe` | 100% / 100% | 93% / 83% | 38% / 25% |
+| `--format describe` | 100% / 100% | 93% / 83% | 62% / 75% |
 | `--format png` | | 83% / 70% | 75% / 75% |
-| `--format png` + `--format describe` | | 93% / 90% | 62% / 75% |
+| `--format png` + `--format describe` | | 93% / 90% | 75% / 75% |
 
 So: the description alone by default; add the PNG when shapes matter. The same facts as
 JSON, protobuf text or base64 protobuf scored no better and cost more tokens (base64
-protobuf about twice the prose). The road set is small (8 questions).
+protobuf about twice the prose). The road set is small (8 questions), and its answers
+come from road colors in the render, so "major" there doesn't always match a road's class.
 
 Without `--style`, mapterm draws the source with its own terminal style (OpenMapTiles
 or Protomaps schema, detected from the tiles; `--light` or `t` for the light theme).

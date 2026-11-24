@@ -141,28 +141,115 @@ fn areas(map: &Map, cam: &Camera, area: Rect, out: &mut String) {
     }
 }
 
-/// Major roads in the view: name, class, which way they run and where.
+/// Roads listed, most important first.
+const MAX_ROADS: usize = 30;
+
+/// A road feature's class and its rank (0 most important), from OpenMapTiles
+/// (`transportation`, `transportation_name`: `class`) or Protomaps (`roads`: `kind`). None
+/// for anything else, and for service roads, tracks and paths.
+fn road_class(layer: &str, get: &dyn Fn(&str) -> Option<String>) -> Option<(u8, String)> {
+    const CLASSES: [&str; 6] = ["motorway", "trunk", "primary", "secondary", "tertiary", "minor"];
+    let class = match layer {
+        "transportation" | "transportation_name" => get("class")?,
+        "roads" => match get("kind")?.as_str() {
+            "highway" => "motorway".into(),
+            "major_road" => "primary".into(),
+            "medium_road" => "secondary".into(),
+            "minor_road" => "minor".into(),
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let rank = CLASSES.iter().position(|c| *c == class)?;
+    Some((rank as u8, class))
+}
+
+/// Which way a road runs and where, from its points in view (in dots): its two
+/// ends along its main direction as cells, and the compass direction between them.
+fn road_course(pts: &[(f64, f64)]) -> (String, (i64, i64), (i64, i64)) {
+    // The main direction: whichever of the four axes spreads the points most.
+    let axes: [(f64, f64); 4] = [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0)];
+    let spread = |a: (f64, f64)| {
+        let v = pts.iter().map(|p| p.0 * a.0 + p.1 * a.1);
+        let (lo, hi) = v.fold((f64::MAX, f64::MIN), |m, x| (m.0.min(x), m.1.max(x)));
+        (hi - lo) / a.0.hypot(a.1)
+    };
+    let axis = axes.into_iter().max_by(|a, b| spread(*a).total_cmp(&spread(*b))).unwrap_or((1.0, 0.0));
+    let along = |p: &&(f64, f64)| p.0 * axis.0 + p.1 * axis.1;
+    let a = *pts.iter().min_by(|p, q| along(p).total_cmp(&along(q))).unwrap_or(&(0.0, 0.0));
+    let b = *pts.iter().max_by(|p, q| along(p).total_cmp(&along(q))).unwrap_or(&(0.0, 0.0));
+    // Dots are about square on screen; north is up (y grows down).
+    let (dx, dy) = (b.0 - a.0, a.1 - b.1);
+    let bearing = dx.atan2(dy).to_degrees().rem_euclid(180.0);
+    let dir = match ((bearing + 22.5) / 45.0) as usize % 4 {
+        0 => "north-south",
+        1 => "north-east to south-west",
+        2 => "east-west",
+        _ => "north-west to south-east",
+    };
+    let cell = |p: (f64, f64)| ((p.0 / 2.0) as i64, (p.1 / 4.0) as i64);
+    (dir.to_string(), cell(a), cell(b))
+}
+
+/// The part of segment `a`-`b` inside the `w` x `h` view (Liang-Barsky), or None.
+fn clip(a: (f64, f64), b: (f64, f64), w: f64, h: f64) -> Option<((f64, f64), (f64, f64))> {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (p, q) in [(-dx, a.0), (dx, w - a.0), (-dy, a.1), (dy, h - a.1)] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    (t0 <= t1).then_some(((a.0 + t0 * dx, a.1 + t0 * dy), (a.0 + t1 * dx, a.1 + t1 * dy)))
+}
+
+/// Named roads in the view, most important first: name, class, which way they run, their
+/// ends in view and length there. Names come from the road lines or, in OpenMapTiles, the
+/// `transportation_name` lines drawn as their labels (read even when labels are hidden).
 fn roads(map: &Map, cam: &Camera, area: Rect, vp: &Viewport, out: &mut String) {
-    const MAJOR: [&str; 4] = ["motorway", "trunk", "primary", "secondary"];
     let (w, h) = (area.width as f64 * 2.0, area.height as f64 * 4.0);
-    // Road -> (class, points in view in dots).
-    let mut found: std::collections::BTreeMap<String, (String, Vec<(f64, f64)>)> = Default::default();
+    // Road -> (rank, class, ref, points in view in dots).
+    type Road = (u8, String, Option<String>, Vec<(f64, f64)>);
+    let mut found: std::collections::BTreeMap<String, Road> = Default::default();
+    let mut unnamed = 0usize;
     let mut y = 2.0;
     while y < h {
         let mut x = 2.0;
         while x < w {
-            for p in map.query_rendered_features(cam, area, (x, y), None) {
-                let get = |k: &str| p.props.iter().find(|(key, _)| key == k).map(|(_, v)| v.to_string());
-                let Some(class) = get("class").filter(|c| MAJOR.contains(&c.as_str())) else { continue };
+            for p in map.query_features_with(cam, area, (x, y), None, true) {
                 if p.geom != crate::mvt::GeomType::Line {
                     continue;
                 }
-                let name = get("name").or_else(|| get("ref")).unwrap_or_else(|| format!("unnamed {class} road"));
-                let e = found.entry(name).or_insert_with(|| (class.clone(), Vec::new()));
-                for &(lon, lat) in p.lonlat.iter().flatten() {
-                    let d = vp.dot_ll(lon, lat);
-                    if d.0 >= 0.0 && d.1 >= 0.0 && d.0 < w && d.1 < h {
-                        e.1.push(d);
+                let get = |k: &str| p.props.iter().find(|(key, _)| key == k).map(|(_, v)| v.to_string()).filter(|v| !v.is_empty());
+                let Some((rank, class)) = road_class(&p.layer, &get) else { continue };
+                let reference = get("ref");
+                let Some(name) = get("name").or_else(|| get("name:en")).or_else(|| get("name_en")).or_else(|| reference.clone()) else {
+                    unnamed += 1;
+                    continue;
+                };
+                let e = found.entry(name).or_insert_with(|| (rank, class.clone(), None, Vec::new()));
+                if rank < e.0 {
+                    (e.0, e.1) = (rank, class);
+                }
+                if e.2.is_none() {
+                    e.2 = reference;
+                }
+                for part in &p.lonlat {
+                    let dots: Vec<(f64, f64)> = part.iter().map(|&(lon, lat)| vp.dot_ll(lon, lat)).collect();
+                    for seg in dots.windows(2) {
+                        // Just inside the last column and row, so ends name real cells.
+                        if let Some((a, b)) = clip(seg[0], seg[1], w - 0.01, h - 0.01) {
+                            e.3.extend([a, b]);
+                        }
                     }
                 }
             }
@@ -170,25 +257,38 @@ fn roads(map: &Map, cam: &Camera, area: Rect, vp: &Viewport, out: &mut String) {
         }
         y += 8.0;
     }
-    let _ = writeln!(out, "\n# Major roads ({})", found.values().filter(|(_, pts)| pts.len() >= 2).count());
-    for (name, (class, pts)) in found {
-        if pts.len() < 2 {
-            continue;
+    // Segments known only by a route number ("29") join the named road with that number.
+    let numbered: Vec<(String, String)> = found.iter().filter_map(|(n, r)| r.2.clone().filter(|x| x != n).map(|x| (x, n.clone()))).collect();
+    for (number, name) in numbered {
+        if let Some(r) = found.remove(&number) {
+            let e = found.get_mut(&name).expect("listed above");
+            e.0 = e.0.min(r.0);
+            e.3.extend(r.3);
         }
-        let (x0, x1) = pts.iter().fold((f64::MAX, f64::MIN), |a, p| (a.0.min(p.0), a.1.max(p.0)));
-        let (y0, y1) = pts.iter().fold((f64::MAX, f64::MIN), |a, p| (a.0.min(p.1), a.1.max(p.1)));
-        let (sx, sy) = ((x1 - x0) / w, (y1 - y0) / h);
-        let third = |v: f64, n: f64, names: [&'static str; 3]| names[((v / n * 3.0) as usize).min(2)];
-        let (dir, at) = if sx > 2.0 * sy {
-            ("east-west", format!("in the {} third", third((y0 + y1) / 2.0, h, ["top", "middle", "bottom"])))
-        } else if sy > 2.0 * sx {
-            ("north-south", format!("in the {} third", third((x0 + x1) / 2.0, w, ["left", "center", "right"])))
-        } else {
-            ("diagonally", String::new())
-        };
-        let span = sx.max(sy);
-        let how = if span > 0.7 { "across the whole view" } else { "partway" };
-        let _ = writeln!(out, "- {name} [{class}]: runs {dir} {how}{}", if at.is_empty() { String::new() } else { format!(", {at}") });
+    }
+    // Long enough to say which way it runs: 3 cells end to end.
+    let long = |r: &Road| {
+        let (_, a, b) = road_course(&r.3);
+        (a.0 - b.0).abs().max((a.1 - b.1).abs()) >= 3
+    };
+    let mut roads: Vec<(String, Road)> = found.into_iter().filter(|(_, r)| r.3.len() >= 2 && long(r)).collect();
+    let length = |r: &Road| {
+        let (_, a, b) = road_course(&r.3);
+        let (p, q) = (vp.dot_to_lonlat(a.0 as f64 * 2.0, a.1 as f64 * 4.0), vp.dot_to_lonlat(b.0 as f64 * 2.0, b.1 as f64 * 4.0));
+        dist(p.0, p.1, q.0, q.1)
+    };
+    roads.sort_by(|a, b| a.1.0.cmp(&b.1.0).then(length(&b.1).total_cmp(&length(&a.1))));
+    let n = roads.len();
+    let _ = writeln!(out, "\n# Roads ({n} named{})", if n > MAX_ROADS { format!(", the {MAX_ROADS} most important listed") } else { String::new() });
+    for (name, r) in roads.iter().take(MAX_ROADS) {
+        let (dir, a, b) = road_course(&r.3);
+        let reference = r.2.as_ref().filter(|x| *x != name).map(|x| format!(" ({x})")).unwrap_or_default();
+        let m = (length(r) / 10.0).round() * 10.0;
+        let m = if m >= 1000.0 { format!("{:.1} km", m / 1000.0) } else { format!("{m:.0} m") };
+        let _ = writeln!(out, "- {name}{reference} [{}]: runs {dir}, from cell ({}, {}) to ({}, {}), about {m} in view", r.1, a.0, a.1, b.0, b.1);
+    }
+    if unnamed > 0 && n == 0 {
+        let _ = writeln!(out, "(roads are drawn but carry no names)");
     }
 }
 
@@ -247,6 +347,45 @@ mod tests {
         assert_eq!(heading(0.0, 0.0, 0.0, 0.003), "330 m north");
         assert_eq!(heading(0.0, 0.0, -0.002, -0.002), "310 m south-west");
         assert_eq!(heading(0.0, 0.0, 0.02, 0.0), "2.2 km east");
+    }
+
+    #[test]
+    fn road_classes_and_courses() {
+        let props = |k: &'static str, v: &'static str| move |q: &str| (q == k).then(|| v.to_string());
+        assert_eq!(road_class("transportation_name", &props("class", "tertiary")), Some((4, "tertiary".into())));
+        assert_eq!(road_class("roads", &props("kind", "highway")), Some((0, "motorway".into())));
+        assert_eq!(road_class("transportation", &props("class", "service")), None);
+        assert_eq!(road_class("waterway", &props("class", "primary")), None, "not a road layer");
+        // In a 120 x 160 dot view (60 x 40 cells).
+        let line =
+            |a: (f64, f64), b: (f64, f64)| (0..=10).map(|i| (a.0 + (b.0 - a.0) * i as f64 / 10.0, a.1 + (b.1 - a.1) * i as f64 / 10.0)).collect::<Vec<_>>();
+        assert_eq!(road_course(&line((60.0, 0.0), (60.0, 159.0))), ("north-south".into(), (30, 0), (30, 39)));
+        assert_eq!(road_course(&line((0.0, 80.0), (119.0, 80.0))).0, "east-west");
+        assert_eq!(road_course(&line((0.0, 159.0), (119.0, 40.0))).0, "north-east to south-west");
+        assert_eq!(road_course(&line((0.0, 0.0), (100.0, 100.0))).0, "north-west to south-east");
+        // A straight street with both ends outside the view still crosses it.
+        assert_eq!(clip((-50.0, 80.0), (500.0, 80.0), 120.0, 160.0), Some(((0.0, 80.0), (120.0, 80.0))));
+        assert_eq!(clip((-50.0, -1.0), (500.0, -1.0), 120.0, 160.0), None);
+        assert_eq!(clip((10.0, 10.0), (20.0, 20.0), 120.0, 160.0), Some(((10.0, 10.0), (20.0, 20.0))));
+    }
+
+    #[test]
+    fn roads_named_from_hidden_label_layers() {
+        // A street's name on a label layer that's switched off (--no-labels), its vertices
+        // far outside the view: listed with its class, direction and both ends at the edges.
+        let mut map = Map::new();
+        let doc = serde_json::json!({"type": "Feature", "properties": {"class": "primary", "name": "Main Street"},
+            "geometry": {"type": "LineString", "coordinates": [[-1.0, 0.0], [1.0, 0.0]]}});
+        map.add_source("transportation_name", MapSource::geojson(&doc).unwrap()).unwrap();
+        map.add_layer(crate::StyleLayer::line("road-label", "transportation_name").color("#000000")).unwrap();
+        map.set_visibility("road-label", false).unwrap();
+        let (cam, area) = (Camera::new(0.0, 0.0, 15.0), Rect::new(0, 0, 60, 20));
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(map.view(&cam), area, &mut buf);
+        let d = describe(&map, &cam, area);
+        assert!(d.contains("# Roads (1 named)"), "{d}");
+        assert!(d.contains("- Main Street [primary]: runs east-west, from cell (0, 10) to (59, 10)"), "{d}");
+        assert!(map.query_rendered_features(&cam, area, (60.0, 40.0), None).is_empty(), "still hidden from picking");
     }
 
     #[test]
