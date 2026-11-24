@@ -6,6 +6,8 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-23
+
 ### Added
 
 - MBTiles files: `mapterm city.mbtiles` for vector MBTiles (gzipped or not) and
@@ -47,6 +49,8 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Changed
 
+- **Breaking (library):** `msbuildings::index_url` is `async` and returns a `String`: it
+  looks up Microsoft's newest release.
 - Map tile, imagery and GeoParquet caches are SQLite now, not a file per tile: an MBTiles
   file per tile source (`~/.cache/mapterm/<source>.mbtiles`, `raster/<source>.mbtiles`)
   that opens like any MBTiles, with each tile's expiry, ETag and last use beside it, and
@@ -345,7 +349,8 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
-[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/tlpinney/mapterm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tlpinney/mapterm/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/tlpinney/mapterm/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tlpinney/mapterm/compare/v0.1.0...v0.1.1
