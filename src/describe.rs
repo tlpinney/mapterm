@@ -99,16 +99,29 @@ pub fn describe(map: &Map, cam: &Camera, area: Rect) -> String {
 const GRID: (usize, usize) = (25, 10);
 
 /// What a basemap feature is, for the area grid: water, park (green space) or building.
+/// OpenMapTiles and Protomaps both: `landuse`/`landcover` by `class` or `kind`, `building`
+/// or `buildings`.
 fn area_class(p: &crate::pick::Pick) -> Option<char> {
-    let class = p.props.iter().find(|(k, _)| k == "class").map(|(_, v)| v.to_string()).unwrap_or_default();
+    let class = feature_class(p).unwrap_or_default();
     match (&*p.layer, class.as_str()) {
         ("water" | "waterway", _) | (_, "water" | "river" | "lake" | "ocean" | "sea" | "canal" | "reservoir") => Some('W'),
-        ("building", _) => Some('B'),
+        ("building" | "buildings", _) => Some('B'),
         ("park", _)
-        | ("landcover", "grass" | "wood" | "farmland" | "wetland" | "scrub")
-        | ("landuse", "park" | "cemetery" | "grass" | "pitch" | "garden" | "playground") => Some('P'),
+        | ("landcover", "grass" | "grassland" | "wood" | "forest" | "farmland" | "wetland" | "scrub")
+        | (
+            "landuse",
+            "park" | "cemetery" | "grass" | "pitch" | "garden" | "playground" | "golf_course" | "forest" | "wood" | "nature_reserve" | "national_park"
+            | "meadow" | "recreation_ground" | "village_green",
+        ) => Some('P'),
         _ => None,
     }
+}
+
+/// A basemap feature's class: OpenMapTiles' `class`, else Protomaps' `kind`. For Protomaps
+/// roads, the OSM road type in `kind_detail` (`primary`), not the coarse kind (`major_road`).
+fn feature_class(p: &crate::pick::Pick) -> Option<String> {
+    let get = |k: &str| p.props.iter().find(|(key, _)| key == k).map(|(_, v)| v.to_string()).filter(|v| !v.is_empty());
+    get("class").or_else(|| if &*p.layer == "roads" { get("kind_detail").or_else(|| get("kind")) } else { get("kind") })
 }
 
 /// A grid of what covers each part of the view (W water, P park or green, B buildings,
@@ -128,7 +141,10 @@ fn areas(map: &Map, cam: &Camera, area: Rect, out: &mut String) {
                 let c = ['B', 'W', 'P'].into_iter().find(|c| picks.iter().any(|p| area_class(p) == Some(*c))).unwrap_or('.');
                 *votes.entry(c).or_insert(0) += 1;
             }
-            *cell = votes.into_iter().max_by_key(|(c, n)| (*n, *c != '.')).map(|(c, _)| c).unwrap_or('.');
+            // Most votes; a tie goes by the same order as within a point (B, W, P, then .),
+            // so the grid is the same every run.
+            let order = |c: char| ['.', 'P', 'W', 'B'].iter().position(|x| *x == c).unwrap_or(0);
+            *cell = votes.into_iter().max_by_key(|(c, n)| (*n, order(*c))).map(|(c, _)| c).unwrap_or('.');
             *count.entry(*cell).or_insert(0) += 1;
         }
     }
@@ -151,13 +167,20 @@ fn road_class(layer: &str, get: &dyn Fn(&str) -> Option<String>) -> Option<(u8, 
     const CLASSES: [&str; 6] = ["motorway", "trunk", "primary", "secondary", "tertiary", "minor"];
     let class = match layer {
         "transportation" | "transportation_name" => get("class")?,
-        "roads" => match get("kind")?.as_str() {
-            "highway" => "motorway".into(),
-            "major_road" => "primary".into(),
-            "medium_road" => "secondary".into(),
-            "minor_road" => "minor".into(),
-            _ => return None,
-        },
+        // The OSM road type when it's one of the classes, else the coarse kind.
+        "roads" => {
+            let detail = get("kind_detail").map(|d| d.trim_end_matches("_link").to_string());
+            match (detail.as_deref(), get("kind")?.as_str()) {
+                (Some(d @ ("motorway" | "trunk" | "primary" | "secondary" | "tertiary")), _) => d.into(),
+                (Some("residential" | "unclassified" | "living_street"), _) => "minor".into(),
+                (Some("service" | "track" | "pedestrian" | "footway" | "cycleway" | "path"), _) => return None,
+                (_, "highway") => "motorway".into(),
+                (_, "major_road") => "primary".into(),
+                (_, "medium_road") => "secondary".into(),
+                (_, "minor_road") => "minor".into(),
+                _ => return None,
+            }
+        }
         _ => return None,
     };
     let rank = CLASSES.iter().position(|c| *c == class)?;
@@ -298,7 +321,7 @@ fn kind_of(map: &Map, cam: &Camera, area: Rect, vp: &Viewport, lon: f64, lat: f6
     let picks = map.query_rendered_features(cam, area, dot, None);
     let named = |p: &&crate::pick::Pick| p.props.iter().any(|(k, v)| (k == "name" || k.starts_with("name:") || k == "ref") && v.to_string() == text);
     let p = picks.iter().find(named).or_else(|| picks.first())?;
-    let class = p.props.iter().find(|(k, _)| k == "class" || k == "subclass").map(|(_, v)| v.to_string());
+    let class = feature_class(p);
     Some(match class {
         Some(c) => format!("{}/{c}", p.layer),
         None => p.layer.to_string(),
@@ -354,6 +377,18 @@ mod tests {
         let props = |k: &'static str, v: &'static str| move |q: &str| (q == k).then(|| v.to_string());
         assert_eq!(road_class("transportation_name", &props("class", "tertiary")), Some((4, "tertiary".into())));
         assert_eq!(road_class("roads", &props("kind", "highway")), Some((0, "motorway".into())));
+        let pm = |kind: &'static str, detail: &'static str| {
+            move |q: &str| match q {
+                "kind" => Some(kind.to_string()),
+                "kind_detail" => Some(detail.to_string()),
+                _ => None,
+            }
+        };
+        assert_eq!(road_class("roads", &pm("major_road", "secondary")), Some((3, "secondary".into())), "Protomaps' OSM type wins");
+        assert_eq!(road_class("roads", &pm("highway", "motorway_link")), Some((0, "motorway".into())));
+        assert_eq!(road_class("roads", &pm("minor_road", "residential")), Some((5, "minor".into())));
+        assert_eq!(road_class("roads", &pm("minor_road", "service")), None);
+        assert_eq!(road_class("roads", &pm("path", "sidewalk")), None);
         assert_eq!(road_class("transportation", &props("class", "service")), None);
         assert_eq!(road_class("waterway", &props("class", "primary")), None, "not a road layer");
         // In a 120 x 160 dot view (60 x 40 cells).
@@ -405,6 +440,26 @@ mod tests {
             assert!(r.starts_with("WWWWWWWWWWWW") && r.ends_with("............"), "{r}");
         }
         assert!(d.contains("water 4") || d.contains("water 5"), "about half: {d}");
+    }
+
+    #[test]
+    fn protomaps_areas() {
+        // Protomaps names green by `kind` in `landuse`, and its buildings layer `buildings`.
+        let mut map = Map::new();
+        let sq = |x0: f64, x1: f64, props: serde_json::Value| {
+            serde_json::json!({"type": "Feature", "properties": props,
+            "geometry": {"type": "Polygon", "coordinates": [[[x0, -0.01], [x1, -0.01], [x1, 0.01], [x0, 0.01], [x0, -0.01]]]}})
+        };
+        map.add_source("landuse", MapSource::geojson(&sq(-0.01, 0.0, serde_json::json!({"kind": "park"}))).unwrap()).unwrap();
+        map.add_source("buildings", MapSource::geojson(&sq(0.0, 0.01, serde_json::json!({"kind": "building"}))).unwrap()).unwrap();
+        map.add_layer(crate::StyleLayer::fill("park", "landuse").color("#00ff00")).unwrap();
+        map.add_layer(crate::StyleLayer::fill("bldg", "buildings").color("#888888")).unwrap();
+        let (cam, area) = (Camera::new(0.0, 0.0, 15.0), Rect::new(0, 0, 60, 20));
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        ratatui::widgets::Widget::render(map.view(&cam), area, &mut buf);
+        let d = describe(&map, &cam, area);
+        let row = d.lines().skip_while(|l| !l.starts_with("grid")).nth(5).unwrap_or_default().to_string();
+        assert!(row.starts_with("PPPPPPPPPPPP") && row.ends_with("BBBBBBBBBBBB"), "{row}\n{d}");
     }
 
     #[test]

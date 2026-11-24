@@ -79,7 +79,8 @@ cell, lon/lat and direction and distance from the center; what covers the view (
 parks, buildings: their shares and a 25 x 10 grid); the named roads, most
 important first, each with its class, which way it runs, its ends as cells and its length
 in view (`- 17th Street Northwest [primary]: runs north-south, from cell (25, 0) to (25,
-39), about 580 m in view`), also with `--no-labels`; and each data layer's features nearest the center with their properties. Language
+39), about 580 m in view`), also with `--no-labels`. OpenMapTiles and Protomaps tiles
+both work; and each data layer's features nearest the center with their properties. Language
 models read that better than any picture of the map, for few tokens: about 1,700 for a
 busy street view (500 for a quiet one), against ~6,600 for the braille text.
 

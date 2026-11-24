@@ -20,7 +20,8 @@ All notable changes to mapterm are listed here. The format follows
   view (water, parks, buildings: shares and a 25 x 10 grid); the named roads, most
   important first, with class, which way each runs, its ends (cells) and length in view
   (names from the road lines or OpenMapTiles' `transportation_name`, also with labels
-  hidden; Protomaps' `roads` too); and each data layer's nearest features with their properties
+  hidden); OpenMapTiles and Protomaps both (Protomaps' `kind` and
+  `kind_detail` for label kinds, roads, parks and `buildings`); and each data layer's nearest features with their properties
   (`mapterm::describe`, `Map::features_in_view_list`). Tested on street-level views with
   Claude Sonnet 5.5 and Haiku 5.5: 100% on close-call questions about labelled places
   (60-87% from braille text or an image) and 83-93% on water and parks (40-87%), at ~1,700
