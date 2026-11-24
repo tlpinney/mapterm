@@ -1,6 +1,6 @@
 [package]
 name = "mapterm"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 # The oldest Rust that builds it (geoparquet and geoarrow-array 0.10 need 1.95).
 rust-version = "1.95"

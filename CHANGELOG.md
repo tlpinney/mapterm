@@ -6,8 +6,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
-The next release is 0.2.0: the library's `formats::Format` gains variants (Shapefile,
-GeoParquet), and `spec::Kind` one (`FillExtrusion`).
+## [0.2.0] - 2026-11-23
+
+The library's `formats::Format` gains variants (Shapefile, GeoParquet), and `spec::Kind`
+one (`FillExtrusion`).
 
 ### Added
 
@@ -84,6 +86,8 @@ GeoParquet), and `spec::Kind` one (`FillExtrusion`).
 
 ### Changed
 
+- Needs Rust 1.95 or newer (was 1.89): GeoParquet is read with `geoparquet` 0.10, on
+  Arrow and Parquet 60 (zstd 0.14).
 - **Breaking (library):** `formats::Format` has a `Shapefile` variant and is now
   `#[non_exhaustive]`, so later formats won't break matches again.
 - `Map::set_attribution` works on raster sources that are shared (it used to fail once
@@ -127,6 +131,10 @@ GeoParquet), and `spec::Kind` one (`FillExtrusion`).
 
 ### Security
 
+- `url` 2.5.9: `Url::origin()` no longer overflows the stack on deeply nested `blob:`
+  URLs (RUSTSEC-2026-0592).
+- `parquet` 60.2: bloom filters are no longer written as plaintext in encrypted Parquet
+  files (RUSTSEC-2026-0595; mapterm only reads Parquet).
 - A Shapefile record that claims more parts or points than it holds, or whose parts start
   outside its points, is refused before the `shapefile` crate reads it: the crate reserves
   memory for the claimed counts and part sizes before checking them, so one record
@@ -281,7 +289,8 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
-[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/tlpinney/mapterm/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/tlpinney/mapterm/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/tlpinney/mapterm/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/tlpinney/mapterm/compare/v0.1.0-alpha.3...v0.1.0
