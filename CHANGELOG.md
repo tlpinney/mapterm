@@ -6,6 +6,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- `mapterm --help` lists `.mbtiles` files for the map source and `--raster`.
+
 ## [0.3.0] - 2026-11-23
 
 ### Added

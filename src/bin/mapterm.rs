@@ -31,8 +31,8 @@ const USAGE: &str = "mapterm -- a map in your terminal
 
 usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
-  SOURCE        .pmtiles file or URL, XYZ template with {z}/{x}/{y}, or TileJSON URL, drawn
-                with mapterm's terminal style (default: OpenFreeMap planet)
+  SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
+                TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
   --style       a MapLibre style instead: liberty, positron, bright, dark or fiord
                 (OpenFreeMap), a style URL, a style.json file, or a Mapbox style such
                 as mapbox://styles/mapbox/streets-v12 (needs a Mapbox token)
@@ -70,7 +70,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --raster      an image tile layer under the vector map: a provider or stack name
                 (--raster-list; `planetary` is Sentinel-2 with NAIP on top when zoomed in),
                 a URL with {z}/{x}/{y} ({-y} or --tms for TMS rows, {key} for an API key),
-                or a .pmtiles file or URL of PNG/JPEG/WebP tiles;
+                a .pmtiles file or URL, or a .mbtiles file, of PNG/JPEG/WebP tiles;
                 real images with kitty graphics (Ghostty, kitty, WezTerm, herdr), cell colors
                 elsewhere (MAPTERM_GRAPHICS=kitty|cells overrides)
   --raster-list           show the provider names and the keys they need
@@ -93,7 +93,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --no-labels   start with labels and symbols hidden (n shows them); with --snapshot, a
                 frame of map lines and fills only
   --snapshot   render one frame to stdout as text and exit
-  --format      with --snapshot: text (default), ansi (24-bit color) or html (a <pre> fragment)
+  --format      with --snapshot: text (default), ansi (24-bit color) or html (a <pre> fragment),
   --pick        with --snapshot: print the features under that cell as JSON lines instead
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
