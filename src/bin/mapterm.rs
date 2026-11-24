@@ -760,6 +760,7 @@ async fn main() -> Result<()> {
         Some(spec) => {
             let mut r = match mapterm::raster::preset(spec) {
                 None if spec.ends_with(".pmtiles") => mapterm::raster::RasterSource::from_pmtiles(spec).await?,
+                None if mapterm::mbtiles::is_mbtiles(spec) => mapterm::raster::RasterSource::from_mbtiles(spec)?,
                 Some(p) => {
                     let mut key = mapterm::raster::find_key(a.raster_key_cmd.as_deref(), p.key_env)?;
                     if key.is_none() && p.name == "mapbox" {

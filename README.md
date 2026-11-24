@@ -64,6 +64,7 @@ mapterm                                                # OpenFreeMap planet, no 
 mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lon) at zoom 13
 mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over HTTP range requests
 mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, offline
+mapterm city.mbtiles                                   # or an MBTiles file
 mapterm --style liberty                                # any MapLibre style: liberty, positron,
 mapterm --style ./my-style.json                        #   bright, dark, fiord, a URL or a file
 mapterm --style mapbox://styles/mapbox/streets-v12 --mapbox-token-cmd 'pass show mapbox-token'  # Mapbox
@@ -182,6 +183,7 @@ mapterm --raster gibs --date 2026-10-30 -z 6                # NASA daily imagery
 mapterm --raster naip --at 38.8895,-77.0353 -z 16           # US aerial photos, 60 cm
 mapterm --raster planetary -z 10                            # Sentinel-2, NAIP when zoomed in
 mapterm --raster mall.pmtiles                              # your own imagery, offline
+mapterm --raster ortho.mbtiles                             #   (PMTiles or MBTiles)
 mapterm --raster-list                                      # providers and the keys they need
 ```
 

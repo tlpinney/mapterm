@@ -43,6 +43,8 @@ pub struct RasterSource {
     params: Vec<(String, String)>,
     /// A PMTiles archive of images instead of a URL template.
     pm: Option<Arc<PmArchive>>,
+    /// An MBTiles file of images instead of a URL template.
+    mb: Option<Arc<crate::mbtiles::MbTiles>>,
     /// Highest zoom with tiles.
     pub max_zoom: u8,
     /// Lowest zoom to request tiles at (0 for most): below it nothing is fetched, for
@@ -395,6 +397,7 @@ impl RasterSource {
             tile_px: 256,
             params: Vec::new(),
             pm: None,
+            mb: None,
             max_zoom,
             min_zoom: 0,
             name: template.split('/').nth(2).unwrap_or(template).to_string(),
@@ -461,6 +464,36 @@ impl RasterSource {
             max_zoom: pm.header.max_zoom,
             min_zoom: 0,
             pm: Some(Arc::new(pm)),
+            mb: None,
+            name,
+            attribution,
+        })
+    }
+
+    /// An MBTiles file of images (png, jpg, webp).
+    pub fn from_mbtiles(spec: &str) -> Result<Self> {
+        let mb = crate::mbtiles::MbTiles::open(spec)?;
+        if mb.meta.is_vector() {
+            bail!("{spec}: holds vector tiles, not images: open it as the map (mapterm {spec})");
+        }
+        let file = spec.rsplit('/').next().unwrap_or(spec).to_string();
+        let (name, max_zoom, min_zoom) = (mb.meta.name.clone().unwrap_or(file), mb.meta.max_zoom, mb.meta.min_zoom);
+        let attribution = mb.meta.attribution.as_deref().map(crate::source::plain_attribution).unwrap_or_default();
+        Ok(Self {
+            template: String::new(),
+            tms: false,
+            http: http_client(),
+            cache_dir: cache_root().join("raster").join(hash(spec)),
+            headers: Vec::new(),
+            key: None,
+            cache: false,
+            by_headers: false,
+            tile_px: 256,
+            params: Vec::new(),
+            max_zoom,
+            min_zoom,
+            pm: None,
+            mb: Some(Arc::new(mb)),
             name,
             attribution,
         })
@@ -605,6 +638,9 @@ impl RasterSource {
     pub async fn tile(&self, z: u8, x: u32, y: u32) -> Result<Option<Vec<u8>>> {
         if let Some(pm) = &self.pm {
             return pm.tile(&self.http, z, x, y).await;
+        }
+        if let Some(mb) = &self.mb {
+            return mb.tile(z, x, y);
         }
         if self.by_headers {
             return self.tile_by_headers(z, x, y).await;

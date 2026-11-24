@@ -283,10 +283,12 @@ impl PmArchive {
 
 enum Kind {
     Pm(Box<PmArchive>),
+    Mb(Box<crate::mbtiles::MbTiles>),
     Xyz(String),
 }
 
-/// A vector tile source: PMTiles (file or URL), an XYZ URL template, or TileJSON; tiles are cached on disk for 30 days when fetched over HTTP.
+/// A vector tile source: PMTiles (file or URL), an MBTiles file, an XYZ URL template, or
+/// TileJSON; tiles are cached on disk for 30 days when fetched over HTTP.
 pub struct Source {
     kind: Kind,
     http: reqwest::Client,
@@ -347,6 +349,25 @@ impl Source {
         let http = if crate::mapbox::is_mapbox_host(spec) { keyed_client().clone() } else { http_client() };
         let is_http = spec.starts_with("http://") || spec.starts_with("https://");
         let cache_dir = is_http.then(|| cache_root().join(hash(spec)));
+        if crate::mbtiles::is_mbtiles(spec) {
+            let mb = crate::mbtiles::MbTiles::open(spec)?;
+            if !mb.meta.is_vector() {
+                bail!("{spec}: holds {} images, not vector tiles: open it with --raster", mb.meta.format);
+            }
+            let m = mb.meta.clone();
+            let file = spec.rsplit('/').next().unwrap_or(spec);
+            let center = m.center.or_else(|| m.bounds.map(|(w, s, e, n)| ((w + e) / 2.0, (s + n) / 2.0, m.max_zoom.min(14) as f64)));
+            return Ok(Self {
+                name: m.name.unwrap_or_else(|| file.to_string()),
+                min_zoom: m.min_zoom,
+                max_zoom: m.max_zoom,
+                center,
+                attribution: m.attribution,
+                kind: Kind::Mb(Box::new(mb)),
+                http,
+                cache_dir: None,
+            });
+        }
         if spec.ends_with(".pmtiles") {
             let pm = PmArchive::open(spec, &http).await?;
             let h = pm.header.clone();
@@ -375,7 +396,7 @@ impl Source {
             });
         }
         if !is_http {
-            bail!("{spec}: expected a .pmtiles file, an XYZ URL with {{z}}/{{x}}/{{y}}, or a TileJSON URL");
+            bail!("{spec}: expected a .pmtiles or .mbtiles file, an XYZ URL with {{z}}/{{x}}/{{y}}, or a TileJSON URL");
         }
         let body = get(&http, spec, None).await?.ok_or_else(|| anyhow!("{spec}: not found"))?;
         let tj: serde_json::Value = serde_json::from_slice(&body).with_context(|| format!("{spec}: not TileJSON"))?;
@@ -415,6 +436,7 @@ impl Source {
         }
         let tile = match &self.kind {
             Kind::Pm(pm) => pm.tile(&self.http, z, x, y).await?,
+            Kind::Mb(mb) => mb.tile(z, x, y)?.map(maybe_gunzip).transpose()?,
             Kind::Xyz(t) => {
                 let url = t.replace("{z}", &z.to_string()).replace("{x}", &x.to_string()).replace("{y}", &y.to_string());
                 match get(&self.http, &url, None).await? {

@@ -8,6 +8,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- MBTiles files: `mapterm city.mbtiles` for vector MBTiles (gzipped or not) and
+  `--raster ortho.mbtiles` for image MBTiles (png, jpg, webp), with the name, zoom range,
+  center or bounds, and attribution from the `metadata` table; rows are flipped from TMS.
+  Local files, read-only (`mapterm::mbtiles`; SQLite via `rusqlite`, bundled).
 - `mapterm --cache` lists the disk caches (tiles, imagery, geoparquet, buildings, stac) with
   sizes, file counts and limits; `--cache-clear NAME|all` empties one or all (only inside
   `~/.cache/mapterm`, never following links; `mapterm::cache`).
