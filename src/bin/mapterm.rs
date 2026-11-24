@@ -94,7 +94,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --no-labels   start with labels and symbols hidden (n shows them); with --snapshot, a
                 frame of map lines and fills only
   --snapshot   render one frame to stdout as text and exit
-  --format      with --snapshot: text (default), ansi (24-bit color) or html (a <pre> fragment),
+  --format      with --snapshot: text (default), ansi (24-bit color), html (a <pre> fragment),
+                or llm (the view as a list of labels and features with positions, for an LLM)
   --pick        with --snapshot: print the features under that cell as JSON lines instead
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
@@ -300,9 +301,9 @@ fn args() -> Result<Args> {
                 a.snapshot = Some((c.parse()?, r.parse()?));
             }
             "--format" => {
-                let v = it.next().context("--format text|ansi|html")?;
-                if !matches!(v.as_str(), "text" | "ansi" | "html") {
-                    bail!("--format {v}: use text, ansi or html");
+                let v = it.next().context("--format text|ansi|html|llm")?;
+                if !matches!(v.as_str(), "text" | "ansi" | "html" | "llm") {
+                    bail!("--format {v}: use text, ansi, html or llm");
                 }
                 a.format = v;
             }
@@ -981,6 +982,8 @@ async fn main() -> Result<()> {
         let out = match a.format.as_str() {
             "ansi" => mapterm::export::to_ansi(&buf),
             "html" => mapterm::export::to_html(&buf),
+            // The view as facts for a language model: labels and features with positions.
+            "describe" => mapterm::describe::describe(&map, &cam, area),
             _ => mapterm::export::to_text(&buf),
         };
         print!("{out}");

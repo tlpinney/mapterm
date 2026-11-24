@@ -68,7 +68,18 @@ mapterm --style ./my-style.json                        #   bright, dark, fiord, 
 mapterm --style mapbox://styles/mapbox/streets-v12 --mapbox-token-cmd 'pass show mapbox-token'  # Mapbox
 mapterm --snapshot 120x40 --at 38.8895,-77.0353         # print one frame as text and exit
 mapterm --snapshot 120x40 --format html > map.html       #   ... or as colored ANSI text or HTML
+mapterm --snapshot 100x30 --format describe              #   ... or in words (for a language model)
 ```
+
+`--format describe` describes the view instead of drawing it: its center, size and bounds,
+every visible label with what it is (`transportation_name/primary`, `poi/cafe`, ...), its
+cell, lon/lat and direction and distance from the center, and each data layer's features
+nearest the center with their properties. Language models read that far better than the
+picture. Asked 30 spatial questions about six street-level views (which place is further
+north, which is closest to the center, which way one is from another), Claude Haiku 5.5
+answered 60% right from the braille text, 87% from an image of the same render, and 100%
+from the description, on questions about places close together; Sonnet 5.5 80%, 83% and
+100%.
 
 Without `--style`, mapterm draws the source with its own terminal style (OpenMapTiles
 or Protomaps schema, detected from the tiles; `--light` or `t` for the light theme).

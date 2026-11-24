@@ -13,6 +13,12 @@ All notable changes to mapterm are listed here. The format follows
   memory (kitty `t=s`) instead of inline base64; anywhere else, or if the object can't be
   made, they're sent inline. `MAPTERM_KITTY_MEDIUM=shm|direct` overrides the guess
   (`kitty::shm_supported`, `kitty::transmit_shm`, `KittyState::shm`).
+- `--snapshot ... --format describe`: the view described for a language model, with every
+  visible label's kind, cell, lon/lat and direction and distance from the center, and each
+  data layer's nearest features with their properties (`mapterm::describe`,
+  `Map::features_in_view_list`). In a 30-question test on six views, models answered 100%
+  of close-call spatial questions from it, against 60-80% from braille text and 83-87%
+  from an image of the same render.
 
 ### Fixed
 

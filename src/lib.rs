@@ -70,6 +70,7 @@
 
 pub mod cache;
 pub mod cluster;
+pub mod describe;
 pub mod events;
 pub mod export;
 pub mod expr;
