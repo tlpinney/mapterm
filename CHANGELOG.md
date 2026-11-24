@@ -6,6 +6,8 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-24
+
 ### Added
 
 - Rex is recognized as a kitty graphics terminal, so imagery draws as real images there.
@@ -28,6 +30,11 @@ All notable changes to mapterm are listed here. The format follows
   tokens for a busy view (image ~800, braille text ~6,600).
 - `--snapshot ... --format png`: the view as an image on stdout (16 x 34 pixels per cell,
   fills and lines drawn smoothly, no labels).
+
+### Changed
+
+- **Breaking (library):** `KittyState` has a `shm` field (send image tiles through shared
+  memory), so building one field by field needs it; `KittyState::default()` is unchanged.
 
 ### Fixed
 
@@ -381,7 +388,8 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
-[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/tlpinney/mapterm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tlpinney/mapterm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tlpinney/mapterm/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/tlpinney/mapterm/compare/v0.1.1...v0.1.2
