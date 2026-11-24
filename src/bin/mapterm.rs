@@ -48,6 +48,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 moves: only the chunks under the view, from zoom 14. `microsoft-buildings`
                 (or a dataset-links.csv URL) is Microsoft's current building footprints, each
                 ~78 km tile downloaded once and kept split in ~/.cache/mapterm
+  --geoparquet-cache SIZE  disk for parts of remote GeoParquet files already read
+                (footers and chunks; least recently used out first; default 2GB, 0 keeps
+                none; also MAPTERM_GEOPARQUET_CACHE)
   --all-columns  read every column of GeoParquet layers (by default heavy ones, over 5% of
                 a chunk such as Overture's ids and sources, are skipped once a read passes
                 1 MB; they only show in inspect)
@@ -175,6 +178,9 @@ fn args() -> Result<Args> {
         }
     };
     // Before the arguments, so --buildings-cache wins over it.
+    if let Ok(v) = std::env::var("MAPTERM_GEOPARQUET_CACHE") {
+        mapterm::geoparquet::set_cache_limit(mapterm::msbuildings::parse_size(&v).context("MAPTERM_GEOPARQUET_CACHE")?);
+    }
     if let Ok(v) = std::env::var("MAPTERM_BUILDINGS_CACHE") {
         mapterm::msbuildings::set_cache_limit(mapterm::msbuildings::parse_size(&v).context("MAPTERM_BUILDINGS_CACHE")?);
     }
@@ -197,6 +203,10 @@ fn args() -> Result<Args> {
             "--tms" => a.tms = true,
             "--geojson" => a.geojson.push(it.next().context("--geojson FILE|URL")?),
             "--all-columns" => mapterm::geoparquet::set_all_columns(true),
+            "--geoparquet-cache" => {
+                let v = it.next().context("--geoparquet-cache SIZE")?;
+                mapterm::geoparquet::set_cache_limit(mapterm::msbuildings::parse_size(&v).context("--geoparquet-cache")?);
+            }
             "--buildings-cache" => {
                 let v = it.next().context("--buildings-cache SIZE")?;
                 mapterm::msbuildings::set_cache_limit(mapterm::msbuildings::parse_size(&v).context("--buildings-cache")?);

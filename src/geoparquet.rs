@@ -361,6 +361,85 @@ pub fn bytes_fetched() -> u64 {
     FETCHED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// Default for [`set_cache_limit`].
+pub const DEFAULT_CACHE_LIMIT: u64 = 2 << 30;
+
+static CACHE_LIMIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(DEFAULT_CACHE_LIMIT);
+
+/// How much disk fetched GeoParquet ranges (footers and chunks of remote files) may take;
+/// past it the least recently used go. 0 keeps none. Default [`DEFAULT_CACHE_LIMIT`].
+pub fn set_cache_limit(bytes: u64) {
+    CACHE_LIMIT.store(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Where the cache lives (tests point it elsewhere).
+static CACHE_ROOT: std::sync::OnceLock<std::sync::Mutex<Option<std::path::PathBuf>>> = std::sync::OnceLock::new();
+
+fn cache_root() -> std::path::PathBuf {
+    let over = CACHE_ROOT.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).clone();
+    over.unwrap_or_else(|| crate::source::cache_root().join("geoparquet"))
+}
+
+/// A file's cache directory: by URL and ETag, so a new version of the file starts empty.
+fn cache_dir(url: &str, etag: Option<&str>) -> Option<std::path::PathBuf> {
+    let etag = etag?;
+    if CACHE_LIMIT.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let dir = cache_root().join(crate::source::hash(&format!("{url}\n{etag}")));
+    if !dir.join("etag").is_file() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("etag"), etag);
+    }
+    Some(dir)
+}
+
+fn touch(f: &std::path::Path) {
+    if let Ok(file) = std::fs::File::options().append(true).open(f) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// Write `bytes` as `file` (through a temporary name, so a cut write is never read as
+/// whole), then keep the cache under its limit.
+fn keep(dir: &std::path::Path, file: &std::path::Path, bytes: &[u8]) {
+    let tmp = file.with_extension("part");
+    if std::fs::create_dir_all(dir).is_ok() && std::fs::write(&tmp, bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, file);
+    }
+    trim_cache(file);
+}
+
+/// Remove the least recently used cached ranges until the cache fits its limit, keeping
+/// `keep` (the one just written). Only range files (named START-END) are removed.
+fn trim_cache(keep: &std::path::Path) {
+    let limit = CACHE_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+    let Ok(dirs) = std::fs::read_dir(cache_root()) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = Vec::new();
+    for d in dirs.flatten() {
+        for f in std::fs::read_dir(d.path()).into_iter().flatten().flatten() {
+            let name = f.file_name().to_string_lossy().to_string();
+            let is_range = name.split_once('-').is_some_and(|(a, b)| a.parse::<u64>().is_ok() && b.parse::<u64>().is_ok());
+            if let (true, Ok(m)) = (is_range, f.metadata()) {
+                files.push((m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), f.path()));
+            }
+        }
+    }
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    if total <= limit {
+        return;
+    }
+    files.sort_by_key(|f| f.0);
+    for (_, size, path) in files {
+        if total <= limit {
+            break;
+        }
+        if path != keep && std::fs::remove_file(&path).is_ok() {
+            total -= size;
+        }
+    }
+}
+
 /// Large ranges are fetched in pieces of this size, at once (see [`HttpReader::range`]).
 const PIECE: u64 = 512 << 10;
 
@@ -373,6 +452,9 @@ struct HttpReader {
     client: reqwest::Client,
     url: String,
     len: u64,
+    /// Where fetched ranges are kept on disk: per URL and version (ETag), so a changed file
+    /// never serves old bytes. None for files without an ETag (no way to tell a change).
+    cache: Option<std::path::PathBuf>,
 }
 
 impl HttpReader {
@@ -387,17 +469,40 @@ impl HttpReader {
             .get(reqwest::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok()?.parse().ok())
             .with_context(|| format!("{url}: no Content-Length, so it can't be read in parts"))?;
-        Ok(HttpReader { client, url: url.to_string(), len })
+        let etag = r.headers().get(reqwest::header::ETAG).and_then(|v| v.to_str().ok()).map(str::to_string);
+        Ok(HttpReader { client, url: url.to_string(), len, cache: cache_dir(url, etag.as_deref()) })
+    }
+
+    /// The file's version (ETag), for readers made later with [`HttpReader::known`].
+    fn etag(&self) -> Option<String> {
+        self.cache.as_ref().and_then(|d| std::fs::read_to_string(d.join("etag")).ok())
     }
 
     /// A reader for a file whose length is known (no HEAD request).
-    fn known(client: reqwest::Client, url: &str, len: u64) -> HttpReader {
-        HttpReader { client, url: url.to_string(), len }
+    fn known(client: reqwest::Client, url: &str, len: u64, etag: Option<&str>) -> HttpReader {
+        HttpReader { client, url: url.to_string(), len, cache: cache_dir(url, etag) }
     }
 
     /// Bytes `range`. A large range is fetched as [`PIECE`]-sized pieces at once: one
     /// connection to an object store manages about 1 MB/s from afar, several manage several.
     async fn range(&self, range: Range<u64>) -> parquet::errors::Result<Bytes> {
+        let file = self.cache.as_ref().map(|d| d.join(format!("{}-{}", range.start, range.end)));
+        if let Some(f) = &file
+            && let Ok(b) = std::fs::read(f)
+            && b.len() as u64 == range.end - range.start
+        {
+            touch(f);
+            return Ok(Bytes::from(b));
+        }
+        let b = self.fetch(range).await?;
+        if let (Some(f), Some(dir)) = (&file, &self.cache) {
+            keep(dir, f, &b);
+        }
+        Ok(b)
+    }
+
+    /// Bytes `range` from the network (see [`HttpReader::range`]).
+    async fn fetch(&self, range: Range<u64>) -> parquet::errors::Result<Bytes> {
         if range.end - range.start <= 2 * PIECE {
             return self.one(range).await;
         }
@@ -518,6 +623,8 @@ struct DFile {
     /// A Microsoft footprints tile (zoom, x, y): read whole and split into pieces.
     tile: Option<(u8, u32, u32)>,
     len: u64,
+    /// Its version (ETag), keying its cached ranges.
+    etag: Option<String>,
     /// A job for it failed: not asked for again.
     failed: bool,
 }
@@ -582,7 +689,7 @@ impl Done {
 
 enum Output {
     Item { url: String, bbox: Bbox },
-    Footer { len: u64, meta: Meta, bbox: Option<Bbox> },
+    Footer { len: u64, etag: Option<String>, meta: Meta, bbox: Option<Bbox> },
     Chunk(Vec<crate::geojson::Feature>),
 }
 
@@ -616,6 +723,7 @@ impl Dataset {
                         meta: None,
                         tile: Some(tile),
                         len: 0,
+                        etag: None,
                         failed: false,
                     }
                 })
@@ -625,7 +733,7 @@ impl Dataset {
         if path.ends_with(".parquet") || path.ends_with(".geoparquet") {
             let file = spec.rsplit('/').next().unwrap_or(spec).split(['?', '#']).next().unwrap_or(spec);
             let name = file.split('.').next().unwrap_or(file).to_string();
-            let f = DFile { item: None, unread: false, url: Some(spec.to_string()), bbox: world, meta: None, tile: None, len: 0, failed: false };
+            let f = DFile { item: None, unread: false, url: Some(spec.to_string()), bbox: world, meta: None, tile: None, len: 0, etag: None, failed: false };
             return Ok(Dataset { name, files: vec![f], client, min_zoom: 14.0, loaded: Default::default() });
         }
         let doc = get_json(&client, spec).await?;
@@ -654,9 +762,9 @@ impl Dataset {
             .into_iter()
             .map(|item| match cached.get(&item) {
                 Some((url, bbox)) => {
-                    DFile { url: Some(url.clone()), bbox: *bbox, item: Some(item), unread: false, meta: None, tile: None, len: 0, failed: false }
+                    DFile { url: Some(url.clone()), bbox: *bbox, item: Some(item), unread: false, meta: None, tile: None, len: 0, etag: None, failed: false }
                 }
-                None => DFile { item: Some(item), unread: true, url: None, bbox: world, meta: None, tile: None, len: 0, failed: false },
+                None => DFile { item: Some(item), unread: true, url: None, bbox: world, meta: None, tile: None, len: 0, etag: None, failed: false },
             })
             .collect();
         Ok(Dataset { name, files, client, min_zoom: 14.0, loaded: Default::default() })
@@ -698,9 +806,9 @@ impl Dataset {
         let f = self.files.get(match job {
             Job::Item(i) | Job::Footer(i) | Job::Chunk(i, _) => i,
         });
-        let (item, url, len, meta, tile) = match f {
-            Some(f) => (f.item.clone(), f.url.clone(), f.len, f.meta.clone(), f.tile),
-            None => (None, None, 0, None, None),
+        let (item, url, len, meta, tile, etag) = match f {
+            Some(f) => (f.item.clone(), f.url.clone(), f.len, f.meta.clone(), f.tile, f.etag.clone()),
+            None => (None, None, 0, None, None, None),
         };
         async move {
             let out = async {
@@ -736,15 +844,15 @@ impl Dataset {
                         };
                         crate::msbuildings::touch(&dir);
                         let groups = crate::msbuildings::piece_boxes(tile.0, tile.1, tile.2);
-                        Ok(Output::Footer { len: 0, meta: Meta::Pieces { dir, groups, have }, bbox: None })
+                        Ok(Output::Footer { len: 0, etag: None, meta: Meta::Pieces { dir, groups, have }, bbox: None })
                     }
                     Job::Footer(_) => {
                         let url = url.context("no URL")?;
                         let mut reader = HttpReader::open(&url).await?;
-                        let len = reader.len;
+                        let (len, etag) = (reader.len, reader.etag());
                         let arrow = parquet::arrow::arrow_reader::ArrowReaderMetadata::load_async(&mut reader, Default::default()).await?;
                         let (meta, bbox) = file_meta(arrow)?;
-                        Ok(Output::Footer { len, meta: Meta::Parquet(meta), bbox })
+                        Ok(Output::Footer { len, etag, meta: Meta::Parquet(meta), bbox })
                     }
                     Job::Chunk(_, g) if matches!(meta, Some(Meta::Pieces { .. })) => {
                         let Some(Meta::Pieces { dir, .. }) = meta else { unreachable!() };
@@ -758,7 +866,7 @@ impl Dataset {
                     Job::Chunk(_, g) => {
                         let (url, m) = (url.context("no URL")?, meta.context("footer not read")?);
                         let Meta::Parquet(m) = m else { bail!("not a GeoParquet file") };
-                        let reader = HttpReader::known(client, &url, len);
+                        let reader = HttpReader::known(client, &url, len, etag.as_deref());
                         let builder = ParquetRecordBatchStreamBuilder::new_with_metadata(reader, m.arrow.clone()).with_row_groups(vec![g]);
                         let (geo, _) = geo_metadata(builder.metadata().file_metadata())?;
                         let schema = builder.geoarrow_schema(&geo, false, Default::default()).map_err(|e| anyhow!("GeoParquet schema: {e}"))?;
@@ -806,8 +914,9 @@ impl Dataset {
                 f.bbox = bbox;
                 Ok(None)
             }
-            Output::Footer { len, meta, bbox } => {
+            Output::Footer { len, etag, meta, bbox } => {
                 f.len = len;
+                f.etag = etag;
                 if let Some(b) = bbox {
                     f.bbox = b;
                 }
@@ -1078,6 +1187,7 @@ mod tests {
             meta: meta.map(Meta::Parquet),
             tile: None,
             len: 0,
+            etag: None,
             failed: false,
         };
         let mut ds = Dataset {
@@ -1163,6 +1273,74 @@ mod tests {
         let (_, kept) = projection(&meta, &[0], "geometry", None);
         set_all_columns(false);
         assert_eq!(kept, vec![0, 1, 2], "--all-columns keeps it");
+    }
+
+    /// A local server for `bytes` that answers HEAD and range GETs, with `etag` (if any), and
+    /// counts GETs. Returns its URL and the counter.
+    async fn serve(bytes: Vec<u8>, etag: Option<&'static str>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/data.parquet", l.local_addr().unwrap());
+        let gets = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (bytes, g) = (Arc::new(bytes), gets.clone());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = l.accept().await else { return };
+                let (bytes, g) = (bytes.clone(), g.clone());
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = c.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let tag = etag.map(|e| format!("ETag: {e}\r\n")).unwrap_or_default();
+                    let reply = if req.starts_with("HEAD") {
+                        format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n{tag}Connection: close\r\n\r\n", bytes.len()).into_bytes()
+                    } else {
+                        g.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let r = req.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("range: bytes=").map(str::to_string)).unwrap();
+                        let (a, b) = r.split_once('-').unwrap();
+                        let (a, b): (usize, usize) = (a.trim().parse().unwrap(), b.trim().parse().unwrap());
+                        let mut out = format!("HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\n{tag}Connection: close\r\n\r\n", b + 1 - a).into_bytes();
+                        out.extend_from_slice(&bytes[a..=b]);
+                        out
+                    };
+                    let _ = c.write_all(&reply).await;
+                });
+            }
+        });
+        (url, gets)
+    }
+
+    #[tokio::test]
+    async fn remote_reads_are_cached_by_etag() {
+        let root = std::env::temp_dir().join(format!("mapterm-gpq-cache-{}", std::process::id()));
+        *CACHE_ROOT.get_or_init(Default::default).lock().unwrap() = Some(root.clone());
+        let bytes = sample(WKB_GEO);
+        // First read fetches; the second, from a new reader, is all from disk.
+        let (url, gets) = serve(bytes.clone(), Some("\"v1\"")).await;
+        let a = read_url(&url, None).await.unwrap();
+        let first = gets.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(first > 0);
+        let b = read_url(&url, None).await.unwrap();
+        assert_eq!(gets.load(std::sync::atomic::Ordering::SeqCst), first, "the second read hit the disk");
+        assert_eq!(a, b);
+        // A new version (another ETag) of the same URL fetches again.
+        let (url2, gets2) = serve(bytes.clone(), Some("\"v2\"")).await;
+        read_url(&url2, None).await.unwrap();
+        assert!(gets2.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        // No ETag: nothing kept, every read fetches.
+        let (url3, gets3) = serve(bytes, None).await;
+        read_url(&url3, None).await.unwrap();
+        let n = gets3.load(std::sync::atomic::Ordering::SeqCst);
+        read_url(&url3, None).await.unwrap();
+        assert_eq!(gets3.load(std::sync::atomic::Ordering::SeqCst), 2 * n, "without an ETag every read fetches");
+        // Remove what the test wrote (file by file).
+        for d in std::fs::read_dir(&root).unwrap().flatten() {
+            for f in std::fs::read_dir(d.path()).unwrap().flatten() {
+                let _ = std::fs::remove_file(f.path());
+            }
+            let _ = std::fs::remove_dir(d.path());
+        }
+        let _ = std::fs::remove_dir(&root);
     }
 
     #[test]

@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Remote GeoParquet reads are cached on disk (`~/.cache/mapterm/geoparquet`): the byte
+  ranges fetched, footers and chunks, keyed by URL and ETag so a changed file is read
+  afresh (files without an ETag aren't cached). `--geoparquet-cache SIZE` /
+  `MAPTERM_GEOPARQUET_CACHE` sets the limit (default 2 GB, least recently used out
+  first; `geoparquet::set_cache_limit`). Revisiting San Salvador in Overture's buildings
+  went from ~3.6 s to ~1.6 s (the basemap alone takes ~0.3 s).
 - `microsoft-buildings` follows Microsoft's newest release by itself: the
   `dataset-links.csv` with the latest date linked from their README, checked once a day,
   falling back to the last found and then a built-in one (`msbuildings::latest`). Each
