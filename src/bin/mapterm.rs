@@ -937,7 +937,16 @@ async fn main() -> Result<()> {
         if a.format == "png" {
             map.raster_mode = RasterMode::Kitty { cell_px: (PNG_CELL.0 as f64, PNG_CELL.1 as f64) };
         }
-        for req in map.tile_requests(&cam, area) {
+        // Pixel drawing goes by grid tiles (~512 px) that reach past the view's edges, and
+        // draws one only when every vector tile under it is in: load a grid tile's margin.
+        let pixel_snapshot = a.format == "png" || std::env::var_os("MAPTERM_PIXELS_PNG").is_some();
+        let load_area = if pixel_snapshot {
+            let (mc, mr) = ((512 / PNG_CELL.0) as u16 + 1, (512 / PNG_CELL.1) as u16 + 1);
+            Rect::new(0, 0, w.saturating_add(2 * mc), h.saturating_add(2 * mr))
+        } else {
+            area
+        };
+        for req in map.tile_requests(&cam, load_area) {
             let r = req.load().await;
             if let Err(e) = map.insert_loaded(&req.source, req.id, r) {
                 eprintln!("{e:#}");
@@ -987,10 +996,17 @@ async fn main() -> Result<()> {
         // all are in, keeping every image sent so far.
         let mut sent: Vec<mapterm::pixels::PixImage> = Vec::new();
         let mut last = map.take_pixels();
+        // A frame that draws nothing new while tiles are still blank won't ever finish them
+        // (data that never came): stop with what's there rather than spin.
         while let Some(f) = last.as_mut().filter(|f| f.pending > 0) {
+            let progress = !f.new.is_empty();
             sent.append(&mut f.new);
             map.view(&cam).render(area, &mut Buffer::empty(area));
             last = map.take_pixels();
+            if !progress && last.as_ref().is_some_and(|l| l.new.is_empty() && l.pending > 0) {
+                eprintln!("warning: {} pixel tiles left blank (their map data didn't load)", last.as_ref().map_or(0, |l| l.pending));
+                break;
+            }
         }
         if let Some(f) = last.as_mut() {
             sent.append(&mut f.new);
