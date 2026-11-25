@@ -318,10 +318,11 @@ layer (JPEG layers at 250 m).
   lines, markers and inspect draw on top. Each tile is sent once; panning and
   zooming only move it. Elsewhere the layer becomes cell background colors.
   `MAPTERM_GRAPHICS=kitty` or `cells` overrides the guess.
-- In a local Rex or kitty window, tiles go to the terminal through POSIX shared
-  memory instead of inline base64, which the terminal reads and frees itself. Over
-  SSH, through herdr, and elsewhere they're sent inline. `MAPTERM_KITTY_MEDIUM=shm`
-  or `direct` overrides the guess.
+- When the terminal says it can (mapterm asks at startup), tiles go to it through
+  POSIX shared memory instead of inline base64, which the terminal reads and frees
+  itself: Ghostty, kitty, and herdr panes, among others. Over SSH, and in terminals
+  that say no, they're sent inline. `MAPTERM_KITTY_MEDIUM=shm` or `direct` overrides
+  the check.
 - mapterm keeps at most 48 MiB of decoded images in the terminal (herdr allows
   64 MiB per pane), freeing tiles that are off screen first, so the terminal never
   drops one that is showing. `MAPTERM_KITTY_BUDGET_MB` changes it.
