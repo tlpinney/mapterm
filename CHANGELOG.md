@@ -6,6 +6,16 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- mapterm asks the terminal at startup whether it reads images from shared memory (a kitty
+  `a=q,t=s` query followed by a Device Attributes request, so it never waits on a terminal
+  that doesn't answer) instead of guessing from its name. Through herdr, and in Ghostty,
+  imagery and pixel-mode tiles now go through shared memory; about 20x fewer bytes for herdr
+  to relay while panning over imagery. A terminal that doesn't answer graphics queries keeps
+  the old guess; never over SSH. `MAPTERM_KITTY_MEDIUM` still overrides it
+  (`kitty::probe_shm`).
+
 ## [0.4.0] - 2026-11-24
 
 ### Added

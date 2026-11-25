@@ -1037,8 +1037,6 @@ async fn main() -> Result<()> {
     let kitty = has_raster && mapterm::kitty::supported();
     // Experimental pixel mode: fills and lines as an image, labels as text (MAPTERM_PIXELS=1).
     let pixels_on = std::env::var("MAPTERM_PIXELS").is_ok_and(|v| !v.is_empty() && v != "0") && mapterm::kitty::supported();
-    // Through shared memory when the terminal runs here; inline (compressed) over SSH.
-    let pixels_shm = std::env::var_os("SSH_CONNECTION").is_none();
     // Tile images placed last frame, to take down the ones that left the view.
     let mut pixels_placed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     // Tiles still blank (drawing or loading): keep drawing frames until they're in.
@@ -1058,7 +1056,6 @@ async fn main() -> Result<()> {
     demo.sort_by(|a, b| b.0.total_cmp(&a.0));
     let demo_start = Instant::now();
     let mut kstate = KittyState::default();
-    kstate.shm = kitty && mapterm::kitty::shm_supported();
     // Terminal image memory to stay within (herdr keeps 64 MiB per pane).
     if let Some(mb) = std::env::var("MAPTERM_KITTY_BUDGET_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
         kstate.budget = mb.max(1) << 20;
@@ -1069,11 +1066,17 @@ async fn main() -> Result<()> {
     }
     if pixels_on {
         map.pixel_mode = Some(cpx);
-        // Fading sends each new tile a few more times: cheap through shared memory, not over SSH.
-        map.pixel_fade = pixels_shm;
     }
 
     let mut term = ratatui::init();
+    // Images through shared memory when the terminal (or herdr) says it reads them, else
+    // inline. It asks the terminal, so it runs in raw mode, before the input thread starts.
+    let shm = (kitty || pixels_on) && mapterm::kitty::shm_supported();
+    dlog(|| format!("kitty medium: {}", if shm { "shared memory" } else { "inline" }));
+    kstate.shm = kitty && shm;
+    let pixels_shm = shm;
+    // Fading sends each new tile a few more times: cheap through shared memory, not inline.
+    map.pixel_fade = pixels_on && pixels_shm;
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
     let (ktx, mut krx) = mpsc::unbounded_channel::<Event>();
     std::thread::spawn(move || {

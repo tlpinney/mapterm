@@ -1,6 +1,6 @@
 //! The kitty terminal graphics protocol, for drawing raster tiles as real images underneath
 //! the text layer (Ghostty, kitty, WezTerm, Rex; herdr relays it). Every command sets `q=2`, so the
-//! terminal sends no replies that would show up as input.
+//! terminal sends no replies that would show up as input (except the startup [`probe_shm`]).
 //! Spec: <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
 
 use std::fmt::Write as _;
@@ -23,9 +23,13 @@ pub fn supported() -> bool {
 
 /// Whether to send image tiles through POSIX shared memory (`t=s`) instead of inline base64:
 /// the terminal reads the pixels straight from memory, which skips encoding and parsing a
-/// third more bytes per tile. Only for a local terminal known to read shared memory (Rex,
-/// kitty), never over SSH or through herdr, since a terminal that can't read the object
-/// shows nothing and leaves it behind. `MAPTERM_KITTY_MEDIUM=shm` or `direct` overrides it.
+/// third more bytes per tile (and, through herdr, relaying them). A terminal that can't read
+/// the object shows nothing, so this asks the terminal itself (see [`probe_shm`]); one that
+/// doesn't answer graphics queries gets the old guess (a local Rex or kitty). Never over SSH,
+/// where the terminal is on another machine. `MAPTERM_KITTY_MEDIUM=shm` or `direct`
+/// overrides it.
+///
+/// Call it in raw mode, before anything else reads the terminal's input.
 pub fn shm_supported() -> bool {
     if !cfg!(unix) {
         return false;
@@ -38,12 +42,88 @@ pub fn shm_supported() -> bool {
     if ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"].iter().any(|v| std::env::var_os(v).is_some()) {
         return false;
     }
+    if let Some(answer) = probe_shm(std::time::Duration::from_millis(500)) {
+        return answer;
+    }
     let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default().to_ascii_lowercase();
     let term = std::env::var("TERM").unwrap_or_default().to_ascii_lowercase();
-    if term_program.contains("herdr") || term.contains("herdr") {
-        return false;
-    }
     std::env::var_os("KITTY_WINDOW_ID").is_some() || ["rex", "kitty"].iter().any(|t| term_program.contains(t) || term.contains(t))
+}
+
+/// Ask the terminal whether it reads images from shared memory: a 1x1 image in a fresh
+/// object, sent as a query (`a=q`, nothing is stored or shown), then a Primary Device
+/// Attributes request, which every terminal answers, so the wait ends even when the graphics
+/// query gets no reply. `Some(true)` when the terminal read it, `Some(false)` when it
+/// answered with an error, `None` when it said nothing about graphics (or stayed silent).
+/// Through herdr, herdr's own terminal answers, which is the one that reads the tiles.
+#[cfg(unix)]
+pub fn probe_shm(timeout: std::time::Duration) -> Option<bool> {
+    use std::io::Write as _;
+    let name = shm_write(&[0, 0, 0])?;
+    let query = format!("\x1b_Gi={PROBE_ID},s=1,v=1,a=q,t=s,f=24;{}\x1b\\\x1b[c", base64(name.as_bytes()));
+    let mut out = std::io::stdout();
+    let answer = if out.write_all(query.as_bytes()).and_then(|()| out.flush()).is_ok() { read_probe_reply(timeout) } else { None };
+    // The terminal removes an object it read; one it didn't is still ours.
+    if let Ok(cname) = std::ffi::CString::new(name) {
+        // SAFETY: unlinking a name this process created; harmless if already gone.
+        unsafe { libc::shm_unlink(cname.as_ptr()) };
+    }
+    answer
+}
+
+#[cfg(not(unix))]
+pub fn probe_shm(_timeout: std::time::Duration) -> Option<bool> {
+    None
+}
+
+/// The image id of the shared-memory query (any id: a query stores nothing).
+const PROBE_ID: u32 = 4_000_000_001;
+
+/// Read the terminal's answers to [`probe_shm`] from stdin until the Device Attributes reply
+/// arrives or `timeout` passes. Bytes read here (keys typed during startup) are dropped.
+#[cfg(unix)]
+fn read_probe_reply(timeout: std::time::Duration) -> Option<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buf = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        let mut pfd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid pollfd; read into a stack buffer of the length given.
+        let n = unsafe {
+            match libc::poll(&mut pfd, 1, left.as_millis().clamp(1, i32::MAX as u128) as i32) {
+                r if r > 0 => {
+                    let mut chunk = [0u8; 256];
+                    let n = libc::read(libc::STDIN_FILENO, chunk.as_mut_ptr().cast(), chunk.len());
+                    if n > 0 {
+                        buf.extend_from_slice(&chunk[..n as usize]);
+                    }
+                    n
+                }
+                0 => return None,
+                _ if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted => continue,
+                _ => -1,
+            }
+        };
+        if n <= 0 {
+            return None;
+        }
+        if let Some(done) = parse_probe_reply(&buf) {
+            return done;
+        }
+    }
+}
+
+/// What the replies read so far say: `None` until the Device Attributes reply
+/// (`ESC [ ? ... c`) has arrived; then whether the graphics reply was `OK`, if there was one.
+fn parse_probe_reply(buf: &[u8]) -> Option<Option<bool>> {
+    let da = buf.windows(3).position(|w| w == b"\x1b[?")?;
+    buf[da + 3..].iter().position(|&b| b == b'c')?;
+    let head = format!("\x1b_Gi={PROBE_ID};");
+    let graphics = buf[..da].windows(head.len()).position(|w| w == head.as_bytes());
+    Some(graphics.map(|at| buf[at + head.len()..da].starts_with(b"OK")))
 }
 
 /// Standard base64 (RFC 4648), for image data and OSC 52.
@@ -221,6 +301,22 @@ pub fn unplace(id: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn probe_reply_waits_for_device_attributes() {
+        assert_eq!(super::parse_probe_reply(b"\x1b_Gi=4000000001;OK\x1b\\"), None);
+        assert_eq!(super::parse_probe_reply(b"\x1b_Gi=4000000001;OK\x1b\\\x1b[?62;22"), None);
+    }
+
+    #[test]
+    fn probe_reply_reads_the_graphics_answer() {
+        assert_eq!(super::parse_probe_reply(b"\x1b_Gi=4000000001;OK\x1b\\\x1b[?62;22c"), Some(Some(true)));
+        assert_eq!(super::parse_probe_reply(b"\x1b_Gi=4000000001;EBADF:no shm\x1b\\\x1b[?62;22c"), Some(Some(false)));
+        // No graphics reply before the Device Attributes reply: the terminal didn't say.
+        assert_eq!(super::parse_probe_reply(b"\x1b[?62;22c"), Some(None));
+        // A typed key before the replies doesn't confuse it.
+        assert_eq!(super::parse_probe_reply(b"j\x1b_Gi=4000000001;OK\x1b\\\x1b[?1;2c"), Some(Some(true)));
+    }
+
     use super::*;
 
     #[test]
