@@ -6,6 +6,13 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Your location: `--at here` starts where you are, zoomed to the fix's accuracy, and `g`
+  flies there and marks it. The position comes from a command printing
+  `LAT LON [ACCURACY_M]`: `--location-cmd`, `MAPTERM_LOCATION_CMD`, or on macOS
+  CoreLocationCLI (Location Services) when it's installed (`mapterm::locate`).
+
 ### Changed
 
 - mapterm asks the terminal at startup whether it reads images from shared memory (a kitty

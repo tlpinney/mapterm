@@ -60,6 +60,7 @@ verify it. To use the library in your own app: `cargo add mapterm`.
 ```sh
 mapterm                                                # OpenFreeMap planet, no key needed
 mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lon) at zoom 13
+mapterm --at here                                      # start where you are (see Your location)
 mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over HTTP range requests
 mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, offline
 mapterm city.mbtiles                                   # or an MBTiles file
@@ -143,9 +144,27 @@ They follow the MapLibre GL / Mapbox GL defaults:
 - **`m`** switches the map style: the built-in one, then OpenFreeMap's liberty,
   positron, bright, dark and fiord (a `--style` you started with comes first).
   Imagery stays underneath and your GeoJSON layers on top.
+- **`g`** goes to where you are and marks it with a blue dot (see
+  [Your location](#your-location)).
 - **`c`** copies the coordinates under the pointer (or the map center) as
   `lat, lon` to the clipboard (OSC 52).
 - Terminal extras: sideways swipes pan; `i` inspect, `v` vector overlay, `n` labels, `t` light/dark theme (built-in style), `q` quit
+
+## Your location
+
+`--at here` starts the map where you are, zoomed to how precise the fix is, and
+**`g`** flies there (and marks it) at any time. mapterm gets the position from a
+command that prints `LAT LON [ACCURACY_M]`:
+
+- On macOS, [CoreLocationCLI](https://github.com/fulldecent/corelocationcli)
+  (`brew install --cask corelocationcli`), found on `PATH`. It uses Location
+  Services, so the first run asks for permission, and Wi-Fi must be on. (A plain
+  command-line program can't ask for that permission itself.)
+- Anything else with `--location-cmd CMD` or `MAPTERM_LOCATION_CMD`: gpsd
+  (`gpspipe -w -n 5 | jq -r 'select(.class=="TPV") | "\(.lat) \(.lon)"' | head -1`),
+  your phone, or a fixed spot (`echo 38.8895 -77.0353`).
+
+The command runs only for `--at here` and `g`; nothing is sent anywhere.
 
 ## GeoJSON layers
 
