@@ -84,6 +84,7 @@ pub mod index;
 pub mod interact;
 pub mod kitty;
 pub mod layer;
+pub mod locate;
 pub mod map;
 pub mod mapbox;
 pub mod mbtiles;

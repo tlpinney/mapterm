@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON] [-z ZOOM] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -65,7 +65,12 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 MAPTERM_BUILDINGS_CACHE)
   --bbox W,S,E,N  read a GeoParquet layer once, for this area only (lon/lat), instead of
                 loading it as the map moves
-  --at          start position (default: fit the GeoJSON layers, else the source's center)
+  --at          start position (default: fit the GeoJSON layers, else the source's center);
+                `here` is where you are (see --location-cmd), zoomed to its accuracy
+  --location-cmd CMD
+                a command that prints your location as LAT LON [ACCURACY_M], for
+                `--at here` and `g` (else MAPTERM_LOCATION_CMD; on macOS, CoreLocationCLI
+                when installed: brew install --cask corelocationcli)
   -z            start zoom
   --raster      an image tile layer under the vector map: a provider or stack name
                 (--raster-list; `planetary` is Sentinel-2 with NAIP on top when zoomed in),
@@ -137,6 +142,10 @@ struct Args {
     raster_attribution: Option<String>,
     raster_key_cmd: Option<String>,
     mapbox_token_cmd: Option<String>,
+    /// --at here: start where you are.
+    at_here: bool,
+    /// --location-cmd: prints LAT LON [ACCURACY_M].
+    location_cmd: Option<String>,
     raster_headers: Vec<String>,
     raster_cache: Option<bool>,
     /// --raster-limit: Some(None) is "off", Some(Some(n)) n a minute, None the default.
@@ -173,6 +182,8 @@ fn args() -> Result<Args> {
         raster_attribution: None,
         raster_key_cmd: None,
         mapbox_token_cmd: None,
+        at_here: false,
+        location_cmd: None,
         raster_headers: Vec::new(),
         raster_cache: None,
         raster_limit: None,
@@ -208,6 +219,10 @@ fn args() -> Result<Args> {
         match x.as_str() {
             "--at" => {
                 let v = it.next().context("--at LAT,LON")?;
+                if v.trim() == "here" {
+                    a.at_here = true;
+                    continue;
+                }
                 let (la, lo) = v.split_once(',').context("--at LAT,LON")?;
                 a.at = Some((lo.trim().parse()?, la.trim().parse()?));
             }
@@ -261,6 +276,7 @@ fn args() -> Result<Args> {
                 }
                 a.bbox = Some([w, s, e, nn]);
             }
+            "--location-cmd" => a.location_cmd = Some(it.next().context("--location-cmd CMD")?),
             "--raster-key-cmd" => a.raster_key_cmd = Some(it.next().context("--raster-key-cmd CMD")?),
             "--mapbox-token-cmd" => a.mapbox_token_cmd = Some(it.next().context("--mapbox-token-cmd CMD")?),
             "--raster-header" => a.raster_headers.push(it.next().context("--raster-header 'Name: value'")?),
@@ -693,7 +709,16 @@ fn base_visibility(map: &Map) -> std::collections::HashMap<String, bool> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let a = args()?;
+    let mut a = args()?;
+    // --at here: ask the location helper before anything depends on the start view.
+    let mut me: Option<mapterm::locate::Fix> = None;
+    if a.at_here {
+        let cmd = a.location_cmd.clone();
+        let fix = tokio::task::spawn_blocking(move || mapterm::locate::locate(cmd.as_deref())).await?.context("--at here")?;
+        a.at = Some((fix.lon, fix.lat));
+        a.zoom.get_or_insert(fix.zoom());
+        me = Some(fix);
+    }
     if a.list_mosaics {
         return list_planet_mosaics(a.raster_key_cmd.as_deref()).await;
     }
@@ -1149,6 +1174,9 @@ async fn main() -> Result<()> {
     let mut held_back = false;
     let mut throttled_at: Option<Instant> = None;
     let (ctx, mut crx) = mpsc::unbounded_channel::<Result<String>>();
+    // `g`: the location helper runs on a blocking task; its answer flies the map there.
+    let (ltx, mut lrx) = mpsc::unbounded_channel::<Result<mapterm::locate::Fix>>();
+    let mut locating = false;
     let mut credit_view: Option<(i32, i64, i64)> = None;
     let mut credit_seen: Option<((i32, i64, i64), Instant)> = None;
     let mut credit_pending = false;
@@ -1201,6 +1229,17 @@ async fn main() -> Result<()> {
                 for ((ax, ay), (bx, by)) in [((x - 3.0, y), (x + 3.0, y)), ((x, y - 3.0), (x, y + 3.0))] {
                     overlays.push(Overlay::Line { pts: vec![vp.dot_to_lonlat(ax, ay), vp.dot_to_lonlat(bx, by)], color: cross });
                 }
+            }
+            // Where you are (--at here, g): a blue dot under the search markers.
+            if let Some(fix) = &me {
+                overlays.push(Overlay::Marker {
+                    lon: fix.lon,
+                    lat: fix.lat,
+                    glyph: "◉".into(),
+                    style: TStyle::new().fg(Color::Rgb(70, 170, 255)).add_modifier(ratatui::style::Modifier::BOLD),
+                    label: None,
+                    priority: 96,
+                });
             }
             // Search results as small diamonds, the selected or chosen one with its name.
             let mark = TStyle::new().fg(Color::Rgb(255, 120, 200));
@@ -1546,6 +1585,18 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Some(r) = lrx.recv() => {
+                    locating = false;
+                    match r {
+                        Ok(fix) => {
+                            ctl.fly_to(Camera::new(fix.lon, fix.lat, fix.zoom().max(ctl.cam.zoom.min(17.0))));
+                            let acc = fix.accuracy_m.map(|m| format!(" (±{m:.0} m)")).unwrap_or_default();
+                            note = Some((Instant::now(), format!("you are here{acc}")));
+                            me = Some(fix);
+                        }
+                        Err(e) => note = Some((Instant::now(), format!("location: {e:#}"))),
+                    }
+                }
                 Some(c) = crx.recv() => {
                     credit_pending = false;
                     // On failure keep the credits shown; the next new view asks again.
@@ -1669,6 +1720,14 @@ async fn main() -> Result<()> {
                                 match k.code {
                                     KeyCode::Char('/') => {
                                         search = Search::Typing(String::new());
+                                    }
+                                    KeyCode::Char('g') if !locating => {
+                                        locating = true;
+                                        note = Some((Instant::now(), "locating…".into()));
+                                        let (tx, cmd) = (ltx.clone(), a.location_cmd.clone());
+                                        tokio::task::spawn_blocking(move || {
+                                            let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
+                                        });
                                     }
                                     KeyCode::Esc if found.is_some() && picks.is_empty() => found = None,
                                     KeyCode::Esc if !picks.is_empty() => {
