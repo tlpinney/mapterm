@@ -61,6 +61,7 @@ verify it. To use the library in your own app: `cargo add mapterm`.
 mapterm                                                # OpenFreeMap planet, no key needed
 mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lon) at zoom 13
 mapterm --at here                                      # start where you are (see Your location)
+mapterm --adsb --at 38.85,-77.04 -z 10                 # live aircraft over DC (see Live aircraft)
 mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over HTTP range requests
 mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, offline
 mapterm city.mbtiles                                   # or an MBTiles file
@@ -165,6 +166,52 @@ command that prints `LAT LON [ACCURACY_M]`:
   your phone, or a fixed spot (`echo 38.8895 -77.0353`).
 
 The command runs only for `--at here` and `g`; nothing is sent anywhere.
+
+## Live aircraft
+
+`--adsb` draws live aircraft over the map from a free ADS-B feed that needs no key:
+[adsb.lol](https://api.adsb.lol) (the default, ODbL) or `--adsb fi`
+([adsb.fi](https://github.com/adsbfi/opendata)), or your own readsb-format endpoint
+as a URL with `{lat}`, `{lon}` and `{nm}`. adsb.lol's data is
+[ODbL](https://opendatacommons.org/licenses/odbl/summary/), credited first on the
+status line.
+
+mapterm goes easy on these free services:
+
+- **adsb.lol's quota:** without a key it allows 500 requests a day per address, so
+  mapterm asks every 30 s (about 4 hours of watching). A free
+  [feeder key](https://www.adsb.lol/docs/feeders-only/re-api/) (7,200 a day), from
+  `ADSB_LOL_KEY` or `--adsb-key-cmd`, makes it every 12 s; the key is only sent to
+  adsb.lol. The status line shows the requests left, and as they run low mapterm
+  spreads the rest over the time until the quota resets instead of running out.
+- At most a 60 nm circle (`--adsb-radius`), a bit more than the view; panning away
+  asks sooner, but no more than three times as often.
+- Nothing below zoom 7 (the status line says to zoom in).
+- After an error, 30 s doubling to 5 minutes; after "too many requests", as long as
+  the feed's `Retry-After` says.
+
+- The map switches to `mapterm-aviation`, a dark, quiet style for this: dim land
+  and water, only motorways and larger places, and airports standing out (codes
+  from zoom 7, runways from zoom 10, taxiways and aprons closer in). `m` cycles to
+  the others; `--raster esri-dark` or `--raster esri` with `v` twice (roads and
+  labels off) puts the planes over imagery alone.
+- Each aircraft is an arrow along its track, colored by altitude (gray on the
+  ground, green low, through yellow and orange, to pink at cruise), with its
+  callsign. A trail shows the last 90 s, fading: drawn as an image under the text
+  in terminals with kitty graphics (braille lines would shimmer as they grow).
+- **Click** an aircraft (or **Tab** / **shift+Tab** through them from the middle of
+  the map out) for a live panel: callsign, type, registration, altitude and climb
+  rate, speed, track, squawk, distance from you with `--at here`. **`f`** follows
+  it; **Esc** closes.
+- Aircraft move smoothly: mapterm keeps every fix with the time it was true and
+  draws the aircraft a poll interval in the past, interpolating between real fixes (Cesium's
+  sampled positions), so planes glide through turns instead of overshooting and
+  jumping back. Past the last fix they continue along their track for up to 30 s.
+
+The library side is `mapterm::timeseries` (`SampledPosition`: samples in, position
+at any time out, with trails) and `mapterm::adsb` (`Feed`, `Tracks`), for any
+moving data in your own app: update a GeoJSON source with `set_data` a few times a
+second.
 
 ## GeoJSON layers
 

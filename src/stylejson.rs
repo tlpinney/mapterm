@@ -97,14 +97,16 @@ pub fn style_layers(doc: &Json) -> Result<(Vec<StyleLayer>, Vec<String>)> {
 }
 
 impl Map {
-    /// A map from a style: `mapterm-dark` or `mapterm-light` (the built-in terminal styles
-    /// over OpenFreeMap), an OpenFreeMap name ([`OPENFREEMAP_STYLES`]), a URL or a file.
+    /// A map from a style: `mapterm-dark`, `mapterm-light` or `mapterm-aviation` (the built-in
+    /// terminal styles over OpenFreeMap), an OpenFreeMap name ([`OPENFREEMAP_STYLES`]), a URL
+    /// or a file.
     pub async fn from_style(spec: &str) -> Result<Map> {
         if let Some(theme) = spec.strip_prefix("mapterm-") {
             let dark = match theme {
                 "dark" => true,
                 "light" => false,
-                _ => bail!("built-in styles are mapterm-dark and mapterm-light"),
+                "aviation" => return Map::aviation(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles),
+                _ => bail!("built-in styles are mapterm-dark, mapterm-light and mapterm-aviation"),
             };
             return Map::terminal(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles, dark);
         }
@@ -124,6 +126,14 @@ impl Map {
         let mut map = Map::new();
         map.add_source(BASEMAP, MapSource::vector(src))?;
         map.add_style_layers(&terminal_style(schema, dark))?;
+        Ok(map)
+    }
+
+    /// A map drawing `src` with the built-in aviation style ([`aviation_style`]).
+    pub fn aviation(src: Source, schema: Schema) -> Result<Map> {
+        let mut map = Map::new();
+        map.add_source(BASEMAP, MapSource::vector(src))?;
+        map.add_style_layers(&aviation_style(schema))?;
         Ok(map)
     }
 
@@ -329,6 +339,55 @@ impl Schema {
 
 /// The source id the built-in styles draw from.
 pub const BASEMAP: &str = "basemap";
+
+/// A dark, quiet style for watching aircraft (`mapterm-aviation`, the default with `--adsb`):
+/// what a flight tracker shows. Land and water are dim, only motorways and trunk roads and the
+/// larger places are drawn, and airports stand out: their codes from z7 (international) or
+/// z9, runways as bright lines from z10, taxiways and aprons closer in. Nothing is brighter
+/// than the aircraft colors. Protomaps tiles get the built-in dark style.
+pub fn aviation_style(schema: Schema) -> Json {
+    use serde_json::json;
+    if schema == Schema::Protomaps {
+        return terminal_style(schema, true);
+    }
+    let poly = json!(["==", ["geometry-type"], "Polygon"]);
+    let lines = json!(["==", ["geometry-type"], "LineString"]);
+    let fill = |id: &str, src_layer: &str, filter: Json, color: &str, min: u8| json!({"id": id, "type": "fill", "source": BASEMAP, "source-layer": src_layer, "filter": filter, "minzoom": min, "paint": {"fill-color": color}});
+    let line = |id: &str, src_layer: &str, filter: Json, color: &str, min: u8| json!({"id": id, "type": "line", "source": BASEMAP, "source-layer": src_layer, "filter": filter, "minzoom": min, "paint": {"line-color": color}});
+    let class_in = |classes: &[&str]| json!(["in", ["get", "class"], ["literal", classes]]);
+    let layers = vec![
+        fill("water", "water", poly.clone(), "#0e1a2b", 0),
+        line("waterway", "waterway", json!(["all", lines.clone(), ["==", ["get", "class"], "river"]]), "#1b3150", 8),
+        line("boundary", "boundary", json!(["all", ["<=", ["get", "admin_level"], 4], ["!=", ["get", "maritime"], 1]]), "#3b3552", 0),
+        // Airport grounds, then aprons, then runways and taxiways over them.
+        fill("aerodrome", "aeroway", json!(["all", poly.clone(), ["==", ["get", "class"], "aerodrome"]]), "#171b22", 10),
+        fill("apron", "aeroway", json!(["all", poly.clone(), ["==", ["get", "class"], "apron"]]), "#232832", 13),
+        fill("runway-area", "aeroway", json!(["all", poly.clone(), ["==", ["get", "class"], "runway"]]), "#3a404c", 12),
+        line("road-trunk", "transportation", class_in(&["trunk"]), "#2a2a2a", 9),
+        line("road-motorway", "transportation", class_in(&["motorway"]), "#363636", 6),
+        line("taxiway", "aeroway", json!(["all", lines.clone(), ["==", ["get", "class"], "taxiway"]]), "#56606f", 13),
+        line("runway", "aeroway", json!(["all", lines.clone(), ["==", ["get", "class"], "runway"]]), "#d8dee9", 10),
+        // Runway numbers (ref, such as 01/19) where there's room.
+        json!({"id": "runway-label", "type": "symbol", "source": BASEMAP, "source-layer": "aeroway", "minzoom": 14,
+               "filter": ["all", lines.clone(), ["==", ["get", "class"], "runway"]],
+               "layout": {"text-field": ["get", "ref"], "symbol-placement": "line"}, "paint": {"text-color": "#8a93a3"}}),
+        // Airports by code: international ones from z7, the rest from z9.
+        json!({"id": "airport", "type": "symbol", "source": BASEMAP, "source-layer": "aerodrome_label", "minzoom": 7,
+               "filter": ["any", [">=", ["zoom"], 9], ["==", ["get", "class"], "international"]],
+               "layout": {"icon-image": "airport",
+                          "text-field": ["coalesce", ["get", "iata"], ["get", "icao"], ["get", "name"]],
+                          "text-font": ["literal", ["Bold"]],
+                          "symbol-sort-key": ["match", ["get", "class"], "international", 0, "public", 1, "regional", 2, 3]},
+               "paint": {"text-color": "#7fb2ff"}}),
+        // Places: countries, states and cities, then towns from z9; dim, under the airports.
+        json!({"id": "place", "type": "symbol", "source": BASEMAP, "source-layer": "place",
+               "filter": ["any", ["in", ["get", "class"], ["literal", ["country", "state", "city"]]], ["all", [">=", ["zoom"], 9], ["==", ["get", "class"], "town"]]],
+               "layout": {"text-field": ["get", "name"],
+                          "symbol-sort-key": ["+", 10, ["-", ["coalesce", ["get", "rank"], 10], ["match", ["get", "class"], "country", 9, "state", 6, "city", 4, 0]]]},
+               "paint": {"text-color": ["match", ["get", "class"], "city", "#8b8f98", "#62666e"]}}),
+    ];
+    json!({"version": 8, "sources": {}, "layers": layers})
+}
 
 /// mapterm's own styles, tuned for terminal cells: few layers, roads drawn smallest first so
 /// major roads stay on top, labels ranked by importance. `dark` picks colors for a dark
