@@ -249,11 +249,14 @@ pub struct KittyState {
     /// Send image tiles through POSIX shared memory instead of inline base64 (see
     /// [`crate::kitty::shm_supported`]); falls back to inline if an object can't be made.
     pub shm: bool,
+    /// Screen rectangles drawn over the map (a panel, legends): images are cut around them,
+    /// since text over an image is hard to read. Set it before each frame.
+    pub holes: Vec<Rect>,
 }
 
 impl Default for KittyState {
     fn default() -> Self {
-        Self { sent: HashMap::new(), placed: HashSet::new(), frame: 0, budget: 48 << 20, shm: false }
+        Self { sent: HashMap::new(), placed: HashSet::new(), frame: 0, budget: 48 << 20, shm: false, holes: Vec::new() }
     }
 }
 
@@ -1495,7 +1498,13 @@ impl Map {
             }
             let Some(MapSource::Raster(r)) = l.source.as_deref().and_then(|s| self.source(s)) else { continue };
             let rz = self.raster_zoom(&r.src, cam);
-            pieces.extend(crate::raster::layout_max(&r.tiles, cam, area, rz, (32, 16)).into_iter().map(|b| (i, b)));
+            for b in crate::raster::layout_max(&r.tiles, cam, area, rz, (32, 16)) {
+                let mut parts = vec![b];
+                for &h in &state.holes {
+                    parts = parts.iter().flat_map(|p| crate::raster::cut(p, h)).collect();
+                }
+                pieces.extend(parts.into_iter().map(|b| (i, b)));
+            }
         }
         if pieces.is_empty() && state.sent.is_empty() && state.placed.is_empty() {
             return cmds;

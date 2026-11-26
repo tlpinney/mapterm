@@ -162,6 +162,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- Opening a panel (an alert, aircraft, ship, satellite, the finder, search results) no
+  longer moves the map: the panel floats over its right side instead of taking room from
+  it. Images keep clear of the panel and the legends (`KittyState::holes`,
+  `raster::cut`), so their text isn't over radar or imagery.
 - With imagery or radar on, satellite dots and aircraft and ship trails no longer vanish or
   flicker: each frame the image layers cleared every placement on the screen, theirs too.
   Now they take down only their own placements that aren't made again

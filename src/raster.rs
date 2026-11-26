@@ -993,6 +993,7 @@ pub fn tiles_for(cam: &Camera, area: Rect, rz: u8) -> Vec<TileId> {
 }
 
 /// A rectangle of screen cells drawn from one tile's source rectangle.
+#[derive(Clone)]
 pub struct Block {
     /// The tile drawn.
     pub tile: Arc<RasterTile>,
@@ -1000,6 +1001,39 @@ pub struct Block {
     pub cells: Rect,
     /// Source rectangle in tile pixels (x, y, w, h).
     pub src: (u32, u32, u32, u32),
+}
+
+/// `b` with the cells of `hole` taken out: up to four blocks around it (above, below, left,
+/// right), each with the matching part of the tile, so text drawn in the hole (a panel, a
+/// legend) isn't under an image.
+pub fn cut(b: &Block, hole: Rect) -> Vec<Block> {
+    let i = b.cells.intersection(hole);
+    if i.is_empty() {
+        return vec![b.clone()];
+    }
+    let c = b.cells;
+    let (sx, sy, sw, sh) = b.src;
+    let (fx, fy) = (sw as f64 / c.width.max(1) as f64, sh as f64 / c.height.max(1) as f64);
+    let part = |r: Rect| Block {
+        tile: b.tile.clone(),
+        cells: r,
+        src: (
+            sx + ((r.x - c.x) as f64 * fx).round() as u32,
+            sy + ((r.y - c.y) as f64 * fy).round() as u32,
+            ((r.width as f64 * fx).round() as u32).max(1),
+            ((r.height as f64 * fy).round() as u32).max(1),
+        ),
+    };
+    [
+        Rect::new(c.x, c.y, c.width, i.y - c.y),
+        Rect::new(c.x, i.bottom(), c.width, c.bottom() - i.bottom()),
+        Rect::new(c.x, i.y, i.x - c.x, i.height),
+        Rect::new(i.right(), i.y, c.right() - i.right(), i.height),
+    ]
+    .into_iter()
+    .filter(|r| !r.is_empty())
+    .map(part)
+    .collect()
 }
 
 /// Give every cell of `area` to the raster tile under its center and group the cells into
@@ -1089,6 +1123,23 @@ impl Widget for RasterCells<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cuts_blocks_around_a_hole() {
+        let tile = Arc::new(RasterTile { id: 1, png: Vec::new(), rgba: image::RgbaImage::new(512, 512) });
+        // A block of 20x10 cells showing the whole tile; a panel over its right 5 columns.
+        let b = Block { tile, cells: Rect::new(10, 0, 20, 10), src: (0, 0, 512, 512) };
+        let parts = cut(&b, Rect::new(25, 0, 30, 40));
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].cells, Rect::new(10, 0, 15, 10));
+        assert_eq!(parts[0].src, (0, 0, 384, 512), "three quarters of the tile");
+        // A legend in its lower left corner: above it, and right of it.
+        let parts = cut(&b, Rect::new(0, 6, 14, 4));
+        let cells: Vec<Rect> = parts.iter().map(|p| p.cells).collect();
+        assert_eq!(cells, vec![Rect::new(10, 0, 20, 6), Rect::new(14, 6, 16, 4)]);
+        assert_eq!(parts[1].src, (102, 307, 410, 205));
+        assert_eq!(cut(&b, Rect::new(40, 0, 5, 5)).len(), 1, "a hole elsewhere: the block as it was");
+    }
+
     use super::*;
 
     #[test]

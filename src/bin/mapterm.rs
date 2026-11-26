@@ -2305,6 +2305,7 @@ async fn main() -> Result<()> {
     let mut hover_dot: Option<(f64, f64)> = None;
     let mut list_rows: Vec<(u16, usize)> = Vec::new();
     let mut panel_area = Rect::default();
+    let mut last_panel = Rect::default();
     // The timeline (with --radar or --alerts): where it was drawn, the span it shows, and
     // whether the user moved that span (then it no longer follows the data).
     let mut timeline_area = Rect::default();
@@ -2785,7 +2786,10 @@ async fn main() -> Result<()> {
                     } else {
                         0
                     };
-                let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
+                // The panel floats over the map's right side rather than taking room from it,
+                // so opening one doesn't move the map.
+                let m = main;
+                let panel = Rect { x: main.right() - panel_w, width: panel_w, ..main };
                 map_area = m;
                 panel_area = panel;
                 f.render_widget(map.view(&draw_cam), m);
@@ -3052,6 +3056,15 @@ async fn main() -> Result<()> {
             frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
             if sync {
                 let mut out = std::io::stdout();
+                // What's drawn over the map (legends, the panel): images keep clear of it.
+                let holes: Vec<Rect> = legend_rects.iter().copied().chain((panel_area.width > 0).then_some(panel_area)).collect();
+                kstate.holes = holes.clone();
+                // A panel opened or closed: the satellite and trail images take the new holes now.
+                if panel_area != last_panel {
+                    last_panel = panel_area;
+                    trails_dirty = true;
+                    sat_dots_drawn = Instant::now() - Duration::from_secs(10);
+                }
                 if smooth_on {
                     // Declare after drawing, in the same synchronized update as the cells.
                     let decl = if shift_mode { smooth::declare_shift(0, map_area, ox, oy) } else { smooth::declare(0, map_area, &cam) };
@@ -3109,7 +3122,7 @@ async fn main() -> Result<()> {
                                 continue;
                             }
                             let mut rgba = mapterm::timeseries::render_trails(paths, t, secs, &vp, w, h, cpx);
-                            punch(&mut rgba, w, map_area, &legend_rects, cpx);
+                            punch(&mut rgba, w, map_area, &holes, cpx);
                             out.write_all(
                                 mapterm::kitty::show_rgba(id, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, z, shm).as_bytes(),
                             )?;
@@ -3121,7 +3134,7 @@ async fn main() -> Result<()> {
                             }
                         } else {
                             let mut rgba = mapterm::timeseries::render_lines(&path_lines, &vp, w, h, cpx);
-                            punch(&mut rgba, w, map_area, &legend_rects, cpx);
+                            punch(&mut rgba, w, map_area, &holes, cpx);
                             out.write_all(
                                 mapterm::kitty::show_rgba(PATH_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -9, shm).as_bytes(),
                             )?;
@@ -3158,7 +3171,7 @@ async fn main() -> Result<()> {
                             selected_sat,
                             &sat_coloring,
                         );
-                        punch(&mut rgba, w, map_area, &legend_rects, (cpx.0 * scale, cpx.1 * scale));
+                        punch(&mut rgba, w, map_area, &holes, (cpx.0 * scale, cpx.1 * scale));
                         out.write_all(
                             mapterm::kitty::show_rgba(SAT_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -8, shm).as_bytes(),
                         )?;
