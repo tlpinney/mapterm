@@ -327,7 +327,10 @@ fn args() -> Result<Args> {
             "--sats" | "--satellites" => {
                 // The groups are optional: take the next argument only if it's a list of
                 // group names (not a file, URL or option).
-                let groups = it.next_if(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == ','));
+                let groups = it.next_if(|n| {
+                    n.starts_with(|c: char| c.is_ascii_alphanumeric())
+                        && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == ',')
+                });
                 let groups: Vec<String> = groups.as_deref().unwrap_or("visual").split(',').filter(|g| !g.is_empty()).map(str::to_string).collect();
                 // CelesTrak asks: the Active list already holds Starlink.
                 if groups.iter().any(|g| g == "active") && groups.iter().any(|g| g == "starlink") {
