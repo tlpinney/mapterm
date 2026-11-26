@@ -2238,49 +2238,33 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
 }
 
 /// Draw one resolved feature whose parts are already in dots.
-/// Where to place block `b` so it moves with a map the terminal shifts left and up by
-/// `shift` pixels: a cell earlier with the rest as an offset into it, or at the map's left
-/// or top edge (no cell earlier) with its source window moved along the tile instead.
-/// Returns the cell, the source rectangle and the pixel offsets; None when there's no shift.
 /// A shifted placement: its cell (column, row), source rectangle, and pixel offsets.
 type Shifted = (u16, u16, (u32, u32, u32, u32), u32, u32);
 
-fn shifted(b: &crate::raster::Block, area: Rect, shift: (f64, f64), cell_px: (f64, f64)) -> Option<Shifted> {
+/// Where to place block `b` so it moves with a map the terminal shifts left and up by
+/// `shift` pixels: in its own cells, with its source window moved along the tile by the same
+/// distance (every piece the same way, so pieces stay together). Where the tile runs out of
+/// pixels (its own right or bottom edge) the window is narrower and stretched by those few
+/// pixels. Returns the cell, the source rectangle and the pixel offsets (always 0); None
+/// when there's no shift.
+fn shifted(b: &crate::raster::Block, _area: Rect, shift: (f64, f64), cell_px: (f64, f64)) -> Option<Shifted> {
     if shift.0 < 0.5 && shift.1 < 0.5 {
         return None;
     }
     let (tw, th) = b.tile.size();
     let (mut sx, mut sy, mut sw, mut sh) = b.src;
-    let (mut col, mut row, mut xo, mut yo) = (b.cells.x, b.cells.y, 0, 0);
     // Source pixels per screen pixel.
     let kx = sw as f64 / (b.cells.width as f64 * cell_px.0).max(1.0);
     let ky = sh as f64 / (b.cells.height as f64 * cell_px.1).max(1.0);
-    if shift.0 >= 0.5 {
-        if col > area.x {
-            col -= 1;
-            xo = (cell_px.0 - shift.0).round().max(0.0) as u32;
-        } else {
-            let d = (shift.0 * kx).round() as u32;
-            sx += d;
-            // The same width further along the tile where it has it, else narrower.
-            if sx + sw > tw {
-                sw = tw.saturating_sub(sx).max(1);
-            }
-        }
+    sx += (shift.0 * kx).round() as u32;
+    sy += (shift.1 * ky).round() as u32;
+    if sx + sw > tw {
+        sw = tw.saturating_sub(sx).max(1);
     }
-    if shift.1 >= 0.5 {
-        if row > area.y {
-            row -= 1;
-            yo = (cell_px.1 - shift.1).round().max(0.0) as u32;
-        } else {
-            let d = (shift.1 * ky).round() as u32;
-            sy += d;
-            if sy + sh > th {
-                sh = th.saturating_sub(sy).max(1);
-            }
-        }
+    if sy + sh > th {
+        sh = th.saturating_sub(sy).max(1);
     }
-    Some((col, row, (sx, sy, sw, sh), xo, yo))
+    Some((b.cells.x, b.cells.y, (sx.min(tw.saturating_sub(1)), sy.min(th.saturating_sub(1)), sw, sh), 0, 0))
 }
 
 /// A tile polygon's rings as runs without the segments that lie along the tile's border (or
@@ -2648,14 +2632,13 @@ mod tests {
         let area = Rect::new(0, 0, 80, 24);
         let cell = (10.0, 20.0);
         // A block 5 cells in showing half the tile on 20x10 cells (256 px on 200x200 px).
-        let b = crate::raster::Block { tile: tile.clone(), cells: Rect::new(5, 3, 20, 10), src: (256, 0, 256, 256) };
+        let b = crate::raster::Block { tile: tile.clone(), cells: Rect::new(5, 3, 20, 10), src: (100, 0, 256, 256) };
         assert_eq!(super::shifted(&b, area, (0.0, 0.0), cell), None, "no shift: placed as it is");
-        // Shifted 3 px left: a cell earlier, 7 px into it.
-        assert_eq!(super::shifted(&b, area, (3.0, 0.0), cell), Some((4, 3, (256, 0, 256, 256), 7, 0)));
-        // At the map's left edge: the source moves along the tile instead (3 px on screen is
-        // 3.84 tile px here), keeping its width where the tile has it.
+        // Shifted 3 px left and 5 up: the same cells, the window 3.84 and 6.4 tile px along,
+        // as wide as before where the tile has it. Every piece moves the same way.
+        assert_eq!(super::shifted(&b, area, (3.0, 5.0), cell), Some((5, 3, (104, 6, 256, 256), 0, 0)));
         let edge = crate::raster::Block { tile: tile.clone(), cells: Rect::new(0, 0, 20, 10), src: (100, 0, 256, 256) };
-        assert_eq!(super::shifted(&edge, area, (3.0, 5.0), cell), Some((0, 0, (104, 6, 256, 256), 0, 0)));
+        assert_eq!(super::shifted(&edge, area, (3.0, 5.0), cell), Some((0, 0, (104, 6, 256, 256), 0, 0)), "the map's edge: the same");
         // At the tile's own right edge: narrower.
         let end = crate::raster::Block { tile, cells: Rect::new(0, 0, 20, 10), src: (256, 0, 256, 256) };
         assert_eq!(super::shifted(&end, area, (3.0, 0.0), cell).map(|p| p.2), Some((260, 0, 252, 256)));
