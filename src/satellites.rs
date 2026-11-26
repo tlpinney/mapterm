@@ -523,7 +523,7 @@ pub const OTHER: (u8, u8, u8) = (0x8b, 0x94, 0x9e);
 /// How satellites are colored.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum Coloring {
-    /// By orbit height: low, medium, geostationary ([`orbit_rgb`]).
+    /// By the orbit's standard class ([`OrbitClass`]): LEO, MEO, GEO, GSO, HEO.
     #[default]
     Orbit,
     /// By owner: the biggest owners' colors, by SATCAT code; the rest [`OTHER`].
