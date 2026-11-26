@@ -2850,7 +2850,11 @@ async fn main() -> Result<()> {
                     && let Some((t, lon, lat)) = p.landing()
                 {
                     let dim = Color::Rgb(127, 178, 255);
-                    overlays.push(Overlay::Line { pts: p.path.iter().map(|&(_, lon, lat, _)| (lon, lat)).collect(), color: dim });
+                    // Where the terminal shows images, the path is drawn there, smooth, with the
+                    // satellite tracks; braille elsewhere.
+                    if !trails_kitty {
+                        overlays.push(Overlay::Line { pts: p.path.iter().map(|&(_, lon, lat, _)| (lon, lat)).collect(), color: dim });
+                    }
                     let when = format!("lands {}", hhmm(t));
                     overlays.push(Overlay::Marker { lon, lat, glyph: "✕".into(), style: TStyle::new().fg(dim), label: Some((when, TStyle::new().fg(dim))), priority: 100 });
                 }
@@ -3261,12 +3265,16 @@ async fn main() -> Result<()> {
                         }
                     }
                     let settled = trails_moved.elapsed() >= Duration::from_millis(150) && !ctl.animating();
-                    // Paths: the selected satellite's ground track.
-                    let path_lines: Vec<mapterm::timeseries::Line> = sats
+                    // Paths: the selected satellite's ground track, and the selected balloon's
+                    // predicted flight to its landing.
+                    let mut path_lines: Vec<mapterm::timeseries::Line> = sats
                         .iter()
                         .find(|s| Some(s.norad) == selected_sat)
                         .map(|s| s.track(unix_now(), s.period_min()).into_iter().map(|p| (p, (127, 178, 255))).collect())
                         .unwrap_or_default();
+                    if let Some(p) = selected_balloon.as_deref().and_then(|s| balloons.prediction(s)) {
+                        path_lines.push((p.path.iter().map(|&(_, lon, lat, _)| (lon, lat)).collect(), (127, 178, 255)));
+                    }
                     let hidden =
                         (adsb_feed.is_some() && !trails_shown.0) || (ais_key.is_some() && !trails_shown.1) || (!path_lines.is_empty() && !trails_shown.2) || (a.sondes && !trails_shown.3);
                     if settled && ((trails_dirty && trails_drawn.elapsed() >= Duration::from_secs(1)) || (hidden && trails_dirty)) {
