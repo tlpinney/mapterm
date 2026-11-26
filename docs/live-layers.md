@@ -159,7 +159,12 @@ mapterm --radar --at here -z 6
 ```
 
 Rain and snow worldwide from [RainViewer](https://www.rainviewer.com) (no key), drawn over
-the map: where the terminal shows images, the radar's own colors over the land and water,
+the map. With `--radar` or `--alerts` the map switches to `mapterm-weather` (unless you give
+`--style`, a source or `--light`; `m` cycles styles): greys only, so the radar and alert
+colors are the only color on it, with water a slightly different grey rather than blue
+(light rain is blue), coastlines and state and country borders as lines that stay readable
+over the radar, motorways faintly, and city names light enough to read over rain. The radar
+itself: where the terminal shows images, the radar's own colors over the land and water,
 under the roads and labels; elsewhere, cell colors where it rains. RainViewer keeps the
 last two hours in 10-minute scans:
 

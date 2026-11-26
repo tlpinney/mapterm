@@ -474,6 +474,8 @@ type Done = (String, TileId, Result<Loaded>);
 const BUILTIN: &str = "built-in";
 /// The aviation style's entry in the `m` style cycle (and its --style name).
 const AVIATION: &str = "mapterm-aviation";
+/// The weather style's entry in the `m` style cycle (and its --style name).
+const WEATHER: &str = "mapterm-weather";
 
 type StyleDone = (String, Result<(Map, Option<(Schema, bool)>, String)>);
 
@@ -1719,8 +1721,11 @@ async fn main() -> Result<()> {
     let mut theme: Option<(Schema, bool)> = None;
     if let Some(src) = src {
         let schema = detect_schema(&src, &cam).await;
-        // Watching aircraft over the default basemap: the aviation style, unless --light.
-        if (a.adsb.is_some() || a.ais || a.sats.is_some()) && a.source.is_none() && !a.light {
+        // Watching weather over the default basemap: the weather style; aircraft, ships or
+        // satellites alone, the aviation style; unless --light.
+        if (a.radar || a.alerts) && a.source.is_none() && !a.light {
+            map = Map::weather(src, schema)?;
+        } else if (a.adsb.is_some() || a.ais || a.sats.is_some()) && a.source.is_none() && !a.light {
             map = Map::aviation(src, schema)?;
         } else {
             map = Map::terminal(src, schema, !a.light)?;
@@ -1737,10 +1742,13 @@ async fn main() -> Result<()> {
     // OpenFreeMap styles.
     let builtin_source = a.source.clone().unwrap_or_else(|| OPENFREEMAP.to_string());
     let mut styles: Vec<String> = a.style.iter().cloned().collect();
-    if (a.adsb.is_some() || a.ais || a.sats.is_some()) && a.style.is_none() && a.source.is_none() && !a.light {
+    let default_dark = a.style.is_none() && a.source.is_none() && !a.light;
+    if (a.radar || a.alerts) && default_dark {
+        styles.push(WEATHER.to_string());
+    } else if (a.adsb.is_some() || a.ais || a.sats.is_some()) && default_dark {
         styles.push(AVIATION.to_string());
     }
-    for s in [BUILTIN, AVIATION].into_iter().chain(stylejson::OPENFREEMAP_STYLES) {
+    for s in [BUILTIN, AVIATION, WEATHER].into_iter().chain(stylejson::OPENFREEMAP_STYLES) {
         if !styles.iter().any(|x| x == s) {
             styles.push(s.to_string());
         }

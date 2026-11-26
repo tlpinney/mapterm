@@ -15,6 +15,10 @@ All notable changes to mapterm are listed here. The format follows
   transparent). 512-pixel tiles, the scan
   on screen only unless playing, at most 60 tile requests a minute (RainViewer allows 100),
   and its credit "Weather data by RainViewer" (`mapterm::rainviewer`).
+- `mapterm-weather`, a basemap for weather and the default with `--radar` and `--alerts`:
+  greys only (water too, since light rain is blue), coastlines and state and country borders
+  as lines over the radar, faint motorways, city names that read over rain
+  (`stylejson::weather_style`, `Map::weather`); in the `m` cycle.
 - US weather alerts: `--alerts` draws the NWS's warnings, watches and advisories as areas
   colored by severity, each while it's in force at the clock's time (live, or the radar's);
   click one for its text. Alerts with their own outline show at once; zone outlines come
