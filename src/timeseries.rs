@@ -168,13 +168,51 @@ pub fn render_trails<'a>(
             pm.stroke_path(&line, &paint, &stroke, Transform::identity(), None);
         }
     }
-    pm.pixels()
-        .iter()
-        .flat_map(|p| {
-            let c = p.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect()
+    to_rgba(pm)
+}
+
+/// A path to draw: lon/lat points and an RGB color.
+pub type Line = (Vec<(f64, f64)>, (u8, u8, u8));
+
+/// Draw `lines` (lon/lat points, each line with its color) into an RGBA image (not
+/// premultiplied), `w` x `h` pixels, for a map drawn by `vp` in cells of `cell_px` pixels:
+/// smooth paths such as a satellite's ground track, as a kitty image under the text.
+pub fn render_lines(lines: &[Line], vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64)) -> Vec<u8> {
+    use tiny_skia::{LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
+    let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
+    let (sx, sy) = (cell_px.0 / 2.0, cell_px.1 / 4.0);
+    let stroke = Stroke { width: (cell_px.0 / 5.0).clamp(1.5, 4.0) as f32, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
+    for (pts, (r, g, b)) in lines {
+        let mut pb = PathBuilder::new();
+        for (i, &(lon, lat)) in pts.iter().enumerate() {
+            let (x, y) = vp.dot_ll(lon, lat);
+            let (x, y) = ((x * sx) as f32, (y * sy) as f32);
+            if i == 0 { pb.move_to(x, y) } else { pb.line_to(x, y) }
+        }
+        let Some(path) = pb.finish() else { continue };
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(*r, *g, *b, 210);
+        paint.anti_alias = true;
+        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+    to_rgba(pm)
+}
+
+/// A tiny-skia image as plain (not premultiplied) RGBA, as kitty takes it: transparent
+/// pixels are already zero and opaque ones already right, so only edges are worked out (an
+/// image that's mostly empty converts in a millisecond or two, not ten).
+pub fn to_rgba(pm: tiny_skia::Pixmap) -> Vec<u8> {
+    let mut data = pm.take();
+    for px in data.as_chunks_mut::<4>().0 {
+        let a = px[3];
+        if a == 0 || a == 255 {
+            continue;
+        }
+        for c in &mut px[..3] {
+            *c = ((*c as u16 * 255 + a as u16 / 2) / a as u16).min(255) as u8;
+        }
+    }
+    data
 }
 
 /// The point `meters` from (`lon`, `lat`) along `bearing` (degrees from north), on a sphere
@@ -255,5 +293,15 @@ mod tests {
         }
         assert_eq!(p.trail(15.0, 60.0), vec![(0.0, 0.0), (1.0, 0.0), (1.5, 0.0)]);
         assert_eq!(p.trail(15.0, 6.0), vec![(1.0, 0.0), (1.5, 0.0)]);
+    }
+
+    #[test]
+    fn lines_render_as_an_image() {
+        let vp = crate::Viewport::new(&crate::Camera::new(0.0, 0.0, 3.0), ratatui::layout::Rect::new(0, 0, 40, 10));
+        let line = vec![(-10.0, -5.0), (0.0, 0.0), (10.0, 5.0)];
+        let rgba = render_lines(&[(line, (127, 178, 255))], &vp, 320, 160, (8.0, 16.0));
+        assert_eq!(rgba.len(), 320 * 160 * 4);
+        assert!(rgba.chunks(4).filter(|p| p[3] > 0).count() > 100);
+        assert!(render_lines(&[], &vp, 320, 160, (8.0, 16.0)).chunks(4).all(|p| p[3] == 0));
     }
 }

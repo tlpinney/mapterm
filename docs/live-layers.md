@@ -1,6 +1,7 @@
 # Live layers
 
-Things that move or change while the map is open: where you are, aircraft and ships.
+Things that move or change while the map is open: where you are, aircraft, ships and
+satellites.
 
 ## Your location
 
@@ -88,3 +89,76 @@ from `AISSTREAM_API_KEY` or a command (`--ais-key-cmd 'pass show aisstream/api-k
 
 aisstream.io is free and in beta; it can take several seconds (sometimes tens of
 seconds) to accept a connection.
+
+## Satellites
+
+`--sats` shows satellites, placed from [CelesTrak](https://celestrak.org)'s orbital
+elements with SGP4. No key is needed, and once the elements are in nothing more goes over
+the network: positions are worked out locally, several times a second, so satellites move
+smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
+
+- Groups are CelesTrak's, comma-separated: `--sats` alone is `active`, every active
+  satellite CelesTrak publishes (~17,000: the ISS, Earth-imaging ones such as WorldView and
+  Legion, and Starlink's ~11,000, of which a couple of hundred are always above the
+  horizon). Smaller groups: `visual` (the ~150 brightest), `stations`, `starlink`,
+  `resource`, `amateur`, `weather`, `gnss` and more. Dead satellites and debris aren't
+  included.
+- **`p`** opens a finder over everything live (satellites, aircraft, ships), fzf-style:
+  type any part of a name, NORAD number, callsign or MMSI, or an operator (`digitalglobe`,
+  `planet`, `spacex`), ↑/↓ to choose, Enter to select it and fly there.
+- **By country:** the panel shows each satellite's owner and launch date, from CelesTrak's
+  satellite catalog (refreshed daily). Type a country in the finder (`china`, `japan`,
+  `russia`, `india`, or a catalog code such as `PRC`, `CIS`, `ESA`) and choose it to show
+  only its satellites; "All countries" shows them all again. `--sats-country PRC,JPN`
+  starts that way.
+- **`o`** cycles how satellites are colored: by orbit class, by owner (the six with the
+  most satellites get a color each, Starlink on its own apart from the rest of the USA,
+  everyone else "other"), or by mission (`--sats-color orbit|country|mission` starts with
+  one).
+- **Missions:** communications, Earth observation, radar imaging (SAR), weather,
+  navigation, science, technology, amateur and education, military, space station (the
+  ISS's and Tiangong's modules), crew and cargo craft (Soyuz, Progress, Dragon, Cygnus,
+  Shenzhou, Tianzhou, by name). CelesTrak's station group also holds the small satellites
+  deployed from the ISS; those count as amateur and education.
+  CelesTrak groups satellites by purpose (weather, resource, gnss, science, military...),
+  so mapterm reads those groups' catalogs (kept a day; a satellite in several takes the most
+  specific), and knows radar imaging by name (Umbra, ICEYE, Capella, Sentinel-1, RADARSAT,
+  TerraSAR-X, COSMO-SkyMed, SAOCOM, NISAR, ALOS, Gaofen-3, StriX, QPS-SAR and more, each
+  name checked against CelesTrak's) and the big communications constellations by name.
+  Well-known constellations no group covers (Hulianwang, Yaogan, IRIDE, Jilin, Satellogic,
+  Spire...) are named by their constellation when no group claims them, and every
+  geosynchronous satellite left is counted as communications. What's still "other" is
+  mostly objects not yet identified (named only by launch) and rideshare objects.
+- **Filter by mission or operator** from the finder too: `sar`, `weather`, `navigation`,
+  `imaging` (Earth observation and SAR together), or an operator: `planet`, `vantor`,
+  `iceye`, `umbra`, `spire`, `airbus`... Filters combine (Chinese imaging satellites:
+  choose China, then imaging); "Show all satellites" clears them.
+
+## Legends
+
+Whatever is colored gets a legend in the map's lower left, with how many of each:
+satellites by orbit or by country, aircraft by altitude, ships by kind. **`L`** hides or
+shows them. Images under the text (satellite dots, trails, tracks) keep clear of the
+legend boxes.
+- Each satellite is ◇ (the ISS ◆), colored by its orbit's standard class, from its
+  elements: **LEO** (apogee up to 2,000 km), **MEO** (up to geosynchronous), **GEO**
+  (geostationary: one orbit a sidereal day, circular, over the equator), **GSO**
+  (geosynchronous but inclined or eccentric), **HEO** (highly elliptical, eccentricity over
+  0.25, such as Molniya), or beyond GEO. The panel shows the class and the orbit's perigee
+  and apogee. Starlink
+  satellites are a small · without names, since there are thousands; select one to see
+  its name.
+- Where the terminal shows kitty graphics, satellites are dots in an image placed to the
+  pixel, redrawn five times a second, so they glide instead of hopping a cell at a time;
+  their names are drawn with them in JetBrains Mono (bundled; `MAPTERM_FONT=/path/to/font`
+  for another), and the text markers come back while you pan.
+- **Click** one (or **Tab** through them when there are no aircraft or ships) for its
+  altitude, speed, period and inclination, and its ground track for the next orbit on the
+  map. With `--at here` the panel shows where it is in your sky when it's up, and its next
+  pass over you that rises at least 10° (rise, highest point, set, in UTC).
+- CelesTrak updates elements every 2 hours and asks for one download per update, blocking
+  repeats. mapterm keeps each group in `~/.cache/mapterm/celestrak` (`mapterm --cache`
+  shows it as `orbits`) and downloads only when that copy is over 2 hours old; after any
+  error it uses the old copy and doesn't ask again for 2 hours. It asks for CSV and gzip,
+  as CelesTrak prefers, and refuses `active` together with `starlink` (the first holds the
+  second).

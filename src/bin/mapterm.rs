@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -71,6 +71,23 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 default), fi (adsb.fi), or a URL with {lat}, {lon} and {nm}. Polled every
                 10 s for the area in view; between polls planes move along their tracks.
                 Arrows point along the track, colored by altitude; i inspects one
+  --sats [GROUPS]
+                satellites, placed from CelesTrak's orbital elements (no key): ◇ (◆ the
+                ISS) colored by orbit height, with names; click or Tab for altitude, speed,
+                period, its ground track and, with --at here, its next pass over you.
+                GROUPS is CelesTrak's, comma-separated (default active: every active
+                satellite, ~17,000 with Starlink's ~11,000 unlabelled; or a smaller group:
+                visual, stations, starlink, resource, amateur, weather, gnss, ...).
+                p finds one by name or operator
+                Elements are cached for 2 hours, as CelesTrak asks
+  --sats-color orbit|country|mission
+                color satellites by orbit class (default: LEO, MEO, GEO, GSO, HEO), by
+                owner (the six with the most in a color each, Starlink on its own), or by
+                mission (communications, Earth observation, radar/SAR, weather,
+                navigation, science, ...); o cycles through them while it runs
+  --sats-country CODE[,CODE]
+                only the satellites of these owners: SATCAT codes (US, PRC, CIS, JPN, UK,
+                ESA, ...) or names (china, russia, japan); also from the p finder
   --ais          live ships from aisstream.io's free AIS stream (a free key from
                 aisstream.io: AISSTREAM_API_KEY or --ais-key-cmd). Arrows along the
                 course colored by kind (cargo, tanker, passenger, fishing, pleasure, tug);
@@ -161,6 +178,12 @@ struct Args {
     mapbox_token_cmd: Option<String>,
     /// --adsb: the live aircraft feed (lol, fi or a URL template).
     adsb: Option<String>,
+    /// --sats-color: color satellites by orbit, owner or mission.
+    sats_color: SatColor,
+    /// --sats-country: owner codes or names to show satellites of.
+    sats_country: Vec<String>,
+    /// --sats: CelesTrak groups to show.
+    sats: Option<Vec<String>>,
     /// --ais: live ships from aisstream.io.
     ais: bool,
     /// --ais-key-cmd: prints the aisstream.io API key.
@@ -213,6 +236,9 @@ fn args() -> Result<Args> {
         adsb_radius: ADSB_RADIUS,
         adsb_key_cmd: None,
         ais: false,
+        sats: None,
+        sats_country: Vec::new(),
+        sats_color: SatColor::Orbit,
         ais_key_cmd: None,
         at_here: false,
         location_cmd: None,
@@ -314,6 +340,36 @@ fn args() -> Result<Args> {
                 a.adsb = Some(feed.unwrap_or_default());
             }
             "--ais" => a.ais = true,
+            "--sats" | "--satellites" => {
+                // The groups are optional: take the next argument only if it's a list of
+                // group names (not a file, URL or option).
+                let groups = it.next_if(|n| {
+                    n.starts_with(|c: char| c.is_ascii_alphanumeric())
+                        && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == ',')
+                });
+                let groups: Vec<String> = groups.as_deref().unwrap_or("active").split(',').filter(|g| !g.is_empty()).map(str::to_string).collect();
+                // CelesTrak asks: the Active list already holds Starlink.
+                if groups.iter().any(|g| g == "active") && groups.iter().any(|g| g == "starlink") {
+                    bail!("--sats: active already includes starlink (CelesTrak asks not to download both)");
+                }
+                a.sats = Some(groups);
+            }
+            "--sats-color" => {
+                a.sats_color = match it.next().context("--sats-color orbit|country|mission")?.as_str() {
+                    "orbit" => SatColor::Orbit,
+                    "country" | "owner" => SatColor::Country,
+                    "mission" | "purpose" => SatColor::Mission,
+                    other => bail!("--sats-color is orbit, country or mission, not {other:?}"),
+                };
+            }
+            "--sats-country" => {
+                let v = it.next().context("--sats-country CODE[,CODE] (PRC, US, JPN, or a name: china)")?;
+                for w in v.split(',').filter(|w| !w.trim().is_empty()) {
+                    let code = mapterm::satellites::owner_code_for(w).with_context(|| format!("--sats-country: no owner called {w:?}"))?;
+                    a.sats_country.push(code.to_string());
+                }
+                a.sats.get_or_insert_with(|| vec!["active".to_string()]);
+            }
             "--ais-key-cmd" => a.ais_key_cmd = Some(it.next().context("--ais-key-cmd CMD")?),
             "--adsb-key-cmd" => a.adsb_key_cmd = Some(it.next().context("--adsb-key-cmd CMD")?),
             "--adsb-radius" => {
@@ -513,6 +569,10 @@ const TRAIL_IMAGE: u32 = 4_000_000_002;
 /// The --ais source and layer, and its trail image.
 const SHIPS: &str = "ships";
 const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
+/// The kitty image of paths: the selected satellite's ground track (over the trails).
+const PATH_IMAGE: u32 = 4_000_000_005;
+/// The kitty image of satellite dots and their names.
+const SAT_IMAGE: u32 = 4_000_000_006;
 /// --ais draws ships this many seconds in the past (ships under way report every 2 to 10 s;
 /// small boats every 30 s, which past the last fix move along their course).
 const AIS_DELAY: f64 = 10.0;
@@ -520,6 +580,313 @@ const AIS_DELAY: f64 = 10.0;
 const AIS_TRAIL: f64 = 600.0;
 /// Below this zoom --ais streams nothing.
 const AIS_MIN_ZOOM: f64 = 7.0;
+/// Something live the finder can go to.
+#[derive(Clone, Debug, PartialEq)]
+enum Target {
+    /// A satellite owner (SATCAT code), or None: all satellites again.
+    Country(Option<String>),
+    /// Satellite missions (one, or imaging: Earth observation and radar together).
+    Missions(Vec<mapterm::satellites::Mission>),
+    /// A satellite operator (Planet, Vantor...).
+    Operator(&'static str),
+    Sat(u64),
+    Ship(u32),
+    Plane(String),
+}
+
+/// One finder result: what it is, its name, and a word or two about it.
+struct Hit {
+    target: Target,
+    name: String,
+    detail: String,
+}
+
+/// The finder: what's typed, the chosen row, and the matches, best first.
+struct Finder {
+    query: String,
+    sel: usize,
+    hits: Vec<Hit>,
+}
+
+/// Everything live matching `query` fzf-style, best first (the first 200).
+fn find(
+    query: &str,
+    sats: &[mapterm::satellites::Sat],
+    hidden: &[mapterm::satellites::Sat],
+    filter: &SatFilter,
+    aircraft: &mapterm::adsb::Tracks,
+    fleet: &mapterm::ais::Fleet,
+) -> Vec<Hit> {
+    let mut v: Vec<(i32, Hit)> = Vec::new();
+    // Countries first: the owners among the satellites, with how many each has.
+    let mut owners: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for s in sats.iter().chain(hidden) {
+        if let Some(c) = &s.catalog {
+            *owners.entry(c.owner.as_str()).or_insert(0) += 1;
+        }
+    }
+    if filter.on() && mapterm::fuzzy::score(query, "show all satellites every country mission operator").is_some() {
+        v.push((
+            10_000,
+            Hit { target: Target::Country(None), name: "Show all satellites".into(), detail: format!("{} satellites", sats.len() + hidden.len()) },
+        ));
+    }
+    // Missions too, with how many each has: "sar", "weather", "comms".
+    if !query.trim().is_empty() {
+        let mut by: std::collections::HashMap<mapterm::satellites::Mission, usize> = std::collections::HashMap::new();
+        for s in sats.iter().chain(hidden) {
+            *by.entry(s.mission()).or_insert(0) += 1;
+        }
+        for (m, n) in &by {
+            if let Some(sc) = mapterm::fuzzy::score(query, &format!("{} {}", m.label(), mission_words(*m))) {
+                v.push((sc + 40, Hit { target: Target::Missions(vec![*m]), name: m.label().to_string(), detail: format!("mission · {n} satellites") }));
+            }
+        }
+        // Imaging: optical and radar together.
+        use mapterm::satellites::Mission::{EarthObservation, Radar};
+        if let Some(sc) = mapterm::fuzzy::score(query, "imaging imagery images earth observation eo sar") {
+            let n = by.get(&EarthObservation).unwrap_or(&0) + by.get(&Radar).unwrap_or(&0);
+            v.push((
+                sc + 45,
+                Hit {
+                    target: Target::Missions(vec![EarthObservation, Radar]),
+                    name: "imaging (Earth observation + SAR)".into(),
+                    detail: format!("mission · {n} satellites"),
+                },
+            ));
+        }
+        // Operators, with how many each has: "planet", "vantor", "digitalglobe".
+        let mut ops: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+        for s in sats.iter().chain(hidden) {
+            if let Some(op) = s.operator() {
+                *ops.entry(op).or_insert(0) += 1;
+            }
+        }
+        for (op, n) in &ops {
+            if let Some(sc) = mapterm::fuzzy::score(query, op) {
+                let name = op.split(" (").next().unwrap_or(op);
+                v.push((sc + 42, Hit { target: Target::Operator(op), name: name.to_string(), detail: format!("operator · {n} satellites") }));
+            }
+        }
+    }
+    if !query.trim().is_empty() {
+        let q = query.trim().to_lowercase();
+        for (code, n) in &owners {
+            let name = mapterm::satellites::owner_name(code).unwrap_or(code);
+            let text = format!("{name} {code} {}", mapterm::satellites::owner_aliases(code));
+            if let Some(sc) = mapterm::fuzzy::score(query, &text) {
+                // The country the word is (china: PRC) beats one whose name merely starts
+                // with it (China/Brazil); then the one with more satellites.
+                let exact = if code.eq_ignore_ascii_case(&q) || mapterm::satellites::owner_says(code, name, &q) { 60 } else { 0 };
+                let size = (*n as f64).log10().round() as i32;
+                v.push((
+                    sc + 40 + exact + size,
+                    Hit { target: Target::Country(Some(code.to_string())), name: name.to_string(), detail: format!("country · {n} satellites") },
+                ));
+            }
+        }
+    }
+    for s in sats.iter().chain(hidden) {
+        // The operator matches too (so "digitalglobe" finds WorldView and Legion), scored a
+        // little below a name match.
+        let text = format!("{} {} {}", s.name, s.norad, s.intl.as_deref().unwrap_or(""));
+        let by_name = mapterm::fuzzy::score(query, &text);
+        let by_operator = s.operator().and_then(|op| mapterm::fuzzy::score(query, op)).map(|sc| sc - 8);
+        let by_country = s
+            .catalog
+            .as_ref()
+            .and_then(|c| {
+                mapterm::fuzzy::score(
+                    query,
+                    &format!("{} {}", mapterm::satellites::owner_name(&c.owner).unwrap_or(""), mapterm::satellites::owner_aliases(&c.owner)),
+                )
+            })
+            .map(|sc| sc - 12);
+        let by_mission = mapterm::fuzzy::score(query, s.mission().label()).map(|sc| sc - 12);
+        if let Some(sc) = by_name.max(by_operator).max(by_country).max(by_mission) {
+            let detail = match s.operator() {
+                Some(op) => format!("{} · {}", op.split(" (").next().unwrap_or(op), s.norad),
+                None => format!("satellite · {}", s.norad),
+            };
+            v.push((sc, Hit { target: Target::Sat(s.norad), name: s.name.clone(), detail }));
+        }
+    }
+    for a in aircraft.all() {
+        let name = a.flight.clone().or_else(|| a.registration.clone()).unwrap_or_else(|| a.hex.to_uppercase());
+        let text = format!("{name} {} {} {}", a.registration.as_deref().unwrap_or(""), a.hex, a.type_code.as_deref().unwrap_or(""));
+        if let Some(sc) = mapterm::fuzzy::score(query, &text) {
+            v.push((sc, Hit { target: Target::Plane(a.hex.clone()), name, detail: format!("aircraft · {}", a.type_code.as_deref().unwrap_or("?")) }));
+        }
+    }
+    for s in fleet.all() {
+        let text = format!("{} {}", s.label(), s.details.mmsi);
+        if let Some(sc) = mapterm::fuzzy::score(query, &text) {
+            v.push((
+                sc,
+                Hit { target: Target::Ship(s.details.mmsi), name: s.label(), detail: format!("ship · {}", mapterm::ais::category(s.details.ship_type)) },
+            ));
+        }
+    }
+    v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    v.into_iter().take(200).map(|(_, h)| h).collect()
+}
+
+/// How satellites are colored (o cycles through them).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SatColor {
+    Orbit,
+    Country,
+    Mission,
+}
+
+/// Other words for a mission, for the finder.
+fn mission_words(m: mapterm::satellites::Mission) -> &'static str {
+    use mapterm::satellites::Mission::*;
+    match m {
+        Communications => "comms telecom internet broadband",
+        EarthObservation => "eo imaging optical earth observation",
+        Radar => "sar synthetic aperture radar",
+        Weather => "meteorology met",
+        Navigation => "gps gnss positioning",
+        Science => "research geodesy",
+        Technology => "engineering demo",
+        Amateur => "ham radio education cubesat",
+        Military => "defense defence",
+        SpaceStation => "iss tiangong css",
+        CrewCargo => "crew cargo capsule spacecraft soyuz progress dragon shenzhou tianzhou cygnus",
+        Other => "unknown",
+    }
+}
+
+/// The satellites' coloring (by orbit, owner or mission) and its legend.
+fn recolor(sats: &[mapterm::satellites::Sat], how: SatColor) -> (mapterm::satellites::Coloring, Option<mapterm::legend::Legend>) {
+    let c = match how {
+        SatColor::Orbit => mapterm::satellites::Coloring::Orbit,
+        SatColor::Country => mapterm::satellites::Coloring::by_country(sats),
+        SatColor::Mission => mapterm::satellites::Coloring::Mission,
+    };
+    let l = (!sats.is_empty()).then(|| c.legend(sats));
+    (c, l)
+}
+
+/// Clear an image (`w` pixels wide, drawn over `area` in cells of `cell_px` pixels) where
+/// `holes` (cell rectangles, such as the legends) are, since images under the text would
+/// otherwise show through the boxes drawn there.
+fn punch(rgba: &mut [u8], w: u32, area: Rect, holes: &[Rect], cell_px: (f64, f64)) {
+    let h = (rgba.len() / 4) as u32 / w.max(1);
+    for r in holes {
+        let x0 = (((r.x.saturating_sub(area.x)) as f64 * cell_px.0).floor() as u32).min(w);
+        let y0 = (((r.y.saturating_sub(area.y)) as f64 * cell_px.1).floor() as u32).min(h);
+        let x1 = (((r.right().saturating_sub(area.x)) as f64 * cell_px.0).ceil() as u32).min(w);
+        let y1 = (((r.bottom().saturating_sub(area.y)) as f64 * cell_px.1).ceil() as u32).min(h);
+        for y in y0..y1 {
+            let row = (y * w) as usize * 4;
+            rgba[row + x0 as usize * 4..row + x1 as usize * 4].fill(0);
+        }
+    }
+}
+
+/// Which satellites to show: owners, missions and an operator (each empty for any), from
+/// the finder or --sats-country.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SatFilter {
+    countries: Vec<String>,
+    missions: Vec<mapterm::satellites::Mission>,
+    operator: Option<&'static str>,
+}
+
+impl SatFilter {
+    /// Whether it leaves any out.
+    fn on(&self) -> bool {
+        !self.countries.is_empty() || !self.missions.is_empty() || self.operator.is_some()
+    }
+
+    /// Whether `s` is shown.
+    fn keeps(&self, s: &mapterm::satellites::Sat) -> bool {
+        (self.countries.is_empty() || s.catalog.as_ref().is_some_and(|c| self.countries.contains(&c.owner)))
+            && (self.missions.is_empty() || self.missions.contains(&s.mission()))
+            && self.operator.is_none_or(|op| s.operator() == Some(op))
+    }
+
+    /// What it shows, for the status line: " · China · imaging", or nothing.
+    fn describe(&self) -> String {
+        let mut out = String::new();
+        match self.countries.as_slice() {
+            [] => {}
+            [one] => out += &format!(" · {}", country_short(one)),
+            many => out += &format!(" · {} countries", many.len()),
+        }
+        match self.missions.as_slice() {
+            [] => {}
+            [one] => out += &format!(" · {}", one.label()),
+            _ => out += " · imaging",
+        }
+        if let Some(op) = self.operator {
+            out += &format!(" · {}", op.split(" (").next().unwrap_or(op));
+        }
+        out
+    }
+}
+
+/// Keep `sats` to those `filter` shows, the rest in `hidden`.
+fn filter_sats(sats: &mut Vec<mapterm::satellites::Sat>, hidden: &mut Vec<mapterm::satellites::Sat>, filter: &SatFilter) {
+    sats.append(hidden);
+    if !filter.on() {
+        return;
+    }
+    let (keep, rest): (Vec<_>, Vec<_>) = std::mem::take(sats).into_iter().partition(|s| filter.keeps(s));
+    *sats = keep;
+    *hidden = rest;
+}
+
+/// A short name for an owner code, for the status line (`PRC`: China).
+fn country_short(code: &str) -> String {
+    match mapterm::satellites::owner_aliases(code).split(' ').next().filter(|a| !a.is_empty()) {
+        Some(alias) if code != "SKOR" && code != "NKOR" => alias.to_string(),
+        _ => mapterm::satellites::owner_name(code).unwrap_or(code).to_string(),
+    }
+}
+
+/// The finder's list, fzf-style: the chosen row reversed, the best at the top.
+fn draw_finder(f: &mut ratatui::Frame, area: Rect, fd: &Finder) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::Borders;
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let more = if fd.hits.len() == 200 { "200+" } else { "" };
+    let count = if more.is_empty() { fd.hits.len().to_string() } else { more.to_string() };
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(format!(" find · {count} "));
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let rows = inner.height as usize;
+    // Keep the chosen row in view.
+    let first = fd.sel.saturating_sub(rows.saturating_sub(1));
+    let w = inner.width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = fd
+        .hits
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .map(|(i, h)| {
+            let room = w.saturating_sub(h.detail.chars().count() + 2);
+            let name: String = h.name.chars().take(room).collect();
+            let pad = " ".repeat(room.saturating_sub(name.chars().count()));
+            let st = if i == fd.sel { TStyle::new().add_modifier(Modifier::REVERSED) } else { TStyle::new() };
+            Line::from(vec![Span::styled(format!(" {name}{pad}"), st), Span::styled(format!("  {}", h.detail), dim)])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The --sats source and layer.
+const SATS: &str = "satellites";
+
+/// `HH:MM` (UTC) of a Unix time.
+fn hhmm(t: f64) -> String {
+    let s = t.rem_euclid(86400.0) as u64;
+    format!("{:02}:{:02}", s / 3600, s / 60 % 60)
+}
 
 /// Seconds since the Unix epoch, the clock aircraft fixes are kept on.
 fn unix_now() -> f64 {
@@ -615,6 +982,77 @@ fn fmt_len(km: f64) -> String {
 /// The inspector panel: the features under the clicked spot, then the selected one's details.
 /// Returns the screen rows of the list entries, so clicks can select them.
 /// The --ais panel for the selected ship: who it is and where it's going, live.
+/// The --sats panel for the selected satellite: its orbit, and when it next passes over you.
+#[allow(clippy::too_many_arguments)]
+fn draw_sat(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    (s, fix): (&mapterm::satellites::Sat, mapterm::satellites::Fix),
+    elements_age: f64,
+    pass: Option<Option<mapterm::satellites::Pass>>,
+    now: f64,
+    follow: bool,
+    me: Option<&mapterm::locate::Fix>,
+) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" satellite ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let key = |k: &str| Span::styled(format!(" {k:<13}"), dim);
+    let class = s.orbit_class();
+    let (r, g, b) = class.rgb();
+    let mut l = vec![Line::from(Span::styled(format!(" {} {}", s.glyph(), s.name), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
+    l.push(Line::default());
+    l.push(Line::from(vec![key("altitude"), Span::raw(format!("{:.0} km", fix.alt_km))]));
+    l.push(Line::from(vec![key("speed"), Span::raw(format!("{:.2} km/s", fix.speed)), Span::styled(format!("  {:.0} km/h", fix.speed * 3600.0), dim)]));
+    l.push(Line::from(vec![key("orbit"), Span::styled(class.short(), TStyle::new().fg(Color::Rgb(r, g, b))), Span::raw(format!(" · {}", class.long()))]));
+    let (perigee, apogee) = s.perigee_apogee();
+    let between = if (apogee - perigee).abs() < 20.0 { format!("{:.0} km", (perigee + apogee) / 2.0) } else { format!("{perigee:.0} to {apogee:.0} km") };
+    l.push(Line::from(vec![key("height"), Span::raw(between), Span::styled("  perigee to apogee", dim)]));
+    l.push(Line::from(vec![key("period"), Span::raw(format!("{:.1} min", s.period_min())), Span::styled(format!("  {:.1}° inclined", s.inclination), dim)]));
+    l.push(Line::from(vec![key("position"), Span::raw(format!("{:.3}, {:.3}", fix.lat, fix.lon))]));
+    l.push(Line::from(vec![key("mission"), Span::raw(s.mission().label())]));
+    if let Some(op) = s.operator() {
+        l.push(Line::from(vec![key("operator"), Span::raw(op)]));
+    }
+    if let Some(c) = &s.catalog {
+        let name = mapterm::satellites::owner_name(&c.owner).unwrap_or("?");
+        l.push(Line::from(vec![key("country"), Span::raw(name.to_string()), Span::styled(format!("  {}", c.owner), dim)]));
+        if let Some(d) = &c.launched {
+            l.push(Line::from(vec![key("launched"), Span::raw(d.clone())]));
+        }
+    }
+    l.push(Line::from(vec![key("NORAD"), Span::raw(s.norad.to_string())]));
+    if let Some(i) = &s.intl {
+        l.push(Line::from(vec![key("launched as"), Span::raw(i.clone())]));
+    }
+    l.push(Line::from(vec![key("elements"), Span::raw(format!("{:.0} min old", elements_age / 60.0))]));
+    if let Some(me) = me {
+        l.push(Line::default());
+        let (az, el) = mapterm::satellites::look((me.lon, me.lat, 0.0), &fix);
+        if el > 0.0 {
+            l.push(Line::from(vec![key("in your sky"), Span::styled(format!("{el:.0}° up, toward {az:03.0}°"), TStyle::new().fg(Color::Green))]));
+        }
+        match pass {
+            Some(Some(p)) => {
+                let mins = |t: f64| ((t - now) / 60.0).max(0.0);
+                let when = if p.rise <= now { "now".to_string() } else { format!("{} UTC, in {:.0} min", hhmm(p.rise), mins(p.rise)) };
+                l.push(Line::from(vec![key("next pass"), Span::raw(when)]));
+                l.push(Line::from(vec![key("highest"), Span::raw(format!("{:.0}° at {} UTC", p.max_elevation, hhmm(p.peak)))]));
+                l.push(Line::from(vec![key("sets"), Span::raw(format!("{} UTC", hhmm(p.set)))]));
+            }
+            Some(None) => l.push(Line::from(vec![key("next pass"), Span::styled("none over 10° in 24 h", dim)])),
+            None => {}
+        }
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(format!(" f {} · esc close", if follow { "stop following" } else { "follow" }), dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
 fn draw_ship(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -916,7 +1354,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
     for id in ids {
         // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
         // it is the clearest view of them.
-        if id == AIRCRAFT || id == TRAILS || id == SHIPS {
+        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS {
             continue;
         }
         let Some(l) = map.layer(&id) else { continue };
@@ -1029,7 +1467,7 @@ async fn main() -> Result<()> {
     if let Some(src) = src {
         let schema = detect_schema(&src, &cam).await;
         // Watching aircraft over the default basemap: the aviation style, unless --light.
-        if (a.adsb.is_some() || a.ais) && a.source.is_none() && !a.light {
+        if (a.adsb.is_some() || a.ais || a.sats.is_some()) && a.source.is_none() && !a.light {
             map = Map::aviation(src, schema)?;
         } else {
             map = Map::terminal(src, schema, !a.light)?;
@@ -1046,7 +1484,7 @@ async fn main() -> Result<()> {
     // OpenFreeMap styles.
     let builtin_source = a.source.clone().unwrap_or_else(|| OPENFREEMAP.to_string());
     let mut styles: Vec<String> = a.style.iter().cloned().collect();
-    if (a.adsb.is_some() || a.ais) && a.style.is_none() && a.source.is_none() && !a.light {
+    if (a.adsb.is_some() || a.ais || a.sats.is_some()) && a.style.is_none() && a.source.is_none() && !a.light {
         styles.push(AVIATION.to_string());
     }
     for s in [BUILTIN, AVIATION].into_iter().chain(stylejson::OPENFREEMAP_STYLES) {
@@ -1210,6 +1648,13 @@ async fn main() -> Result<()> {
         map.set_attribution(SHIPS, "aisstream.io")?;
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS).map(str::to_string);
         map.add_layers(vec![mapterm::ais::layer(SHIPS, SHIPS)], above.as_deref())?;
+    }
+    // Satellites (--sats), over everything else that moves.
+    if a.sats.is_some() {
+        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
+        map.add_source(SATS, MapSource::geojson(&empty)?)?;
+        map.set_attribution(SATS, "CelesTrak")?;
+        map.add_layers(vec![mapterm::satellites::layer(SATS, SATS)], None)?;
     }
     // Highlights, the crosshair and the clicked spot, on top of everything.
     map.add_custom_layer(OVERLAYS, Markers::default(), None)?;
@@ -1386,7 +1831,7 @@ async fn main() -> Result<()> {
     // inline. It asks the terminal, so it runs in raw mode, before the input thread starts.
     // --adsb trails as an image under the text where the terminal shows images: braille lines
     // re-snap to their dot grid as they grow, which shimmers.
-    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some()) && mapterm::kitty::supported();
+    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some()) && mapterm::kitty::supported();
     if trails_kitty {
         let _ = map.set_visibility(TRAILS, false);
     }
@@ -1497,6 +1942,75 @@ async fn main() -> Result<()> {
     let mut ais_state = String::new();
     let mut ships_drawn = Instant::now();
     let mut selected_ship: Option<u32> = None;
+    // --sats: the satellites (loaded in the background, again every 2 hours), the selected
+    // one, and its next pass over you (worked out once a minute).
+    let mut sats: Vec<mapterm::satellites::Sat> = Vec::new();
+    let mut sats_age = 0.0f64;
+    let (otx, mut orx) = mpsc::unbounded_channel::<(Vec<mapterm::satellites::Sat>, f64, Vec<String>)>();
+    // What they're for, from CelesTrak's purpose groups: after the satellites are up (the
+    // first time a day it's some twenty small requests).
+    let (mtx, mut mrx) = mpsc::unbounded_channel::<(std::collections::HashMap<u64, mapterm::satellites::Mission>, Vec<String>)>();
+    if let Some(groups) = a.sats.clone() {
+        let (otx, mtx) = (otx.clone(), mtx.clone());
+        tokio::spawn(async move {
+            loop {
+                let (mut all, mut oldest, mut notes) = (Vec::new(), 0.0f64, Vec::new());
+                let mut seen = std::collections::HashSet::new();
+                for g in &groups {
+                    match mapterm::satellites::load(g).await {
+                        Ok(l) => {
+                            oldest = oldest.max(l.age);
+                            notes.extend(l.note.map(|n| format!("{g}: {n}")));
+                            all.extend(l.sats.into_iter().filter(|s| seen.insert(s.norad)));
+                        }
+                        Err(e) => notes.push(format!("{g}: {e:#}")),
+                    }
+                }
+                // Who owns each (the satellite catalog), kept for a day.
+                for g in &groups {
+                    match mapterm::satellites::load_catalog(g).await {
+                        Ok(cat) => {
+                            for s in all.iter_mut().filter(|s: &&mut mapterm::satellites::Sat| s.catalog.is_none()) {
+                                s.catalog = cat.get(&s.norad).cloned();
+                            }
+                        }
+                        Err(e) => notes.push(format!("{g} catalog: {e:#}")),
+                    }
+                }
+                if otx.send((all, oldest, notes)).is_err() {
+                    return;
+                }
+                if mtx.send(mapterm::satellites::load_missions().await).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(2 * 3600 + 60)).await;
+            }
+        });
+    }
+    drop(otx);
+    let mut sats_drawn = Instant::now();
+    let mut selected_sat: Option<u64> = None;
+    let mut sat_pass: Option<(u64, Instant, Option<mapterm::satellites::Pass>)> = None;
+    // Where kitty graphics work, satellites are dots in an image placed to the pixel (smooth),
+    // with their names as text: while the image is up, and when it was last drawn.
+    let mut sat_dots = false;
+    // How satellites are colored (o switches), and what the colors mean; the legends' boxes
+    // (L shows or hides them), which the images under the text keep clear of.
+    let mut sat_color = a.sats_color;
+    let mut sat_coloring = mapterm::satellites::Coloring::Orbit;
+    let mut sat_legend: Option<mapterm::legend::Legend> = None;
+    let mut show_legend = true;
+    let mut legend_rects: Vec<Rect> = Vec::new();
+    // `p`: the fzf-style finder over everything live (satellites, aircraft, ships).
+    let mut finder: Option<Finder> = None;
+    // Satellites of other owners, set aside while a country filter is on.
+    let mut sat_filter = SatFilter { countries: a.sats_country.clone(), ..SatFilter::default() };
+    let mut sats_hidden: Vec<mapterm::satellites::Sat> = Vec::new();
+    let mut sat_dots_drawn = Instant::now();
+    // Satellite positions by SGP4 once a second, interpolated between; and how often to
+    // redraw the dots: often enough that the fastest move about a pixel a frame.
+    let mut ephemeris = mapterm::satellites::Ephemeris::default();
+    let mut sat_every = Duration::from_millis(200);
     let mut follow = false;
     // The trail image needs drawing again (new positions, or the view moved).
     let mut trails_dirty = false;
@@ -1505,7 +2019,7 @@ async fn main() -> Result<()> {
     // (aircraft, ships) are up.
     let mut trails_moved = Instant::now();
     let mut trails_drawn = Instant::now() - Duration::from_secs(10);
-    let mut trails_shown = (false, false);
+    let mut trails_shown = (false, false, false);
     // `g`: the location helper runs on a blocking task; its answer flies the map there.
     let (ltx, mut lrx) = mpsc::unbounded_channel::<Result<mapterm::locate::Fix>>();
     let mut locating = false;
@@ -1532,7 +2046,11 @@ async fn main() -> Result<()> {
             let followed = selected
                 .as_deref()
                 .and_then(|h| aircraft.get(h, unix_now() - adsb_delay).map(|x| x.1))
-                .or_else(|| selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY).map(|x| x.1)));
+                .or_else(|| selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY).map(|x| x.1)))
+                .or_else(|| {
+                    let f = sats.iter().find(|s| Some(s.norad) == selected_sat)?.at(unix_now())?;
+                    Some(mapterm::timeseries::Sample { t: unix_now(), lon: f.lon, lat: f.lat, alt: None })
+                });
             if follow
                 && !ctl.animating()
                 && let Some(at) = followed
@@ -1572,6 +2090,31 @@ async fn main() -> Result<()> {
                 let cross = Color::Rgb(0, 235, 255);
                 for ((ax, ay), (bx, by)) in [((x - 3.0, y), (x + 3.0, y)), ((x, y - 3.0), (x, y + 3.0))] {
                     overlays.push(Overlay::Line { pts: vec![vp.dot_to_lonlat(ax, ay), vp.dot_to_lonlat(bx, by)], color: cross });
+                }
+            }
+            // The selected satellite: its ground track for the next orbit, and the satellite.
+            if let Some(s) = sats.iter().find(|s| Some(s.norad) == selected_sat)
+                && let Some(f) = s.at(unix_now())
+            {
+                let dim = Color::Rgb(127, 178, 255);
+                // As an image with the trails where the terminal shows images; braille otherwise.
+                if !trails_kitty {
+                    for part in s.track(unix_now(), s.period_min()) {
+                        overlays.push(Overlay::Line { pts: part, color: dim });
+                    }
+                }
+                // While the satellites are an image, the image rings it and names it (smoothly);
+                // otherwise a text marker.
+                if !sat_dots {
+                    let st = TStyle::new().fg(Color::Black).bg(dim).add_modifier(ratatui::style::Modifier::BOLD);
+                    overlays.push(Overlay::Marker {
+                        lon: f.lon,
+                        lat: f.lat,
+                        glyph: s.glyph().into(),
+                        style: st,
+                        label: Some((s.name.clone(), st)),
+                        priority: 101,
+                    });
                 }
             }
             // The selected ship, the same way.
@@ -1635,19 +2178,52 @@ async fn main() -> Result<()> {
             }
             term.draw(|f| {
                 let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(status_rows)]).areas(f.area());
-                let results = matches!(search, Search::Results { .. });
+                let results = matches!(search, Search::Results { .. }) || finder.is_some();
                 let plane = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay));
                 let ship = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY));
-                let panel_w = if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() { 52.min(main.width / 2) } else { 0 };
+                let sat = sats.iter().find(|s| Some(s.norad) == selected_sat).and_then(|s| Some((s, s.at(unix_now())?)));
+                let panel_w =
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() { 52.min(main.width / 2) } else { 0 };
                 let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
                 map_area = m;
                 panel_area = panel;
                 f.render_widget(map.view(&draw_cam), m);
+                // Legends for what's colored, stacked up from the map's lower left.
+                legend_rects.clear();
+                if show_legend {
+                    let mut legends: Vec<mapterm::legend::Legend> = Vec::new();
+                    legends.extend(sat_legend.clone().filter(|_| !sats.is_empty()));
+                    if adsb_feed.is_some() && !aircraft.is_empty() {
+                        legends.push(mapterm::adsb::legend(&aircraft));
+                    }
+                    if ais_key.is_some() && !fleet.is_empty() {
+                        legends.push(mapterm::ais::legend(&fleet));
+                    }
+                    let mut room = m;
+                    for l in &legends {
+                        let r = l.rect(room, mapterm::legend::Corner::BottomLeft);
+                        if r.height < 3 || r.width < 8 {
+                            break;
+                        }
+                        l.render_in(f.buffer_mut(), room, mapterm::legend::Corner::BottomLeft);
+                        legend_rects.push(r);
+                        room.height = room.height.saturating_sub(r.height);
+                    }
+                }
                 list_rows = match &search {
+                    _ if let Some(fd) = finder.as_ref() => {
+                        draw_finder(f, panel, fd);
+                        Vec::new()
+                    }
                     Search::Results { places, sel } if panel_w > 0 => draw_results(f, panel, places, *sel),
                     _ if inspect && !picks.is_empty() => draw_inspector(f, panel, &picks, sel),
                     _ if let Some(p) = plane => {
                         draw_aircraft(f, panel, p, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if let Some(s) = sat => {
+                        let pass = sat_pass.as_ref().filter(|p| p.0 == s.0.norad).map(|p| p.2);
+                        draw_sat(f, panel, s, sats_age, pass, unix_now(), follow, me.as_ref());
                         Vec::new()
                     }
                     _ if let Some(s) = ship => {
@@ -1731,6 +2307,11 @@ async fn main() -> Result<()> {
                         None => spans.push(Span::styled(format!("{name} "), dim)),
                     }
                 }
+                if a.sats.is_some() {
+                    let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
+                    let of = sat_filter.describe();
+                    spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
+                }
                 if ais_key.is_some() {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let text = if cam.zoom < AIS_MIN_ZOOM { "⛴ zoom in for ships ".to_string() } else { format!("⛴ {}{} ", fleet.len(), ais_state) };
@@ -1757,6 +2338,15 @@ async fn main() -> Result<()> {
                     credits.insert(0, f.attribution.clone());
                 }
                 let credits = if credits.is_empty() { basemap_name.clone() } else { credits.join(" · ") };
+                // While the finder is open, the status line is its prompt.
+                if let Some(fd) = finder.as_ref() {
+                    spans = vec![
+                        Span::styled(" find ", TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255))),
+                        Span::raw(format!(" > {}", fd.query)),
+                        Span::styled("█", TStyle::new().fg(Color::Rgb(127, 178, 255))),
+                        Span::styled("  ↑↓ choose · enter go · esc close ", dim),
+                    ];
+                }
                 // While typing a search, the status line is the search box.
                 if let Search::Typing(q) = &search {
                     spans = vec![
@@ -1805,14 +2395,21 @@ async fn main() -> Result<()> {
                     if trails_cam != Some(view) {
                         trails_cam = Some(view);
                         trails_moved = Instant::now();
-                        for (id, shown) in [(TRAIL_IMAGE, &mut trails_shown.0), (SHIP_TRAIL_IMAGE, &mut trails_shown.1)] {
+                        for (id, shown) in [(TRAIL_IMAGE, &mut trails_shown.0), (SHIP_TRAIL_IMAGE, &mut trails_shown.1), (PATH_IMAGE, &mut trails_shown.2)] {
                             if std::mem::take(shown) {
                                 out.write_all(mapterm::kitty::free(id).as_bytes())?;
                             }
                         }
                     }
                     let settled = trails_moved.elapsed() >= Duration::from_millis(150) && !ctl.animating();
-                    let hidden = (adsb_feed.is_some() && !trails_shown.0) || (ais_key.is_some() && !trails_shown.1);
+                    // Paths: the selected satellite's ground track.
+                    let path_lines: Vec<mapterm::timeseries::Line> = sats
+                        .iter()
+                        .find(|s| Some(s.norad) == selected_sat)
+                        .map(|s| s.track(unix_now(), s.period_min()).into_iter().map(|p| (p, (127, 178, 255))).collect())
+                        .unwrap_or_default();
+                    let hidden =
+                        (adsb_feed.is_some() && !trails_shown.0) || (ais_key.is_some() && !trails_shown.1) || (!path_lines.is_empty() && !trails_shown.2);
                     if settled && ((trails_dirty && trails_drawn.elapsed() >= Duration::from_secs(1)) || (hidden && trails_dirty)) {
                         trails_dirty = false;
                         trails_drawn = Instant::now();
@@ -1840,13 +2437,70 @@ async fn main() -> Result<()> {
                                 }
                                 continue;
                             }
-                            let rgba = mapterm::timeseries::render_trails(paths, t, secs, &vp, w, h, cpx);
+                            let mut rgba = mapterm::timeseries::render_trails(paths, t, secs, &vp, w, h, cpx);
+                            punch(&mut rgba, w, map_area, &legend_rects, cpx);
                             out.write_all(
                                 mapterm::kitty::show_rgba(id, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, z, shm).as_bytes(),
                             )?;
                             *shown = true;
                         }
+                        if path_lines.is_empty() {
+                            if std::mem::take(&mut trails_shown.2) {
+                                out.write_all(mapterm::kitty::free(PATH_IMAGE).as_bytes())?;
+                            }
+                        } else {
+                            let mut rgba = mapterm::timeseries::render_lines(&path_lines, &vp, w, h, cpx);
+                            punch(&mut rgba, w, map_area, &legend_rects, cpx);
+                            out.write_all(
+                                mapterm::kitty::show_rgba(PATH_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -9, shm).as_bytes(),
+                            )?;
+                            trails_shown.2 = true;
+                        }
                         dlog(|| format!("trails: {w}x{h} px, {:.1} ms, shown {trails_shown:?}", t_trails.elapsed().as_secs_f64() * 1000.0));
+                    }
+                    // Satellites as dots with their names, five times a second once the map is
+                    // still; the cell glyphs and text names stand in while it moves. Full
+                    // resolution when there are names to draw (text needs it), else half,
+                    // scaled up by the terminal (dots don't).
+                    let want_dots = !sats.is_empty() && settled;
+                    if want_dots && sat_dots_drawn.elapsed() >= sat_every {
+                        sat_dots_drawn = Instant::now();
+                        // Full resolution when there's text to draw: names, or the selected one's.
+                        let named = sats.iter().any(|s| !s.is_starlink());
+                        let scale = if named || selected_sat.is_some() { 1.0 } else { 0.5 };
+                        let (w, h) = ((map_area.width as f64 * cpx.0 * scale).round() as u32, (map_area.height as f64 * cpx.1 * scale).round() as u32);
+                        let vp = Viewport::new(&draw_cam, map_area);
+                        // Low orbit crosses the ground at about 7 km/s: redraw so it moves ~1 px a frame,
+                        // from 4 to 15 times a second (zoomed out it barely moves).
+                        let px_per_km = cpx.0 / vp.km_per_col(draw_cam.lat).max(1e-6);
+                        let fps = (7.0 * px_per_km).ceil().clamp(4.0, 15.0);
+                        sat_every = Duration::from_secs_f64(1.0 / fps);
+                        let at = ephemeris.positions(&sats, unix_now());
+                        let mut rgba = mapterm::satellites::render_dots_at(
+                            &sats,
+                            &at,
+                            &vp,
+                            w,
+                            h,
+                            (cpx.0 * scale, cpx.1 * scale),
+                            named,
+                            selected_sat,
+                            &sat_coloring,
+                        );
+                        punch(&mut rgba, w, map_area, &legend_rects, (cpx.0 * scale, cpx.1 * scale));
+                        out.write_all(
+                            mapterm::kitty::show_rgba(SAT_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -8, shm).as_bytes(),
+                        )?;
+                        if !sat_dots {
+                            sat_dots = true;
+                            let _ = map.set_visibility(SATS, false);
+                        }
+                    } else if !want_dots && sat_dots {
+                        sat_dots = false;
+                        out.write_all(mapterm::kitty::free(SAT_IMAGE).as_bytes())?;
+                        let _ = map.set_visibility(SATS, true);
+                        // Bring the text layer up to date right away.
+                        sats_drawn = Instant::now() - Duration::from_secs(10);
                     }
                 }
                 if kitty {
@@ -2041,6 +2695,34 @@ async fn main() -> Result<()> {
                     let _ = area_tx.send(b);
                 }
             }
+            // --sats: positions straight from the orbits, a few times a second; the selected
+            // one's next pass over you, once a minute.
+            // Big groups (Starlink's 11,000 take ~30 ms) twice a second: half a second is a few
+            // km of orbit, under a cell at the zooms they're watched at.
+            // While the dots image draws them, this text layer is only for when the map moves:
+            // every 2 s is plenty (it catches up as soon as the image comes down).
+            let every = if sat_dots {
+                Duration::from_secs(2)
+            } else if sats.len() > 2000 {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(250)
+            };
+            if !sats.is_empty() && sats_drawn.elapsed() >= every {
+                sats_drawn = Instant::now();
+                // The selected one's ground track moves on with it (or goes, when deselected).
+                if selected_sat.is_some() || trails_shown.2 {
+                    trails_dirty = true;
+                }
+                map.set_data(SATS, &mapterm::satellites::points(&sats, unix_now(), &sat_coloring))?;
+            }
+            if let (Some(norad), Some(me)) = (selected_sat, me.as_ref())
+                && sat_pass.as_ref().is_none_or(|p| p.0 != norad || p.1.elapsed() >= Duration::from_secs(60))
+                && let Some(s) = sats.iter().find(|s| s.norad == norad)
+            {
+                let observer = (me.lon, me.lat, 0.0);
+                sat_pass = Some((norad, Instant::now(), s.next_pass(observer, unix_now(), 24.0, 10.0)));
+            }
             if ais_key.is_some() && !fleet.is_empty() && ships_drawn.elapsed() >= Duration::from_millis(250) {
                 ships_drawn = Instant::now();
                 fleet.prune(unix_now(), None);
@@ -2089,7 +2771,10 @@ async fn main() -> Result<()> {
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
             let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() {
                 Duration::from_millis(16)
-            } else if !aircraft.is_empty() || !fleet.is_empty() {
+            } else if sat_dots {
+                // Satellite dots redraw up to 15 times a second (see sat_every).
+                (sat_every / 2).max(Duration::from_millis(16))
+            } else if !aircraft.is_empty() || !fleet.is_empty() || !sats.is_empty() {
                 // Aircraft and ships keep moving.
                 Duration::from_millis(250)
             } else {
@@ -2132,6 +2817,34 @@ async fn main() -> Result<()> {
                                 errors += 1;
                             }
                         }
+                    }
+                }
+                Some((missions, notes)) = mrx.recv() => {
+                    dlog(|| format!("sats: {} missions from groups; {notes:?}", missions.len()));
+                    for s in sats.iter_mut().chain(sats_hidden.iter_mut()) {
+                        s.group_mission = missions.get(&s.norad).copied();
+                    }
+                    if !sat_filter.missions.is_empty() {
+                        filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                    }
+                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                }
+                Some((loaded, age, notes)) = orx.recv() => {
+                    dlog(|| format!("sats: {} loaded, {:.0} min old; {notes:?}", loaded.len(), age / 60.0));
+                    if !notes.is_empty() {
+                        note = Some((Instant::now(), notes.join("; ")));
+                    }
+                    if !loaded.is_empty() {
+                        let known: std::collections::HashMap<u64, mapterm::satellites::Mission> =
+                            sats.iter().chain(sats_hidden.iter()).filter_map(|s| s.group_mission.map(|m| (s.norad, m))).collect();
+                        sats = loaded;
+                        for s in &mut sats {
+                            s.group_mission = known.get(&s.norad).copied();
+                        }
+                        sats_hidden.clear();
+                        sats_age = age;
+                        filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                        (sat_coloring, sat_legend) = recolor(&sats, sat_color);
                     }
                 }
                 Some(ev) = srx_ais.recv() => {
@@ -2255,6 +2968,106 @@ async fn main() -> Result<()> {
                     for ev in queued {
                         match ev {
                             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                                // The finder takes every key while it's open.
+                                if let Some(fd) = finder.as_mut() {
+                                    let mut refilter = false;
+                                    match k.code {
+                                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                                        KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                                            fd.query.clear();
+                                            refilter = true;
+                                        }
+                                        KeyCode::Esc => finder = None,
+                                        KeyCode::Down | KeyCode::Tab if !fd.hits.is_empty() => fd.sel = (fd.sel + 1) % fd.hits.len(),
+                                        KeyCode::Up | KeyCode::BackTab if !fd.hits.is_empty() => fd.sel = (fd.sel + fd.hits.len() - 1) % fd.hits.len(),
+                                        KeyCode::Char(c) => {
+                                            fd.query.push(c);
+                                            refilter = true;
+                                        }
+                                        KeyCode::Backspace => {
+                                            fd.query.pop();
+                                            refilter = true;
+                                        }
+                                        KeyCode::Enter => {
+                                            // Select it, as a click would, and fly there.
+                                            if let Some(hit) = fd.hits.get(fd.sel) {
+                                                let target = hit.target.clone();
+                                                let now = unix_now();
+                                                // A country: filter the satellites to it (or show them all again).
+                                                if let Target::Missions(ms) = &target {
+                                                    sat_filter.missions = ms.clone();
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                                    if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
+                                                        selected_sat = None;
+                                                    }
+                                                    note = Some((Instant::now(), format!("{} satellites:{}", sats.len(), sat_filter.describe())));
+                                                    finder = None;
+                                                    continue;
+                                                }
+                                                if let Target::Operator(op) = &target {
+                                                    sat_filter.operator = Some(op);
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                                    if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
+                                                        selected_sat = None;
+                                                    }
+                                                    note = Some((Instant::now(), format!("{} satellites:{}", sats.len(), sat_filter.describe())));
+                                                    finder = None;
+                                                    continue;
+                                                }
+                                                if let Target::Country(code) = &target {
+                                                    // A country filters to it; "Show all satellites" clears both filters.
+                                                    if code.is_none() {
+                                                        sat_filter = SatFilter::default();
+                                                    }
+                                                    sat_filter.countries = code.iter().cloned().collect();
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                                    if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
+                                                        selected_sat = None;
+                                                    }
+                                                    let what = code.as_deref().map_or("all".to_string(), country_short);
+                                                    note = Some((Instant::now(), format!("{} satellites: {what}", sats.len())));
+                                                    finder = None;
+                                                    continue;
+                                                }
+                                                // A satellite set aside by the filter: show everything again first.
+                                                if let Target::Sat(n) = &target
+                                                    && sats_hidden.iter().any(|s| s.norad == *n)
+                                                {
+                                                    sat_filter = SatFilter::default();
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                                }
+                                                let at = match &target {
+                                                    Target::Sat(n) => sats.iter().find(|s| s.norad == *n).and_then(|s| s.at(now)).map(|f| (f.lon, f.lat)),
+                                                    Target::Ship(m) => fleet.get(*m, now - AIS_DELAY).map(|(_, p)| (p.lon, p.lat)),
+                                                    Target::Plane(h) => aircraft.get(h, now - adsb_delay).map(|(_, p, _)| (p.lon, p.lat)),
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) => None,
+                                                };
+                                                (selected, selected_ship, selected_sat) = (None, None, None);
+                                                match target {
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) => {}
+                                                    Target::Sat(n) => selected_sat = Some(n),
+                                                    Target::Ship(m) => selected_ship = Some(m),
+                                                    Target::Plane(h) => selected = Some(h),
+                                                }
+                                                follow = false;
+                                                if let Some((lon, lat)) = at {
+                                                    ctl.fly_to(Camera::new(lon, lat, ctl.cam.zoom.max(3.0)));
+                                                }
+                                            }
+                                            finder = None;
+                                        }
+                                        _ => {}
+                                    }
+                                    if refilter && let Some(fd) = finder.as_mut() {
+                                        fd.hits = find(&fd.query, &sats, &sats_hidden, &sat_filter, &aircraft, &fleet);
+                                        fd.sel = 0;
+                                    }
+                                    continue;
+                                }
                                 // Typing a search: every key goes to the search box.
                                 if let Search::Typing(q) = &mut search {
                                     match k.code {
@@ -2311,6 +3124,23 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
                                 match k.code {
+                                    KeyCode::Char('o') if !sats.is_empty() => {
+                                        sat_color = match sat_color {
+                                            SatColor::Orbit => SatColor::Country,
+                                            SatColor::Country => SatColor::Mission,
+                                            SatColor::Mission => SatColor::Orbit,
+                                        };
+                                        (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                        let by = ["orbit", "country", "mission"][sat_color as usize];
+                                        note = Some((Instant::now(), format!("satellites colored by {by}")));
+                                    }
+                                    KeyCode::Char('L') => {
+                                        show_legend = !show_legend;
+                                        note = Some((Instant::now(), if show_legend { "legend on" } else { "legend off" }.into()));
+                                    }
+                                    KeyCode::Char('p') if !sats.is_empty() || !aircraft.is_empty() || !fleet.is_empty() => {
+                                        finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &sats_hidden, &sat_filter, &aircraft, &fleet) });
+                                    }
                                     KeyCode::Char('/') => {
                                         search = Search::Typing(String::new());
                                     }
@@ -2322,12 +3152,13 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
                                         });
                                     }
-                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some()) && !inspect => {
+                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some()) && !inspect => {
                                         selected = None;
                                         selected_ship = None;
+                                        selected_sat = None;
                                         follow = false;
                                     }
-                                    KeyCode::Char('f') if selected.is_some() || selected_ship.is_some() => {
+                                    KeyCode::Char('f') if selected.is_some() || selected_ship.is_some() || selected_sat.is_some() => {
                                         follow = !follow;
                                         note = Some((Instant::now(), if follow { "following" } else { "not following" }.into()));
                                     }
@@ -2363,6 +3194,20 @@ async fn main() -> Result<()> {
                                     KeyCode::Tab if !picks.is_empty() => sel = (sel + 1) % picks.len(),
                                     // --adsb: Tab / shift+Tab step through the aircraft from the
                                     // middle of the map outward.
+                                    // --sats alone: Tab steps through the satellites the same way.
+                                    KeyCode::Tab | KeyCode::BackTab if !inspect && aircraft.is_empty() && fleet.is_empty() && !sats.is_empty() => {
+                                        let order = mapterm::satellites::by_distance(&sats, unix_now(), ctl.cam.lon, ctl.cam.lat);
+                                        let at = selected_sat.and_then(|n| order.iter().position(|x| *x == n));
+                                        let next = match (at, k.code) {
+                                            (None, _) => 0,
+                                            (Some(i), KeyCode::BackTab) => (i + order.len() - 1) % order.len(),
+                                            (Some(i), _) => (i + 1) % order.len(),
+                                        };
+                                        if order.get(next).copied() != selected_sat {
+                                            follow = false;
+                                        }
+                                        selected_sat = order.get(next).copied();
+                                    }
                                     // --ais alone: Tab steps through the ships the same way.
                                     KeyCode::Tab | KeyCode::BackTab if !inspect && aircraft.is_empty() && !fleet.is_empty() => {
                                         let order = fleet.by_distance(unix_now() - AIS_DELAY, ctl.cam.lon, ctl.cam.lat);
@@ -2540,7 +3385,7 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() {
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() {
                                         // A click on (or next to) an aircraft, else a ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
                                         let dot = vp.dot_ll(k.lon, k.lat);
@@ -2550,12 +3395,21 @@ async fn main() -> Result<()> {
                                             }
                                             selected = Some(hex);
                                             selected_ship = None;
+                                            selected_sat = None;
                                         } else if let Some((_, mmsi)) = fleet.nearest(unix_now() - AIS_DELAY, &vp, dot, 6.0) {
                                             if selected_ship != Some(mmsi) {
                                                 follow = false;
                                             }
                                             selected_ship = Some(mmsi);
+                                            selected_sat = None;
                                             selected = None;
+                                        } else if let Some(norad) = mapterm::satellites::nearest(&sats, unix_now(), &vp, dot, 6.0) {
+                                            if selected_sat != Some(norad) {
+                                                follow = false;
+                                            }
+                                            selected_sat = Some(norad);
+                                            selected = None;
+                                            selected_ship = None;
                                         }
                                     }
                                 }

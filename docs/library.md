@@ -40,10 +40,15 @@ let under = map.query_rendered_features(&ctl.cam, area, dot, Some(&["pins"]));
 - Anything else is a `CustomLayer`: `draw` (lines, fills, markers and labels
   through a `DrawContext`) and `pick`. Markers and labels from every layer are
   placed together, so they never overlap.
+- `legend::Legend` draws a legend box in a corner of the map: a title and entries (a
+  symbol in a color, a label, a count). `satellites::Coloring` makes one for satellites by
+  orbit or country, and `adsb::legend` and `ais::legend` for aircraft and ships.
 - `Controller` gives MapLibre-style mouse and keyboard handling and camera
   moves (`fly_to`, `ease_to`, `fit_bounds`), and `take_click` reports clicks for
   your own popups and panels. `geocode::Geocoder` searches places.
 
+[`examples/satellites_by_country.rs`](../examples/satellites_by_country.rs) shows every
+active satellite colored by owner, with a legend, in about 70 lines.
 [`examples/hello_map.rs`](examples/hello_map.rs) builds a basemap from a few
 style layers and adds a pin in about 50 lines, and
 [`examples/style.rs`](examples/style.rs) shows any style

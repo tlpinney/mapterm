@@ -285,6 +285,11 @@ impl Fleet {
         });
     }
 
+    /// Every ship known.
+    pub fn all(&self) -> impl Iterator<Item = &Ship> {
+        self.ships.values()
+    }
+
     /// How many ships are known (with or without a position yet).
     pub fn len(&self) -> usize {
         self.ships.len()
@@ -354,6 +359,21 @@ impl Fleet {
     pub fn trail_paths(&self) -> impl Iterator<Item = (&SampledPosition, (u8, u8, u8))> {
         self.ships.values().filter(|s| s.sog.is_some_and(|v| v >= 0.5)).map(|s| (&s.path, category_rgb(category(s.details.ship_type))))
     }
+}
+
+/// What the ship colors mean: the kinds among `fleet`, most first, with their counts.
+pub fn legend(fleet: &Fleet) -> crate::legend::Legend {
+    use ratatui::style::Color;
+    let mut n: HashMap<&'static str, usize> = HashMap::new();
+    for s in fleet.all() {
+        *n.entry(category(s.details.ship_type)).or_insert(0) += 1;
+    }
+    let mut v: Vec<(&str, usize)> = n.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    v.into_iter().fold(crate::legend::Legend::new("ships by kind"), |l, (cat, count)| {
+        let (r, g, b) = category_rgb(cat);
+        l.entry("●", Color::Rgb(r, g, b), cat, Some(count))
+    })
 }
 
 /// The style layer for ships from source `source`: arrows along the course (dots when

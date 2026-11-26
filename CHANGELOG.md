@@ -8,6 +8,53 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Satellites: `--sats [GROUPS]` places satellites from CelesTrak's orbital elements with
+  SGP4 (the `sgp4` crate), computed locally several times a second: ◇ colored by orbit,
+  names, and a panel on click or Tab with altitude, speed, period, the ground track and,
+  with `--at here`, its place in your sky and next pass (`mapterm::satellites`). Elements
+  are cached for 2 hours per group and errors back off 2 hours, following CelesTrak's
+  one-download-per-update policy; the cache shows in `mapterm --cache` as `orbits`.
+  Starlink's thousands are a small unnamed ·, and the selected satellite's ground track is
+  a smooth image under the text where the terminal shows kitty graphics (braille elsewhere;
+  `timeseries::render_lines`). There, satellites themselves are anti-aliased dots in an
+  image placed to the pixel and redrawn five times a second, so they glide instead of
+  hopping a cell at a time (`satellites::render_dots`); names stay text beside them, and the
+  cell glyphs return while the map moves. Their names are drawn into that image too, in the
+  bundled JetBrains Mono (Ghostty's built-in font; SIL OFL 1.1, `fonts/OFL.txt`) or
+  `MAPTERM_FONT`, so they glide with their dots (`mapterm::imagetext`: outlines from `skrifa`,
+  drawn once per glyph with tiny-skia and copied into place). The dots redraw often enough that the fastest move
+  about a pixel a frame (4 to 15 times a second, by zoom), from positions worked out by SGP4
+  once a second and interpolated between (`satellites::Ephemeris`, accurate to tens of
+  metres); 9 ms a frame for all 16,904, about 13% of a core at 15 a second. Orbits are
+  classed by the standard definitions from their elements (LEO, MEO, GEO, GSO, HEO, beyond
+  GEO; `Sat::orbit_class`, `perigee_apogee`), for the colors, the legend and the panel,
+  instead of by where a satellite happens to be.
+  The selected satellite (Starlink too) gets a ring and its name in that image. `--sats`
+  alone is `active`: every active satellite CelesTrak publishes (~17,000), Starlink's
+  unlabelled. `p` opens an fzf-style finder over satellites, aircraft and ships (by name,
+  number, callsign, MMSI or operator: `digitalglobe` finds WorldView and Legion), and the
+  panel names a satellite's operator for well-known ones (`mapterm::fuzzy`).
+- Legends: `mapterm::legend::Legend`, a box in a corner of the map with what the colors mean
+  and how many of each. The viewer shows them for satellites (by orbit, or by country with
+  `o` / `--sats-color country`: the six biggest owners in a color each, Starlink apart from the rest of the USA, the
+  rest as "other"), aircraft by
+  altitude and ships by kind; `L` hides them, and images under the text keep clear of them.
+  `examples/satellites_by_country.rs` draws every active satellite colored by owner.
+- Satellites by mission: communications, Earth observation, radar imaging (SAR), weather,
+  navigation, science, technology, amateur, military, space station (its modules), crew and
+  cargo craft, from CelesTrak's
+  purpose groups (their catalogs, kept a day, loaded after the satellites are up) and, for
+  SAR and the big communications constellations, by name (`satellites::Mission`,
+  `load_missions`, `Coloring::Mission`). `o` cycles orbit, country and mission colors with
+  their legend; the panel names the mission; the finder offers missions, imaging (optical
+  and SAR together) and operators (Planet, Vantor, ICEYE, Umbra, Spire, Airbus...) as
+  filters, which combine. More operators are known by name.
+- Satellites by country: CelesTrak's satellite catalog (SATCAT, kept a day) gives every
+  satellite's owner and launch date, shown in the panel. In the finder, typing a country
+  (`china`, `japan`, `russia`, or a code such as `PRC`) offers it with its count, and Enter
+  shows only its satellites ("All countries" brings them back); `--sats-country` starts that
+  way (`satellites::load_catalog`, `owner_name`, `owner_code_for`).
+
 - When the status line doesn't fit, the credits get their own line above it (up to three,
   wrapped) instead of being cut off; the data's licenses ask for them to show.
 

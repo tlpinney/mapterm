@@ -103,6 +103,21 @@ fn help_and_bad_arguments() {
 }
 
 #[test]
+fn sats_takes_groups_but_not_the_next_option() {
+    // `--sats` alone must leave `--at` for itself (a snapshot loads no satellites, so this
+    // stays offline).
+    let pm = pmtiles().to_str().unwrap().to_string();
+    for sats in [&["--sats"][..], &["--sats", "stations,amateur"][..]] {
+        let mut args = vec![pm.as_str()];
+        args.extend_from_slice(sats);
+        args.extend_from_slice(&["--at", AT, "-z", "14.6", "--snapshot", "40x10"]);
+        ok(&args);
+    }
+    let out = mapterm(&[pm.as_str(), "--sats", "active,starlink", "--snapshot", "10x5"]);
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("starlink"));
+}
+
+#[test]
 fn raster_provider_list() {
     let list = ok(&["--raster-list"]);
     for name in ["osm", "esri", "gibs", "vantor", "planet"] {

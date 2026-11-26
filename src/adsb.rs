@@ -332,6 +332,11 @@ impl Tracks {
         v.into_iter().map(|(_, h)| h.clone()).collect()
     }
 
+    /// Every aircraft's latest report.
+    pub fn all(&self) -> impl Iterator<Item = &Aircraft> {
+        self.by_hex.values().map(|t| &t.latest)
+    }
+
     /// How many aircraft are tracked.
     pub fn len(&self) -> usize {
         self.by_hex.len()
@@ -400,6 +405,32 @@ impl Tracks {
 /// [`crate::timeseries::render_trails`].
 pub fn trail_paths(tracks: &Tracks) -> impl Iterator<Item = (&SampledPosition, (u8, u8, u8))> {
     tracks.by_hex.values().filter(|tr| !tr.latest.on_ground).map(|tr| (&tr.path, altitude_rgb(tr.latest.alt_ft.unwrap_or(0.0))))
+}
+
+/// What the aircraft colors mean, with how many of `tracks` are in each band.
+pub fn legend(tracks: &Tracks) -> crate::legend::Legend {
+    use ratatui::style::Color;
+    let bands: [(&str, f64, f64); 5] = [
+        ("on the ground", f64::NEG_INFINITY, 1.0),
+        ("under 10,000 ft", 1.0, 10_000.0),
+        ("10,000 to 25,000 ft", 10_000.0, 25_000.0),
+        ("25,000 to 40,000 ft", 25_000.0, 40_000.0),
+        ("over 40,000 ft", 40_000.0, f64::INFINITY),
+    ];
+    let mut l = crate::legend::Legend::new("aircraft by altitude");
+    for (label, lo, hi) in bands {
+        let n = tracks.all().filter(|a| {
+            let alt = if a.on_ground { 0.0 } else { a.alt_ft.unwrap_or(0.0) };
+            alt >= lo && alt < hi
+        });
+        let count = n.count();
+        // The band's color where most of it is: its floor, or the ground's gray.
+        let (r, g, b) = altitude_rgb(if lo.is_finite() { lo.max(1000.0) } else { 0.0 });
+        if count > 0 {
+            l = l.entry("●", Color::Rgb(r, g, b), label, Some(count));
+        }
+    }
+    l
 }
 
 /// The altitude colors of [`by_altitude`], as RGB for images.

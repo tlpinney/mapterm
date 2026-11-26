@@ -27,10 +27,10 @@ pub struct Cache {
 }
 
 /// The cache names, in report order.
-pub const NAMES: [&str; 7] = ["tiles", "imagery", "geoparquet", "docs", "buildings", "stac", "old"];
+pub const NAMES: [&str; 8] = ["tiles", "imagery", "geoparquet", "docs", "buildings", "stac", "orbits", "old"];
 
 /// Folders under the root that belong to a named cache (anything else there is old).
-const KNOWN: [&str; 3] = ["raster", "msbuildings", "stac"];
+const KNOWN: [&str; 4] = ["raster", "msbuildings", "stac", "celestrak"];
 
 /// Every cache under `root` (normally [`caches_root`]); `old` only when
 /// there's something in it.
@@ -47,6 +47,7 @@ pub fn caches_in(root: &Path) -> Vec<Cache> {
                 "docs" => ("styles and TileJSON, so a known map opens fast and offline", "re-checked after a day".to_string()),
                 "buildings" => ("Microsoft building tiles, split into pieces", size(crate::msbuildings::cache_limit())),
                 "stac" => ("STAC collection indexes (which file covers where)", "re-read after 7 days".to_string()),
+                "orbits" => ("satellite orbits from CelesTrak (--sats), a file per group", "re-read after 2 hours".to_string()),
                 _ => ("left by earlier versions (a file per tile), no longer read", "none: clear it".to_string()),
             };
             Cache { name, about, paths, bytes, files, limit }
@@ -93,6 +94,7 @@ fn paths_of(root: &Path, name: &str) -> Vec<PathBuf> {
             .collect(),
         "buildings" => dir("msbuildings"),
         "stac" => dir("stac"),
+        "orbits" => dir("celestrak"),
         // Earlier versions: a folder per source at the top and under raster/, and the old
         // geoparquet/ folder.
         _ => {
