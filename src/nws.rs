@@ -360,57 +360,120 @@ pub fn features(alerts: &[Alert], zones: &HashMap<String, Value>, t: f64) -> Val
     json!({"type": "FeatureCollection", "features": feats})
 }
 
-/// The alerts in force at `t` drawn for the view `vp` into a `w` x `h` image (RGBA rows,
-/// for a kitty image under the text): each area a translucent fill and a smooth outline in
-/// its severity's color, the least severe first so the worst is on top. `cell_px` is the
-/// cell size in the image's pixels.
-pub fn render(alerts: &[Alert], zones: &HashMap<String, Value>, t: f64, vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64)) -> Vec<u8> {
-    use tiny_skia::{FillRule, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
-    let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
-    let px = |lon: f64, lat: f64| {
-        let (dx, dy) = vp.dot_ll(lon, lat);
-        ((dx * cell_px.0 / 2.0) as f32, (dy * cell_px.1 / 4.0) as f32)
-    };
-    let stroke = Stroke { width: (cell_px.0 / 7.0).max(1.2) as f32, line_join: LineJoin::Round, ..Stroke::default() };
-    let rings_of = |g: &Value, out: &mut Vec<Value>| match g.get("type").and_then(Value::as_str) {
-        Some("Polygon") => out.extend(g["coordinates"].as_array().cloned().unwrap_or_default()),
-        Some("MultiPolygon") => {
-            for p in g["coordinates"].as_array().into_iter().flatten() {
-                out.extend(p.as_array().cloned().unwrap_or_default());
-            }
-        }
-        _ => {}
-    };
-    for a in alerts.iter().rev().filter(|a| a.in_force(t)) {
-        let mut rings = Vec::new();
-        match &a.geometry {
-            Some(g) => rings_of(g, &mut rings),
-            None => a.zones.iter().filter_map(|z| zones.get(z)).for_each(|g| rings_of(g, &mut rings)),
-        }
-        let mut pb = PathBuilder::new();
-        for r in &rings {
-            let mut first = true;
-            for p in r.as_array().into_iter().flatten() {
-                let (Some(lon), Some(lat)) = (p.get(0).and_then(Value::as_f64), p.get(1).and_then(Value::as_f64)) else { continue };
-                let (x, y) = px(lon, lat);
-                if first {
-                    pb.move_to(x, y);
-                    first = false;
-                } else {
-                    pb.line_to(x, y);
+/// The alert areas as map tiles drawn here (where the terminal shows images): each area a
+/// translucent fill and a smooth outline in its severity's color, the least severe first so
+/// the worst is on top. Shown and moved like imagery, so panning and zooming stay images.
+/// [`AlertTiles::set`] gives it the alerts in force; a tile draws only the areas it touches.
+#[derive(Default)]
+pub struct AlertTiles {
+    areas: std::sync::RwLock<Vec<Area>>,
+}
+
+/// One alert's area, ready to draw: its color, its rings in world coordinates (0 to 1, Web
+/// Mercator), and their bounds.
+struct Area {
+    rgb: (u8, u8, u8),
+    rings: Vec<Vec<(f64, f64)>>,
+    bounds: (f64, f64, f64, f64),
+}
+
+fn world(lon: f64, lat: f64) -> (f64, f64) {
+    let lat = lat.clamp(-85.05, 85.05).to_radians();
+    ((lon + 180.0) / 360.0, (1.0 - (lat.tan() + 1.0 / lat.cos()).ln() / std::f64::consts::PI) / 2.0)
+}
+
+impl AlertTiles {
+    /// Draw the alerts in force at `t`, with their own outlines or their zones' (those in
+    /// `zones`). The caller drops tiles already drawn ([`crate::Map::put_raster_tile`]).
+    pub fn set(&self, alerts: &[Alert], zones: &HashMap<String, Value>, t: f64) {
+        let rings_of = |g: &Value, out: &mut Vec<Vec<(f64, f64)>>| {
+            let ring = |r: &Value| -> Vec<(f64, f64)> {
+                r.as_array().into_iter().flatten().filter_map(|p| Some(world(p.get(0)?.as_f64()?, p.get(1)?.as_f64()?))).collect()
+            };
+            match g.get("type").and_then(Value::as_str) {
+                Some("Polygon") => out.extend(g["coordinates"].as_array().into_iter().flatten().map(ring)),
+                Some("MultiPolygon") => {
+                    for p in g["coordinates"].as_array().into_iter().flatten() {
+                        out.extend(p.as_array().into_iter().flatten().map(ring));
+                    }
                 }
+                _ => {}
             }
-            pb.close();
+        };
+        let mut areas = Vec::new();
+        for a in alerts.iter().rev().filter(|a| a.in_force(t)) {
+            let mut rings = Vec::new();
+            match &a.geometry {
+                Some(g) => rings_of(g, &mut rings),
+                None => a.zones.iter().filter_map(|z| zones.get(z)).for_each(|g| rings_of(g, &mut rings)),
+            }
+            rings.retain(|r| r.len() >= 3);
+            let mut b = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for &(x, y) in rings.iter().flatten() {
+                b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
+            }
+            if !rings.is_empty() {
+                areas.push(Area { rgb: a.severity.rgb(), rings, bounds: b });
+            }
         }
-        let Some(path) = pb.finish() else { continue };
-        let (r, g, b) = a.severity.rgb();
-        let mut paint = Paint { anti_alias: true, ..Paint::default() };
-        paint.set_color_rgba8(r, g, b, 38);
-        pm.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
-        paint.set_color_rgba8(r, g, b, 230);
-        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        *self.areas.write().unwrap_or_else(|e| e.into_inner()) = areas;
     }
-    crate::timeseries::to_rgba(pm)
+
+    /// Tile `z/x/y` as RGBA, `size` pixels square, or None when no area touches it.
+    pub fn draw(&self, z: u8, x: u32, y: u32, size: u32) -> Option<Vec<u8>> {
+        use tiny_skia::{FillRule, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
+        let n = (1u64 << z) as f64;
+        // The tile in world coordinates, with a little room for outlines just outside it.
+        let pad = 4.0 / size as f64 / n;
+        let (x0, y0, x1, y1) = (x as f64 / n - pad, y as f64 / n - pad, (x + 1) as f64 / n + pad, (y + 1) as f64 / n + pad);
+        let areas = self.areas.read().unwrap_or_else(|e| e.into_inner());
+        let mut pm: Option<Pixmap> = None;
+        let stroke = Stroke { width: 2.0, line_join: LineJoin::Round, ..Stroke::default() };
+        let px = |(wx, wy): (f64, f64)| (((wx * n - x as f64) * size as f64) as f32, ((wy * n - y as f64) * size as f64) as f32);
+        for a in areas.iter().filter(|a| a.bounds.0 <= x1 && a.bounds.2 >= x0 && a.bounds.1 <= y1 && a.bounds.3 >= y0) {
+            let mut pb = PathBuilder::new();
+            for r in &a.rings {
+                let (sx, sy) = px(r[0]);
+                pb.move_to(sx, sy);
+                for &p in &r[1..] {
+                    let (qx, qy) = px(p);
+                    pb.line_to(qx, qy);
+                }
+                pb.close();
+            }
+            let Some(path) = pb.finish() else { continue };
+            let pm = pm.get_or_insert_with(|| Pixmap::new(size, size).expect("tile size"));
+            let (r, g, b) = a.rgb;
+            let mut paint = Paint { anti_alias: true, ..Paint::default() };
+            paint.set_color_rgba8(r, g, b, 38);
+            pm.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+            paint.set_color_rgba8(r, g, b, 230);
+            pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        }
+        // Areas whose bounds touch the tile but that miss it draw nothing: no tile.
+        let rgba = crate::timeseries::to_rgba(pm?);
+        rgba.chunks(4).any(|p| p[3] > 0).then_some(rgba)
+    }
+}
+
+impl crate::raster::TileRender for AlertTiles {
+    fn render(&self, z: u8, x: u32, y: u32, size: u32) -> Option<Vec<u8>> {
+        crate::raster::encode_png(&self.draw(z, x, y, size)?, size, size).ok()
+    }
+}
+
+/// The alert tiles as an overlay image source: 512-pixel tiles, drawn to zoom 14 (enlarged
+/// past it), kept in memory, credited to the NWS.
+pub fn tile_source(tiles: std::sync::Arc<AlertTiles>) -> Result<std::sync::Arc<crate::raster::RasterSource>> {
+    // Never fetched (the renderer comes first); .invalid never resolves, should anything try.
+    let mut s = crate::raster::RasterSource::new("https://alerts.mapterm.invalid/{z}/{x}/{y}.png", false, 14)?;
+    s.tile_px = 512;
+    s.overlay = true;
+    s.cache = false;
+    s.render = Some(tiles);
+    s.name = "alerts".into();
+    s.attribution = CREDIT.into();
+    Ok(std::sync::Arc::new(s))
 }
 
 /// The map layers for alerts from GeoJSON source `source`: a faint fill and an outline in
@@ -490,25 +553,31 @@ mod tests {
     }
 
     #[test]
-    fn renders_areas_in_their_colors() {
+    fn draws_tiles_of_the_areas() {
         let a = parse(SAMPLE).unwrap();
-        let (cam, area) = (crate::Camera::new(-76.5, 38.5, 7.0), ratatui::layout::Rect::new(0, 0, 80, 24));
-        let vp = crate::Viewport::new(&cam, area);
-        let (w, h) = (720, 480);
-        let rgba = render(&a, &HashMap::new(), 1_795_660_000.0, &vp, w, h, (9.0, 20.0));
-        assert_eq!(rgba.len(), (w * h * 4) as usize);
-        // Inside the flood warning's triangle: a faint red; far outside: clear.
+        let tiles = AlertTiles::default();
+        tiles.set(&a, &HashMap::new(), 1_795_660_000.0);
+        // The flood warning's triangle (-77..-76, 38..39) at zoom 8: tile 73/98 holds this point.
+        let (z, x, y) = (8u8, 73u32, 98u32);
+        let n = 256.0;
+        let (wx, wy) = world(-76.3, 38.2);
+        assert_eq!(((wx * n) as u32, (wy * n) as u32), (x, y), "the test's tile");
+        let rgba = tiles.draw(z, x, y, 512).expect("a tile with the area");
         let at = |lon: f64, lat: f64| {
-            let (dx, dy) = vp.dot_ll(lon, lat);
-            let (x, y) = ((dx * 4.5) as usize, (dy * 5.0) as usize);
-            let i = (y * w as usize + x) * 4;
-            [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+            let (wx, wy) = world(lon, lat);
+            let (px, py) = (((wx * n - x as f64) * 512.0) as usize, ((wy * n - y as f64) * 512.0) as usize);
+            rgba[(py * 512 + px) * 4 + 3]
         };
-        let inside = at(-76.3, 38.2);
-        assert!(inside[3] > 20 && inside[3] < 80 && inside[0] > inside[2], "{inside:?}");
-        assert_eq!(at(-77.4, 38.9)[3], 0);
-        // After it ends: nothing drawn.
-        assert!(render(&a, &HashMap::new(), 1_900_000_000.0, &vp, w, h, (9.0, 20.0)).chunks(4).all(|p| p[3] == 0));
+        assert!((20..80).contains(&at(-76.3, 38.2)), "a faint fill inside");
+        assert_eq!(at(-76.9, 38.95), 0, "clear outside");
+        assert!(tiles.draw(8, 10, 10, 512).is_none(), "a tile far away: none");
+        let png = crate::raster::TileRender::render(&tiles, z, x, y, 512).unwrap();
+        assert!(crate::raster::png_has_alpha(&png));
+        // After the alerts end: no tiles.
+        tiles.set(&a, &HashMap::new(), 1_900_000_000.0);
+        assert!(tiles.draw(z, x, y, 512).is_none());
+        let src = tile_source(std::sync::Arc::new(AlertTiles::default())).unwrap();
+        assert!(src.overlay && src.render.is_some() && !src.cache);
     }
 
     #[test]

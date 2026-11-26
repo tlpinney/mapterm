@@ -210,7 +210,8 @@ mapterm --alerts --radar --at here -z 6
 
 The National Weather Service's warnings, watches and advisories (api.weather.gov, public
 domain, no key) as areas outlined and faintly filled by severity (where the terminal shows
-images, an image with smooth outlines once the map is still, braille while it moves): purple extreme, red
+images, image tiles drawn by mapterm with smooth outlines, moved like imagery; braille
+elsewhere): purple extreme, red
 severe, orange moderate, yellow minor. Click one for its text: what it is, until when, who
 issued it, the area, the headline, description and what to do. The status line counts the
 alerts in force (⚠ 431).

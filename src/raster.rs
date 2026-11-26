@@ -66,6 +66,16 @@ pub struct RasterSource {
     /// published and come from many short-lived sources, such as radar scans, all kept in one
     /// place that removes them when they're old.
     pub store: Option<Arc<dyn TileStore>>,
+    /// Draw tiles here instead of fetching them: a layer made from data (weather alert
+    /// areas), shown and moved like imagery. See [`TileRender`].
+    pub render: Option<Arc<dyn TileRender>>,
+}
+
+/// Draws a source's tiles (see [`RasterSource::render`]): PNG bytes for tile `z/x/y`, or
+/// None for an empty one. Called off the main thread.
+pub trait TileRender: Send + Sync {
+    /// The tile's PNG, `size` pixels square.
+    fn render(&self, z: u8, x: u32, y: u32, size: u32) -> Option<Vec<u8>>;
 }
 
 /// Somewhere to keep a source's tiles (see [`RasterSource::store`]). An empty tile means the
@@ -426,6 +436,7 @@ impl RasterSource {
             overlay: false,
             require_alpha: false,
             store: None,
+            render: None,
         })
     }
 
@@ -494,6 +505,7 @@ impl RasterSource {
             overlay: false,
             require_alpha: false,
             store: None,
+            render: None,
         })
     }
 
@@ -526,6 +538,7 @@ impl RasterSource {
             overlay: false,
             require_alpha: false,
             store: None,
+            render: None,
         })
     }
 
@@ -675,6 +688,10 @@ impl RasterSource {
         if self.by_headers {
             return self.tile_by_headers(z, x, y).await;
         }
+        if let Some(r) = &self.render {
+            let (r, size) = (r.clone(), self.tile_px);
+            return Ok(tokio::task::spawn_blocking(move || r.render(z, x, y, size)).await?);
+        }
         if let Some(store) = &self.store {
             if let Some(b) = store.get(z, x, y) {
                 return Ok((!b.is_empty()).then_some(b));
@@ -778,6 +795,15 @@ impl RasterTile {
         }
         (Color::Rgb((r / a).round() as u8, (g / a).round() as u8, (b / a).round() as u8), a / n as f64)
     }
+}
+
+/// RGBA pixels as a PNG, quickly (for tiles made here).
+pub fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>> {
+    use image::ImageEncoder;
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(&mut png, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::NoFilter)
+        .write_image(rgba, w, h, image::ExtendedColorType::Rgba8)?;
+    Ok(png)
 }
 
 /// `a` blended toward `b` by `f` (0 is `a`, 1 is `b`), for fading one frame of a time layer
