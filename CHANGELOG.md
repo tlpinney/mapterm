@@ -15,8 +15,8 @@ All notable changes to mapterm are listed here. The format follows
   transparent). 512-pixel tiles, the scan
   on screen only unless playing, at most 60 tile requests a minute (RainViewer allows 100),
   and its credit "Weather data by RainViewer" (`mapterm::rainviewer`).
-- mapterm's mark on the map: "mt" in braille (⠍⠞), amber and blue on a dark tile as in
-  mapterm.com's icon, at the end of the credits line.
+- mapterm's mark on the map: "mt" in braille (⠍⠞) and the name, "map" amber and "term"
+  blue on a dark tile as on mapterm.com, at the end of the credits line.
 - `mapterm-weather`, a basemap for weather and the default with `--radar` and `--alerts`:
   greys only (water too, since light rain is blue), coastlines and state and country borders
   as lines over the radar, faint motorways, city names that read over rain
