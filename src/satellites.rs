@@ -589,7 +589,7 @@ impl OrbitClass {
 }
 
 /// Earth's gravitational parameter, km³/s².
-const MU: f64 = 398_600.4418;
+const MU: f64 = 398_600.441_8;
 /// Orbits a sidereal day: one is geosynchronous.
 const SIDEREAL: f64 = 1.0027379;
 
