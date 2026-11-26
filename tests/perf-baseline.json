@@ -25,6 +25,19 @@
         "frame p50": 1.51,
         "frame p95": 1.96
       }
+    },
+    "linux-x86_64": {
+      "live_layers": {
+        "GeoJSON refresh p50": 4.3,
+        "aircraft trail image": 71.58,
+        "frame with live layers p95": 4.74,
+        "ship trail image": 60.37,
+        "update 300 aircraft + 500 ships": 0.65
+      },
+      "render_path": {
+        "frame p50": 3.04,
+        "frame p95": 4.52
+      }
     }
   }
 }
