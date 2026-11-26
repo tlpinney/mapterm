@@ -78,7 +78,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 GROUPS is CelesTrak's, comma-separated (default active: every active
                 satellite, ~17,000 with Starlink's ~11,000 unlabelled; or a smaller group:
                 visual, stations, starlink, resource, amateur, weather, gnss, ...).
-                p finds one by name or operator
+                p finds one by name or operator. The panel lists its radio transmitters
+                (frequency, mode) from the SatNOGS DB, kept a day; p radio, fm, lora...
+                filters to the satellites with one active.
                 Elements are cached for 2 hours, as CelesTrak asks
   --sats-color orbit|country|mission
                 color satellites by orbit class (default: LEO, MEO, GEO, GSO, HEO), by
@@ -594,6 +596,12 @@ enum Target {
     Missions(Vec<mapterm::satellites::Mission>),
     /// A satellite operator (Planet, Vantor...).
     Operator(&'static str),
+    /// Satellites with an active downlink: any (""), or in this mode.
+    Radio(String),
+    /// Satellites you can transmit to: an active uplink (repeaters, transponders).
+    Uplink,
+    /// Satellites with a voice or a data channel.
+    Usage(mapterm::satnogs::Use),
     Sat(u64),
     Ship(u32),
     Plane(String),
@@ -673,6 +681,64 @@ fn find(
                 v.push((sc + 42, Hit { target: Target::Operator(op), name: name.to_string(), detail: format!("operator · {n} satellites") }));
             }
         }
+        // Radio, from the SatNOGS DB: any active downlink, or one mode ("fm", "lora").
+        let mut modes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let (mut any, mut up, mut voice, mut data) = (0, 0, 0, 0);
+        for s in sats.iter().chain(hidden) {
+            let mut seen: Vec<&str> = Vec::new();
+            for t in s.radio.iter().filter(|t| t.active && t.downlink_low.is_some()) {
+                if let Some(m) = t.mode.as_deref()
+                    && !seen.contains(&m)
+                {
+                    seen.push(m);
+                    *modes.entry(m).or_insert(0) += 1;
+                }
+            }
+            any += usize::from(s.radio.iter().any(|t| t.active && t.downlink_low.is_some()));
+            up += usize::from(s.radio.iter().any(two_way));
+            let live = |u| s.radio.iter().any(|t| t.active && t.downlink_low.is_some() && t.usage() == Some(u));
+            voice += usize::from(live(mapterm::satnogs::Use::Voice));
+            data += usize::from(live(mapterm::satnogs::Use::Data));
+        }
+        for (u, n, words, name) in [
+            (mapterm::satnogs::Use::Voice, voice, "voice fm ssb phone repeater", "voice (FM, SSB)"),
+            (mapterm::satnogs::Use::Data, data, "data packet aprs telemetry digital", "data (packet, telemetry)"),
+        ] {
+            if n > 0
+                && let Some(sc) = mapterm::fuzzy::score(query, words)
+            {
+                v.push((sc + 44, Hit { target: Target::Usage(u), name: name.into(), detail: format!("SatNOGS · {n} satellites") }));
+            }
+        }
+        if up > 0
+            && let Some(sc) = mapterm::fuzzy::score(query, "uplink repeater transponder transceiver two-way")
+        {
+            v.push((
+                sc + 44,
+                Hit { target: Target::Uplink, name: "with an uplink (repeaters, transponders)".into(), detail: format!("SatNOGS · {up} satellites") },
+            ));
+        }
+        if any > 0
+            && let Some(sc) = mapterm::fuzzy::score(query, "radio transmitters frequencies downlink satnogs")
+        {
+            v.push((
+                sc + 38,
+                Hit { target: Target::Radio(String::new()), name: "with radio (an active downlink)".into(), detail: format!("SatNOGS · {any} satellites") },
+            ));
+        }
+        let q = query.trim().to_lowercase();
+        let q = q.strip_prefix("radio").unwrap_or(&q).trim();
+        if q.len() >= 2 {
+            for (m, n) in &modes {
+                if m.to_lowercase().starts_with(q) {
+                    let exact = if m.eq_ignore_ascii_case(q) { 20 } else { 0 };
+                    v.push((
+                        150 + exact + (*n as f64).log10() as i32,
+                        Hit { target: Target::Radio(m.to_string()), name: format!("radio: {m}"), detail: format!("SatNOGS · {n} satellites") },
+                    ));
+                }
+            }
+        }
     }
     if !query.trim().is_empty() {
         let q = query.trim().to_lowercase();
@@ -734,6 +800,42 @@ fn find(
     }
     v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     v.into_iter().take(200).map(|(_, h)| h).collect()
+}
+
+/// The credits as lines `width` wide: each line starts with a space, credits are joined
+/// with " · " and broken between credits, and only a credit wider than a whole line is
+/// broken inside (at a space when it can be).
+fn credit_lines(items: &[String], width: usize) -> Vec<String> {
+    let room = width.max(8) - 1;
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let len = |s: &str| s.chars().count();
+    for item in items.iter().map(|i| i.trim()).filter(|i| !i.is_empty()) {
+        let need = if cur.is_empty() { len(item) } else { len(&cur) + 3 + len(item) };
+        if need <= room {
+            if !cur.is_empty() {
+                cur += " · ";
+            }
+            cur += item;
+            continue;
+        }
+        if !cur.is_empty() {
+            lines.push(format!(" {cur}"));
+            cur.clear();
+        }
+        // Too long for a line by itself: break it by words, or by characters.
+        let mut rest: Vec<char> = item.chars().collect();
+        while rest.len() > room {
+            let cut = rest[..=room].iter().rposition(|c| *c == ' ').filter(|&i| i > 0).unwrap_or(room);
+            lines.push(format!(" {}", rest[..cut].iter().collect::<String>().trim_end()));
+            rest = rest[cut..].iter().copied().skip_while(|c| *c == ' ').collect();
+        }
+        cur = rest.into_iter().collect();
+    }
+    if !cur.is_empty() {
+        lines.push(format!(" {cur}"));
+    }
+    lines
 }
 
 /// How satellites are colored (o cycles through them).
@@ -798,12 +900,38 @@ struct SatFilter {
     countries: Vec<String>,
     missions: Vec<mapterm::satellites::Mission>,
     operator: Option<&'static str>,
+    /// An active downlink: any (""), or in this mode.
+    radio: Option<String>,
+    /// An active uplink as well: something to transmit to.
+    uplink: bool,
+    /// Voice or data.
+    usage: Option<mapterm::satnogs::Use>,
+}
+
+/// A transmitter you can talk through: active, with an uplink and a downlink.
+fn two_way(t: &mapterm::satnogs::Transmitter) -> bool {
+    t.active && t.uplink_low.is_some() && t.downlink_low.is_some()
 }
 
 impl SatFilter {
     /// Whether it leaves any out.
     fn on(&self) -> bool {
-        !self.countries.is_empty() || !self.missions.is_empty() || self.operator.is_some()
+        !self.countries.is_empty() || !self.missions.is_empty() || self.operator.is_some() || self.radio.is_some() || self.uplink || self.usage.is_some()
+    }
+
+    /// Whether any of the radio conditions is on.
+    fn radio_on(&self) -> bool {
+        self.radio.is_some() || self.uplink || self.usage.is_some()
+    }
+
+    /// Whether one transmitter meets every radio condition (so "uplink" with "voice" is a
+    /// voice channel you can transmit on, not an uplink and a voice channel apart).
+    fn radio_keeps(&self, t: &mapterm::satnogs::Transmitter) -> bool {
+        t.active
+            && t.downlink_low.is_some()
+            && self.radio.as_deref().is_none_or(|m| m.is_empty() || t.mode.as_deref() == Some(m))
+            && (!self.uplink || two_way(t))
+            && self.usage.is_none_or(|u| t.usage() == Some(u))
     }
 
     /// Whether `s` is shown.
@@ -811,6 +939,7 @@ impl SatFilter {
         (self.countries.is_empty() || s.catalog.as_ref().is_some_and(|c| self.countries.contains(&c.owner)))
             && (self.missions.is_empty() || self.missions.contains(&s.mission()))
             && self.operator.is_none_or(|op| s.operator() == Some(op))
+            && (!self.radio_on() || s.radio.iter().any(|t| self.radio_keeps(t)))
     }
 
     /// What it shows, for the status line: " · China · imaging", or nothing.
@@ -828,6 +957,17 @@ impl SatFilter {
         }
         if let Some(op) = self.operator {
             out += &format!(" · {}", op.split(" (").next().unwrap_or(op));
+        }
+        match self.radio.as_deref() {
+            None => {}
+            Some("") => out += " · radio",
+            Some(m) => out += &format!(" · radio {m}"),
+        }
+        if let Some(u) = self.usage {
+            out += &format!(" · {}", u.label());
+        }
+        if self.uplink {
+            out += " · uplink";
         }
         out
     }
@@ -1051,6 +1191,54 @@ fn draw_sat(
             }
             Some(None) => l.push(Line::from(vec![key("next pass"), Span::styled("none over 10° in 24 h", dim)])),
             None => {}
+        }
+    }
+    if !s.radio.is_empty() {
+        l.push(Line::default());
+        l.push(Line::from(vec![key("radio"), Span::styled("SatNOGS DB", dim)]));
+        let active: Vec<&mapterm::satnogs::Transmitter> = s.radio.iter().filter(|t| t.active).collect();
+        let inactive = s.radio.len() - active.len();
+        // As many as fit above the footer, three at least.
+        let room = (inner.height as usize).saturating_sub(l.len() + 3).max(3);
+        let width = inner.width as usize;
+        for t in active.iter().take(room) {
+            let (arrow, freq) = match (t.downlink(), t.uplink()) {
+                (Some(d), _) => ("↓", d),
+                (None, Some(u)) => ("↑", u),
+                (None, None) => (" ", "?".to_string()),
+            };
+            let mode = t.mode.clone().unwrap_or_default();
+            let head = format!(" {arrow} {freq:<9} {mode:<5} ");
+            let mut what = t.description.clone();
+            if t.downlink().is_some()
+                && let Some(up) = t.uplink()
+            {
+                what = format!("{what} · up {up}");
+            }
+            let left = width.saturating_sub(head.chars().count() + usize::from(t.frequency_violation) * 2);
+            if what.chars().count() > left {
+                what = what.chars().take(left.saturating_sub(1)).collect::<String>() + "…";
+            }
+            let mut spans =
+                vec![Span::raw(format!(" {arrow} {freq:<9} ")), Span::styled(format!("{mode:<5} "), TStyle::new().fg(Color::Cyan)), Span::styled(what, dim)];
+            if t.frequency_violation {
+                spans.push(Span::styled(" ⚠", TStyle::new().fg(Color::Yellow)));
+            }
+            l.push(Line::from(spans));
+        }
+        let more = active.len().saturating_sub(room);
+        let mut rest = Vec::new();
+        if active.is_empty() {
+            rest.push("none active".to_string());
+        }
+        if more > 0 {
+            rest.push(format!("{more} more"));
+        }
+        if inactive > 0 {
+            rest.push(format!("{inactive} inactive"));
+        }
+        if !rest.is_empty() {
+            l.push(Line::from(Span::styled(format!("   {}", rest.join(" · ")), dim)));
         }
     }
     l.push(Line::default());
@@ -1897,6 +2085,12 @@ async fn main() -> Result<()> {
     let mut frame_ms = 0.0f64;
     // Rows under the map for the status line, and the credits when they need their own.
     let mut status_rows: u16 = 1;
+    // The credits' own lines (0: they share the status line), kept steady: they grow at once
+    // but shrink only after needing fewer for a few seconds, or when the window is resized,
+    // so a status line that changes length every frame doesn't move the map up and down.
+    let mut credit_rows: u16 = 0;
+    let mut credit_shrink: Option<Instant> = None;
+    let mut credit_width: u16 = 0;
     // Place search: the state, the chosen place (marked on the map), and the geocoder.
     let geocoder = mapterm::geocode::Geocoder::from_env()?;
     let mut search = Search::Off;
@@ -1955,8 +2149,11 @@ async fn main() -> Result<()> {
     // What they're for, from CelesTrak's purpose groups: after the satellites are up (the
     // first time a day it's some twenty small requests).
     let (mtx, mut mrx) = mpsc::unbounded_channel::<(std::collections::HashMap<u64, mapterm::satellites::Mission>, Vec<String>)>();
+    // Their radios, from the SatNOGS DB, after that.
+    type Radio = std::collections::HashMap<u64, Vec<mapterm::satnogs::Transmitter>>;
+    let (rtx, mut rrx) = mpsc::unbounded_channel::<std::result::Result<(Radio, f64, Option<String>), String>>();
     if let Some(groups) = a.sats.clone() {
-        let (otx, mtx) = (otx.clone(), mtx.clone());
+        let (otx, mtx, rtx) = (otx.clone(), mtx.clone(), rtx.clone());
         tokio::spawn(async move {
             loop {
                 let (mut all, mut oldest, mut notes) = (Vec::new(), 0.0f64, Vec::new());
@@ -1988,6 +2185,9 @@ async fn main() -> Result<()> {
                 if mtx.send(mapterm::satellites::load_missions().await).is_err() {
                     return;
                 }
+                if rtx.send(mapterm::satnogs::load().await.map_err(|e| format!("{e:#}"))).is_err() {
+                    return;
+                }
                 tokio::time::sleep(Duration::from_secs(2 * 3600 + 60)).await;
             }
         });
@@ -2009,6 +2209,7 @@ async fn main() -> Result<()> {
     // `p`: the fzf-style finder over everything live (satellites, aircraft, ships).
     let mut finder: Option<Finder> = None;
     // Satellites of other owners, set aside while a country filter is on.
+    let mut radio: std::collections::HashMap<u64, Vec<mapterm::satnogs::Transmitter>> = std::collections::HashMap::new();
     let mut sat_filter = SatFilter { countries: a.sats_country.clone(), ..SatFilter::default() };
     let mut sats_hidden: Vec<mapterm::satellites::Sat> = Vec::new();
     let mut sat_dots_drawn = Instant::now();
@@ -2342,7 +2543,16 @@ async fn main() -> Result<()> {
                     credits.retain(|c| *c != f.attribution);
                     credits.insert(0, f.attribution.clone());
                 }
-                let credits = if credits.is_empty() { basemap_name.clone() } else { credits.join(" · ") };
+                // Satellites drawn as an image have their style layer hidden, but they're on
+                // the map all the same: their credit stays.
+                if sat_dots
+                    && let Some(c) = map.source(SATS).and_then(MapSource::attribution)
+                    && !credits.iter().any(|x| x == c)
+                {
+                    credits.push(c.to_string());
+                }
+                let credit_items = if credits.is_empty() { vec![basemap_name.clone()] } else { credits };
+                let credits = credit_items.join(" · ");
                 // While the finder is open, the status line is its prompt.
                 if let Some(fd) = finder.as_ref() {
                     spans = vec![
@@ -2368,16 +2578,30 @@ async fn main() -> Result<()> {
                 // takes effect from the next frame.
                 let width = s.width.max(1) as usize;
                 let status_width: usize = spans.iter().map(Span::width).sum();
-                let credit = Span::styled(format!("{credits} "), dim);
-                let together = status_width + 2 + credit.width() + 8 <= width;
-                let credit_rows = if together { 0 } else { credit.width().div_ceil(width).clamp(1, 3) as u16 };
+                let together = status_width + 2 + Span::raw(credits.as_str()).width() + 10 <= width;
+                // Otherwise as many lines as they take, broken between credits, up to half
+                // the window.
+                let lines = credit_lines(&credit_items, width);
+                let most = (f.area().height / 2).max(1) as usize;
+                let want = if together { 0 } else { lines.len().min(most) as u16 };
+                if s.width != credit_width || want >= credit_rows {
+                    // Resized, or they need more: at once.
+                    (credit_rows, credit_shrink, credit_width) = (want, None, s.width);
+                } else if credit_shrink.get_or_insert_with(Instant::now).elapsed() >= Duration::from_secs(5) {
+                    // They've needed fewer for 5 s straight (a frame that needs more resets it).
+                    (credit_rows, credit_shrink) = (want, None);
+                }
                 status_rows = 1 + credit_rows;
-                if together || s.height < 2 {
+                if credit_rows == 0 || s.height < 2 {
                     spans.push(Span::styled(format!("· {credits} · q quit"), dim));
                     f.render_widget(Paragraph::new(Line::from(spans)), Rect { y: s.bottom() - 1, height: 1, ..s });
                 } else {
                     let [above, line] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(s);
-                    f.render_widget(Paragraph::new(Line::from(vec![Span::raw(" "), credit])).wrap(ratatui::widgets::Wrap { trim: false }), above);
+                    // Bottom-aligned, so a frame where the rows haven't caught up yet loses
+                    // the top line, not the end of the last.
+                    let shown = lines.len().min(above.height as usize);
+                    let text: Vec<Line> = lines[lines.len() - shown..].iter().map(|l| Line::from(Span::styled(l.clone(), dim))).collect();
+                    f.render_widget(Paragraph::new(text), Rect { y: above.bottom() - shown as u16, height: shown as u16, ..above });
                     spans.push(Span::styled("· q quit", dim));
                     f.render_widget(Paragraph::new(Line::from(spans)), line);
                 }
@@ -2824,6 +3048,23 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Some(r) = rrx.recv() => {
+                    match r {
+                        Ok((by, age, why)) => {
+                            dlog(|| format!("sats: radio for {} satellites from SatNOGS DB, {:.0} h old; {why:?}", by.len(), age / 3600.0));
+                            radio = by;
+                            for s in sats.iter_mut().chain(sats_hidden.iter_mut()) {
+                                s.radio = radio.get(&s.norad).cloned().unwrap_or_default();
+                            }
+                            if sat_filter.radio_on() {
+                                filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                            }
+                            map.set_attribution(SATS, "CelesTrak · SatNOGS DB (CC BY-SA 4.0)")?;
+                        }
+                        // No radio section; the rest works as before.
+                        Err(e) => dlog(|| format!("sats: no radio from SatNOGS DB: {e}")),
+                    }
+                }
                 Some((missions, notes)) = mrx.recv() => {
                     dlog(|| format!("sats: {} missions from groups; {notes:?}", missions.len()));
                     for s in sats.iter_mut().chain(sats_hidden.iter_mut()) {
@@ -2845,6 +3086,7 @@ async fn main() -> Result<()> {
                         sats = loaded;
                         for s in &mut sats {
                             s.group_mission = known.get(&s.norad).copied();
+                            s.radio = radio.get(&s.norad).cloned().unwrap_or_default();
                         }
                         sats_hidden.clear();
                         sats_age = age;
@@ -3010,6 +3252,21 @@ async fn main() -> Result<()> {
                                                     finder = None;
                                                     continue;
                                                 }
+                                                if matches!(target, Target::Radio(_) | Target::Uplink | Target::Usage(_)) {
+                                                    match &target {
+                                                        Target::Radio(m) => sat_filter.radio = Some(m.clone()),
+                                                        Target::Usage(u) => sat_filter.usage = Some(*u),
+                                                        _ => sat_filter.uplink = true,
+                                                    }
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                                    if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
+                                                        selected_sat = None;
+                                                    }
+                                                    note = Some((Instant::now(), format!("{} satellites:{}", sats.len(), sat_filter.describe())));
+                                                    finder = None;
+                                                    continue;
+                                                }
                                                 if let Target::Operator(op) = &target {
                                                     sat_filter.operator = Some(op);
                                                     filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
@@ -3049,11 +3306,11 @@ async fn main() -> Result<()> {
                                                     Target::Sat(n) => sats.iter().find(|s| s.norad == *n).and_then(|s| s.at(now)).map(|f| (f.lon, f.lat)),
                                                     Target::Ship(m) => fleet.get(*m, now - AIS_DELAY).map(|(_, p)| (p.lon, p.lat)),
                                                     Target::Plane(h) => aircraft.get(h, now - adsb_delay).map(|(_, p, _)| (p.lon, p.lat)),
-                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) => None,
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) | Target::Radio(_) | Target::Uplink | Target::Usage(_) => None,
                                                 };
                                                 (selected, selected_ship, selected_sat) = (None, None, None);
                                                 match target {
-                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) => {}
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) | Target::Radio(_) | Target::Uplink | Target::Usage(_) => {}
                                                     Target::Sat(n) => selected_sat = Some(n),
                                                     Target::Ship(m) => selected_ship = Some(m),
                                                     Target::Plane(h) => selected = Some(h),
@@ -3464,5 +3721,24 @@ impl Bucket {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn credits_break_between_credits() {
+        let items: Vec<String> =
+            ["© OpenStreetMap contributors", "OpenFreeMap", "CelesTrak · SatNOGS DB (CC BY-SA 4.0)", "adsb.lol (ODbL 1.0)"].map(String::from).to_vec();
+        let lines = super::credit_lines(&items, 40);
+        assert_eq!(lines, vec![" © OpenStreetMap contributors", " OpenFreeMap", " CelesTrak · SatNOGS DB (CC BY-SA 4.0)", " adsb.lol (ODbL 1.0)"]);
+        assert!(lines.iter().all(|l| l.chars().count() <= 40));
+        // Wide: as few lines as fit.
+        assert_eq!(super::credit_lines(&items, 200).len(), 1);
+        // A credit wider than the line breaks at a space, and nothing is lost.
+        let long = vec!["Imagery © a very long provider name that does not fit".to_string()];
+        let lines = super::credit_lines(&long, 20);
+        assert!(lines.iter().all(|l| l.chars().count() <= 20), "{lines:?}");
+        assert_eq!(lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" "), long[0]);
     }
 }

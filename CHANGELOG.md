@@ -8,6 +8,15 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Satellite radio from the SatNOGS DB (CC BY-SA 4.0, credited with CelesTrak): the
+  satellite panel lists active transmitters (downlink MHz, mode, description, uplink for
+  transceivers and transponders, ⚠ for SatNOGS's frequency-violation flag), and the finder
+  filters to satellites with an active downlink (`radio`), in one mode (`fm`, `lora`), or
+  with an active uplink as well (`uplink`: repeaters and transponders), or carrying `voice`
+  or `data` (from each transmitter's mode and description: `Transmitter::usage`), combining
+  with the other filters; the radio filters hold for one and the same transmitter.
+  One ~4 MB request a day, cached, with the old copy and a 2-hour pause after errors
+  (`mapterm::satnogs`, `Sat::radio`). The CelesTrak cache helper now serves both.
 - A proxy for everything mapterm fetches: `--proxy URL` or `MAPTERM_PROXY`, with
   `socks5h://` (the proxy looks up host names), `socks5://` or `http://`, and an
   optional user name and password in the URL (never printed). It covers the HTTP clients
@@ -107,6 +116,17 @@ All notable changes to mapterm are listed here. The format follows
   to relay while panning over imagery. A terminal that doesn't answer graphics queries keeps
   the old guess; never over SSH. `MAPTERM_KITTY_MEDIUM` still overrides it
   (`kitty::probe_shm`).
+
+### Fixed
+
+- Credits on a narrow screen: they take as many lines above the status as they need (up to
+  half the window), broken between credits rather than mid-word, so the last one is never
+  cut off; before, the line count guessed character wrapping and stopped at three.
+- The credits no longer pop in and out, moving the map: once they have their own lines
+  they keep them until they've needed fewer for 5 seconds (or the window is resized),
+  instead of following a status line whose length changes every frame. And the
+  satellites' credit (CelesTrak, SatNOGS DB) stays while they're drawn as smooth dots;
+  hiding their text layer for that dropped it.
 
 ## [0.4.0] - 2026-11-24
 

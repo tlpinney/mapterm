@@ -104,6 +104,7 @@ pub mod proxy;
 pub mod raster;
 pub mod render;
 pub mod satellites;
+pub mod satnogs;
 pub mod shp;
 pub mod smooth;
 pub mod source;

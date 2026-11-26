@@ -129,6 +129,24 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
   Spire...) are named by their constellation when no group claims them, and every
   geosynchronous satellite left is counted as communications. What's still "other" is
   mostly objects not yet identified (named only by launch) and rideshare objects.
+- **Radio:** the panel lists what the satellite transmits on, from the
+  [SatNOGS DB](https://db.satnogs.org) (Libre Space Foundation's community database, CC
+  BY-SA 4.0): each active transmitter's downlink frequency in MHz, its mode (FM, APRS,
+  SSTV, BPSK, LoRa...) and what it is, the uplink for transceivers and transponders, and
+  ⚠ where SatNOGS flags one as off its coordinated frequency; then how many more and how
+  many inactive. With the next pass over you, that's when to listen and what to tune to.
+  The finder filters to satellites with an active downlink (`radio`), one mode (`fm`,
+  `lora`, `sstv`, `cw`...), or an active uplink too (`uplink`, `repeater`): the ones you
+  can transmit through, with a licence; or `voice` (FM, SSB or AM that's a repeater,
+  transponder or labelled voice) or `data` (digital modes, and FM packet or telemetry).
+  They combine, and the radio ones must hold for the same transmitter: `amateur`, then
+  `uplink`, then `voice` leaves the voice repeaters and transponders you can work (SO-50,
+  AO-27, AO-123, the TEVEL2s, the ISS...); `data` instead of `voice`, the APRS digipeaters
+  and other packet satellites. The labels come from each transmitter's mode and
+  description, so they're a good guide, not a guarantee. The whole list is one request (about 4 MB) kept a day; after an
+  error mapterm uses the old copy and doesn't ask again for 2 hours, and without one the
+  panel just has no radio section. If your network can't reach db.satnogs.org,
+  [`--proxy`](network.md) can.
 - **Filter by mission or operator** from the finder too: `sar`, `weather`, `navigation`,
   `imaging` (Earth observation and SAR together), or an operator: `planet`, `vantor`,
   `iceye`, `umbra`, `spire`, `airbus`... Filters combine (Chinese imaging satellites:
