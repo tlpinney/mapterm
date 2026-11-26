@@ -99,6 +99,7 @@ pub mod planetary;
 pub mod pmtiles;
 pub mod raster;
 pub mod render;
+pub mod satellites;
 pub mod shp;
 pub mod smooth;
 pub mod source;

@@ -37,6 +37,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 rusqlite = { version = "0.41", features = ["bundled"] }
 rustls-native-certs = "0.8"
 serde_json = "1.0.154"
+sgp4 = { version = "2.4", features = ["serde"] }
 sha1 = "0.11"
 shapefile = { version = "0.9.0", features = ["encoding_rs"] }
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }

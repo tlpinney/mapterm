@@ -8,6 +8,13 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Satellites: `--sats [GROUPS]` places satellites from CelesTrak's orbital elements with
+  SGP4 (the `sgp4` crate), computed locally several times a second: ◇ colored by orbit,
+  names, and a panel on click or Tab with altitude, speed, period, the ground track and,
+  with `--at here`, its place in your sky and next pass (`mapterm::satellites`). Elements
+  are cached for 2 hours per group and errors back off 2 hours, following CelesTrak's
+  one-download-per-update policy; the cache shows in `mapterm --cache` as `orbits`.
+
 - When the status line doesn't fit, the credits get their own line above it (up to three,
   wrapped) instead of being cut off; the data's licenses ask for them to show.
 

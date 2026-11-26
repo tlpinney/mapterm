@@ -1,6 +1,7 @@
 # Live layers
 
-Things that move or change while the map is open: where you are, aircraft and ships.
+Things that move or change while the map is open: where you are, aircraft, ships and
+satellites.
 
 ## Your location
 
@@ -88,3 +89,25 @@ from `AISSTREAM_API_KEY` or a command (`--ais-key-cmd 'pass show aisstream/api-k
 
 aisstream.io is free and in beta; it can take several seconds (sometimes tens of
 seconds) to accept a connection.
+
+## Satellites
+
+`--sats` shows satellites, placed from [CelesTrak](https://celestrak.org)'s orbital
+elements with SGP4. No key is needed, and once the elements are in nothing more goes over
+the network: positions are worked out locally, several times a second, so satellites move
+smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
+
+- Groups are CelesTrak's, comma-separated: `--sats` alone is `visual` (the ~100 brightest,
+  with the ISS); others include `stations`, `amateur`, `weather`, `noaa`, `gnss` and
+  `starlink` (about 11,000; there are always a couple of hundred above the horizon).
+- Each satellite is ◇ (the ISS ◆), colored by orbit: low, medium, geostationary.
+- **Click** one (or **Tab** through them when there are no aircraft or ships) for its
+  altitude, speed, period and inclination, and its ground track for the next orbit on the
+  map. With `--at here` the panel shows where it is in your sky when it's up, and its next
+  pass over you that rises at least 10° (rise, highest point, set, in UTC).
+- CelesTrak updates elements every 2 hours and asks for one download per update, blocking
+  repeats. mapterm keeps each group in `~/.cache/mapterm/celestrak` (`mapterm --cache`
+  shows it as `orbits`) and downloads only when that copy is over 2 hours old; after any
+  error it uses the old copy and doesn't ask again for 2 hours. It asks for CSV and gzip,
+  as CelesTrak prefers, and refuses `active` together with `starlink` (the first holds the
+  second).
