@@ -27,13 +27,15 @@ pub(crate) const DISK_TTL: Duration = Duration::from_secs(30 * 86400);
 /// the previous URL, query and all, to the next host. For requests that carry an API key, use
 /// [`keyed_client`].
 ///
+/// It goes through the proxy, if one is set ([`crate::proxy`]).
+///
 /// Every call returns a handle to the same client, so connections (and their TLS sessions)
 /// are reused across tiles, footers and chunks instead of set up again each time.
 pub fn http_client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT
         .get_or_init(|| {
-            reqwest::Client::builder()
+            crate::proxy::apply(reqwest::Client::builder())
                 .user_agent(concat!("mapterm/", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(30))
@@ -52,7 +54,7 @@ pub fn http_client() -> reqwest::Client {
 pub fn keyed_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        crate::proxy::apply(reqwest::Client::builder())
             .user_agent(concat!("mapterm/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))

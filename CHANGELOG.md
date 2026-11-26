@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- A proxy for everything mapterm fetches: `--proxy URL` or `MAPTERM_PROXY`, with
+  `socks5h://` (the proxy looks up host names), `socks5://` or `http://`, and an
+  optional user name and password in the URL (never printed). It covers the HTTP clients
+  (tiles, imagery, styles, search, feeds) and the WebSocket streams (`--ais`), with
+  local addresses going direct (`mapterm::proxy`). A proxy URL that doesn't parse is an
+  error, never a quiet direct connection.
 - Satellites: `--sats [GROUPS]` places satellites from CelesTrak's orbital elements with
   SGP4 (the `sgp4` crate), computed locally several times a second: ◇ colored by orbit,
   names, and a panel on click or Tab with altitude, speed, period, the ground track and,

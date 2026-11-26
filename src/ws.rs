@@ -124,7 +124,8 @@ pub async fn connect(url: &str, opts: Options<'_>) -> Result<WebSocket> {
         Some((h, p)) if !h.contains(']') || h.ends_with(']') => (h.to_string(), p.parse::<u16>().context("WebSocket port")?),
         _ => (authority.to_string(), if tls_on { 443 } else { 80 }),
     };
-    let tcp = tokio::net::TcpStream::connect((host.trim_matches(['[', ']']), port)).await.with_context(|| format!("connecting to {host}:{port}"))?;
+    // Through the proxy, if one is set.
+    let tcp = crate::proxy::tcp(host.trim_matches(['[', ']']), port).await?;
     let _ = tcp.set_nodelay(true);
     let io: Box<dyn Io> = if tls_on {
         let name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.trim_matches(['[', ']']).to_string()).context("server name")?;
