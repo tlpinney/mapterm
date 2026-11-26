@@ -81,8 +81,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 p finds one by name or operator
                 Elements are cached for 2 hours, as CelesTrak asks
   --sats-color orbit|country
-                color satellites by orbit height (default) or by owner (the eight with
-                the most in a color each, the rest gray); o switches while it runs
+                color satellites by orbit height (default) or by owner (the six with
+                the most in a color each, Starlink on its own, everyone else gray); o switches while it runs
   --sats-country CODE[,CODE]
                 only the satellites of these owners: SATCAT codes (US, PRC, CIS, JPN, UK,
                 ESA, ...) or names (china, russia, japan); also from the p finder

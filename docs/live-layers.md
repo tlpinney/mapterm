@@ -112,7 +112,8 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
   only its satellites; "All countries" shows them all again. `--sats-country PRC,JPN`
   starts that way.
 - **`o`** colors satellites by owner instead of orbit height (`--sats-color country` starts
-  that way): the eight countries with the most satellites get a color each, the rest gray.
+  that way): the six with the most satellites get a color each (Starlink on its own, apart
+  from the rest of the USA), and everyone else is gray, as "other" in the legend.
 
 ## Legends
 

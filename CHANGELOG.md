@@ -29,7 +29,8 @@ All notable changes to mapterm are listed here. The format follows
   panel names a satellite's operator for well-known ones (`mapterm::fuzzy`).
 - Legends: `mapterm::legend::Legend`, a box in a corner of the map with what the colors mean
   and how many of each. The viewer shows them for satellites (by orbit, or by country with
-  `o` / `--sats-color country`: the eight biggest owners in a color each), aircraft by
+  `o` / `--sats-color country`: the six biggest owners in a color each, Starlink apart from the rest of the USA, the
+  rest as "other"), aircraft by
   altitude and ships by kind; `L` hides them, and images under the text keep clear of them.
   `examples/satellites_by_country.rs` draws every active satellite colored by owner.
 - Satellites by country: CelesTrak's satellite catalog (SATCAT, kept a day) gives every

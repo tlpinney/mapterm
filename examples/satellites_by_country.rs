@@ -20,7 +20,8 @@ async fn main() -> anyhow::Result<()> {
     for s in &mut sats {
         s.catalog = owners.get(&s.norad).cloned();
     }
-    // The eight owners with the most satellites get a color each; the rest are gray.
+    // The six owners with the most satellites get a color each (Starlink on its own);
+    // everyone else is gray.
     let coloring = Coloring::by_country(&sats);
     let legend = coloring.legend(&sats);
 

@@ -472,17 +472,17 @@ pub fn owner_aliases(code: &str) -> &'static str {
 
 include!("satellites_owners.rs");
 
-/// Colors for the countries with the most satellites, in order (then [`OTHER`]).
-pub const COUNTRY_COLORS: [(u8, u8, u8); 8] = [
-    (0x79, 0xc0, 0xff),
-    (0xff, 0x7b, 0x72),
-    (0xf2, 0xcc, 0x60),
-    (0x7e, 0xe7, 0x87),
-    (0xd2, 0xa8, 0xff),
-    (0xff, 0xa6, 0x57),
-    (0x56, 0xd4, 0xdd),
-    (0xff, 0x6b, 0xcb),
-];
+/// Colors for the six owners with the most satellites (Starlink counted on its own), in
+/// order; everyone else is [`OTHER`].
+pub const COUNTRY_COLORS: [(u8, u8, u8); 6] =
+    [(0x56, 0xd4, 0xdd), (0xff, 0x7b, 0x72), (0x79, 0xc0, 0xff), (0xf2, 0xcc, 0x60), (0x7e, 0xe7, 0x87), (0xd2, 0xa8, 0xff)];
+
+/// The group a satellite is colored and counted in by owner: its owner code, except that
+/// Starlink, two thirds of everything up there, is a group of its own (`STARLINK`), so the
+/// rest of the United States shows.
+pub fn owner_group(s: &Sat) -> Option<&str> {
+    if s.is_starlink() { Some("STARLINK") } else { s.catalog.as_ref().map(|c| c.owner.as_str()) }
+}
 /// The color for every other country.
 pub const OTHER: (u8, u8, u8) = (0x8b, 0x94, 0x9e);
 
@@ -507,12 +507,13 @@ fn orbit_class(mean_motion: f64) -> &'static str {
 }
 
 impl Coloring {
-    /// Color by owner: the eight owners with the most of `sats`.
+    /// Color by owner: the six groups ([`owner_group`]) with the most of `sats`, then
+    /// everyone else.
     pub fn by_country(sats: &[Sat]) -> Coloring {
         let mut counts: HashMap<&str, usize> = HashMap::new();
         for s in sats {
-            if let Some(c) = &s.catalog {
-                *counts.entry(c.owner.as_str()).or_insert(0) += 1;
+            if let Some(g) = owner_group(s) {
+                *counts.entry(g).or_insert(0) += 1;
             }
         }
         let mut v: Vec<(&str, usize)> = counts.into_iter().collect();
@@ -524,7 +525,7 @@ impl Coloring {
     pub fn rgb(&self, s: &Sat, alt_km: f64) -> (u8, u8, u8) {
         match self {
             Coloring::Orbit => orbit_rgb(alt_km),
-            Coloring::Country(top) => s.catalog.as_ref().and_then(|c| top.iter().find(|(code, _)| *code == c.owner)).map_or(OTHER, |(_, rgb)| *rgb),
+            Coloring::Country(top) => owner_group(s).and_then(|g| top.iter().find(|(code, _)| code == g)).map_or(OTHER, |(_, rgb)| *rgb),
         }
     }
 
@@ -547,7 +548,7 @@ impl Coloring {
             Coloring::Country(top) => {
                 let mut n: HashMap<&str, usize> = HashMap::new();
                 for s in sats {
-                    *n.entry(s.catalog.as_ref().map_or("", |c| c.owner.as_str())).or_insert(0) += 1;
+                    *n.entry(owner_group(s).unwrap_or("")).or_insert(0) += 1;
                 }
                 let mut l = crate::legend::Legend::new("satellites by country");
                 let mut shown = 0;
@@ -570,6 +571,7 @@ impl Coloring {
 /// lines.
 pub fn short_owner(code: &str) -> String {
     match code {
+        "STARLINK" => "Starlink (USA)".to_string(),
         "SKOR" | "NKOR" => owner_aliases(code).to_string(),
         _ => match owner_aliases(code).split(' ').next().filter(|a| !a.is_empty()) {
             Some(alias) => alias.to_string(),
@@ -909,6 +911,12 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         assert_eq!(l.entries[0].label, "China");
         assert_eq!(l.entries[0].count, Some(2));
         assert_eq!(Coloring::Orbit.legend(&sats).entries[0].count, Some(3), "all three in low orbit");
+        // Starlink is a group of its own, not part of its owner's.
+        let mut sl = parse_csv(&CSV.replace("\"ISS (ZARYA)\"", "STARLINK-1").replace(",25544,", ",44001,")).remove(0);
+        own(&mut sl, "US");
+        sats.push(sl);
+        let l = Coloring::by_country(&sats).legend(&sats);
+        assert!(l.entries.iter().any(|e| e.label == "Starlink (USA)" && e.count == Some(1)), "{:?}", l.entries);
     }
 
     #[test]
