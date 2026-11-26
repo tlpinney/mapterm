@@ -122,6 +122,10 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
   specific), and knows radar imaging by name (Umbra, ICEYE, Capella, Sentinel-1, RADARSAT,
   TerraSAR-X, COSMO-SkyMed, SAOCOM, NISAR, ALOS, Gaofen-3, StriX, QPS-SAR and more, each
   name checked against CelesTrak's) and the big communications constellations by name.
+  Well-known constellations no group covers (Hulianwang, Yaogan, IRIDE, Jilin, Satellogic,
+  Spire...) are named by their constellation when no group claims them, and every
+  geosynchronous satellite left is counted as communications. What's still "other" is
+  mostly objects not yet identified (named only by launch) and rideshare objects.
 - **Filter by mission or operator** from the finder too: `sar`, `weather`, `navigation`,
   `imaging` (Earth observation and SAR together), or an operator: `planet`, `vantor`,
   `iceye`, `umbra`, `spire`, `airbus`... Filters combine (Chinese imaging satellites:

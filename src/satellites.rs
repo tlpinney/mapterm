@@ -226,10 +226,12 @@ impl Sat {
         }
     }
 
-    /// What it's for: radar imaging and the big communications constellations by name, then
-    /// CelesTrak's purpose groups, else [`Mission::Other`].
+    /// What it's for: radar imaging and the big communications constellations by name; then
+    /// CelesTrak's purpose groups; then well-known constellations no group covers, by name
+    /// (after the groups, so GLONASS's COSMOS satellites stay navigation); else
+    /// [`Mission::Other`].
     pub fn mission(&self) -> Mission {
-        mission_by_name(&self.name).or(self.group_mission).unwrap_or(Mission::Other)
+        mission_by_name(&self.name).or(self.group_mission).or_else(|| mission_by_constellation(&self.name)).unwrap_or(Mission::Other)
     }
 
     /// Minutes per orbit.
@@ -648,10 +650,49 @@ pub fn mission_by_name(name: &str) -> Option<Mission> {
     }
 }
 
+/// Constellations CelesTrak's purpose groups don't cover, by name, used only when no group
+/// claims a satellite.
+const CONSTELLATIONS: [(&str, Mission); 29] = [
+    ("HULIANWANG", Mission::Communications),
+    ("RASSVET", Mission::Communications),
+    ("TIANQI", Mission::Communications),
+    ("KINEIS", Mission::Communications),
+    ("CONNECTA", Mission::Communications),
+    ("GEESAT", Mission::Communications),
+    ("SPACEMOBILE", Mission::Communications),
+    ("GSAT", Mission::Communications),
+    ("ZHONGXING", Mission::Communications),
+    ("YAOGAN", Mission::Military),
+    ("TJS", Mission::Military),
+    ("PRAETORIAN", Mission::Military),
+    ("USA ", Mission::Military),
+    ("COSMOS", Mission::Military),
+    ("IRIDE", Mission::EarthObservation),
+    ("JILIN", Mission::EarthObservation),
+    ("NUSAT", Mission::EarthObservation),
+    ("GAOFEN", Mission::EarthObservation),
+    ("TIANHUI", Mission::EarthObservation),
+    ("SUPERVIEW", Mission::EarthObservation),
+    ("GRUS", Mission::EarthObservation),
+    ("LEMUR", Mission::EarthObservation),
+    ("HAWK-", Mission::EarthObservation),
+    ("YUNHAI", Mission::Weather),
+    ("TOMORROW", Mission::Weather),
+    ("CENTISPACE", Mission::Navigation),
+    ("SHIYAN", Mission::Technology),
+    ("SHIJIAN", Mission::Technology),
+    ("ION ", Mission::Technology),
+];
+
+/// What a satellite is for by its constellation's name, for those no purpose group covers.
+pub fn mission_by_constellation(name: &str) -> Option<Mission> {
+    CONSTELLATIONS.iter().find(|(p, _)| name.starts_with(p)).map(|(_, m)| *m).or_else(|| name.starts_with("YAM-").then_some(Mission::Technology))
+}
+
 /// CelesTrak's purpose groups and what they mean, most specific first (a satellite in
 /// several takes the first): stations, military, navigation, weather, Earth observation,
-/// science, technology, amateur, then communications.
-pub const MISSION_GROUPS: [(&str, Mission); 21] = [
+/// science, technology, amateur, then communications, then the general geosynchronous list.
+pub const MISSION_GROUPS: [(&str, Mission); 22] = [
     ("stations", Mission::SpaceStation),
     ("military", Mission::Military),
     ("gnss", Mission::Navigation),
@@ -673,6 +714,9 @@ pub const MISSION_GROUPS: [(&str, Mission); 21] = [
     ("telesat", Mission::Communications),
     ("x-comm", Mission::Communications),
     ("other-comm", Mission::Communications),
+    // Every active geosynchronous satellite, last: mostly communications, and the weather
+    // and military ones among them are claimed above.
+    ("geo", Mission::Communications),
 ];
 
 /// What CelesTrak's purpose groups say each satellite is for, by NORAD number: each group's
@@ -1302,6 +1346,15 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         assert_eq!(mission_by_name("TIGRISAT"), None);
         assert_eq!(mission_by_name("SARAL"), None);
         assert_eq!(mission_by_name("STARLINK-5859"), Some(Mission::Communications));
+        // Constellations no group covers, but only after the groups have had their say.
+        assert_eq!(mission_by_constellation("YAOGAN-41"), Some(Mission::Military));
+        assert_eq!(mission_by_constellation("HULIANWANG DIGUI-01"), Some(Mission::Communications));
+        assert_eq!(mission_by_constellation("USA 338"), Some(Mission::Military));
+        assert_eq!(mission_by_constellation("USAT"), None);
+        let mut glonass = parse_csv(&CSV.replace("\"ISS (ZARYA)\"", "\"COSMOS 2545 (GLONASS-K)\"")).remove(0);
+        assert_eq!(glonass.mission(), Mission::Military, "no group yet");
+        glonass.group_mission = Some(Mission::Navigation);
+        assert_eq!(glonass.mission(), Mission::Navigation, "the group wins over the name");
         let mut iss = parse_csv(CSV).remove(0);
         assert_eq!(iss.mission(), Mission::Other, "not known until the groups are in");
         iss.group_mission = Some(Mission::SpaceStation);
