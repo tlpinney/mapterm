@@ -32,6 +32,8 @@ https://github.com/user-attachments/assets/8bf59b7f-3156-4820-aeeb-2b138fc5bc2b
   cell colors anywhere else.
 - **Your data:** GeoJSON, CSV, GPX, KML, FlatGeobuf, Shapefiles and GeoParquet, from a file or a URL, drawn over
   the map, with clustering for large point sets.
+- **Live layers:** aircraft from free ADS-B feeds and ships from AIS, gliding between
+  reports with trails, and your own location.
 - **Search and inspect:** find a place and fly there; point at anything to see its
   features and properties, and copy them as JSON.
 - **Scriptable:** `--snapshot` prints a frame as text, ANSI or HTML, and `--pick` prints
@@ -60,9 +62,9 @@ verify it. To use the library in your own app: `cargo add mapterm`.
 ```sh
 mapterm                                                # OpenFreeMap planet, no key needed
 mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lon) at zoom 13
-mapterm --at here                                      # start where you are (see Your location)
-mapterm --adsb --at 38.85,-77.04 -z 10                 # live aircraft over DC (see Live aircraft)
-mapterm --ais --at 38.98,-76.45 -z 10                  # live ships on the Chesapeake (see Live ships)
+mapterm --at here                                      # start where you are
+mapterm --adsb --at 38.85,-77.04 -z 10                 # live aircraft over DC
+mapterm --ais --at 38.98,-76.45 -z 10                  # live ships on the Chesapeake
 mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over HTTP range requests
 mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, offline
 mapterm city.mbtiles                                   # or an MBTiles file
@@ -76,58 +78,7 @@ mapterm --snapshot 100x30 --format png > view.png        #   ... or as an image 
 mapterm --raster esri --snapshot 100x30 --format png > sat.png  # ... over satellite imagery
 ```
 
-`--format describe` describes the view instead of drawing it: its center, size and bounds;
-every visible label with what it is (`transportation_name/primary`, `poi/cafe`, ...), its
-cell, lon/lat and direction and distance from the center; what covers the view (water,
-parks, buildings: their shares and a 25 x 10 grid); the named roads, most
-important first, each with its class, which way it runs, its ends as cells and its length
-in view (`- 17th Street Northwest [primary]: runs north-south, from cell (25, 0) to (25,
-39), about 580 m in view`), also with `--no-labels`. OpenMapTiles and Protomaps tiles
-both work; and each data layer's features nearest the center with their properties. Language
-models read that better than any picture of the map, for few tokens: about 1,700 for a
-busy street view (500 for a quiet one), against ~6,600 for the braille text.
-
-`--format png` draws the view as an image, 16 x 34 pixels per cell (100 x 30 is 1600 x
-1020; ~1,600-2,000 tokens to a model), with smooth fills and lines but no labels, over
-any `--raster` imagery (fetched at the image's resolution; fills that would hide it are
-left out, as in the viewer). Pair it
-with `--format describe` when road layout or other shapes matter.
-
-Tested with Claude Sonnet 5.5 and Haiku 5.5 on street-level views with known answers:
-close-call questions about where labelled places are (30), and, with labels off, where
-water and parks are (30) and which way major roads run (8):
-
-| given | labels (S / H) | areas (S / H) | roads (S / H) |
-|---|---|---|---|
-| braille text | 80% / 60% | 67% / 40% | 38% / 38% |
-| image of the terminal render | 83% / 87% | 87% / 70% | 62% / 12% |
-| `--format describe` | 100% / 100% | 93% / 83% | 62% / 75% |
-| `--format png` | | 83% / 70% | 75% / 75% |
-| `--format png` + `--format describe` | | 93% / 90% | 75% / 75% |
-
-So: the description alone by default; add the PNG when shapes matter. The same facts as
-JSON, protobuf text or base64 protobuf scored no better and cost more tokens (base64
-protobuf about twice the prose). The road set is small (8 questions), and its answers
-come from road colors in the render, so "major" there doesn't always match a road's class.
-The same questions over the Protomaps planet (`--format describe` from Protomaps tiles at the
-same views) score about the same: areas 87% / 77% and roads 75% / 62%, against 90% / 80%
-and 75% / 62% from OpenMapTiles in the same run. The answers come from OpenMapTiles
-renders, and the two datasets differ on a few small green spaces (Georgetown, Paris).
-
-Without `--style`, mapterm draws the source with its own terminal style (OpenMapTiles
-or Protomaps schema, detected from the tiles; `--light` or `t` for the light theme).
-MapLibre styles draw what a terminal can show: colors, fills, lines, labels (bold and
-italic fonts), filters and zoom ranges, and point icons as one-cell symbols (✚ hospital,
-✈ airport, ⋔ restaurant, ◡ café, Ⓑ bus stop, ...). Wide lines draw two or three
-braille dots thick and dashed lines dotted; imagery opacity blends with the
-background in cell-color mode; blur, patterns and 3D are skipped. The
-built-in style shows points of interest from zoom 15, more as you zoom in.
-
-A style file can use local tiles: a source `"url"` of `mbtiles://city.mbtiles` or
-`pmtiles://city.pmtiles` (or a bare path) is read from the style file's folder, and
-`mbtiles:///abs/path.mbtiles` from anywhere, as in MapLibre Native. Vector files are map
-sources, image files raster sources. Point a style like liberty at a downloaded region
-and the whole map works offline. Styles from a URL can't name local files.
+More examples and every option: `mapterm --help`, and the guides below.
 
 ## Controls
 
@@ -147,321 +98,24 @@ They follow the MapLibre GL / Mapbox GL defaults:
   positron, bright, dark and fiord (a `--style` you started with comes first).
   Imagery stays underneath and your GeoJSON layers on top.
 - **`g`** goes to where you are and marks it with a blue dot (see
-  [Your location](#your-location)).
+  [Your location](docs/live-layers.md#your-location)).
 - **`c`** copies the coordinates under the pointer (or the map center) as
   `lat, lon` to the clipboard (OSC 52).
 - Terminal extras: sideways swipes pan; `i` inspect, `v` vector overlay, `n` labels, `t` light/dark theme (built-in style), `q` quit
 
-## Your location
+## More
 
-`--at here` starts the map where you are, zoomed to how precise the fix is, and
-**`g`** flies there (and marks it) at any time. mapterm gets the position from a
-command that prints `LAT LON [ACCURACY_M]`:
-
-- On macOS, [CoreLocationCLI](https://github.com/fulldecent/corelocationcli)
-  (`brew install --cask corelocationcli`), found on `PATH`. It uses Location
-  Services, so the first run asks for permission, and Wi-Fi must be on. (A plain
-  command-line program can't ask for that permission itself.)
-- Anything else with `--location-cmd CMD` or `MAPTERM_LOCATION_CMD`: gpsd
-  (`gpspipe -w -n 5 | jq -r 'select(.class=="TPV") | "\(.lat) \(.lon)"' | head -1`),
-  your phone, or a fixed spot (`echo 38.8895 -77.0353`).
-
-The command runs only for `--at here` and `g`; nothing is sent anywhere.
-
-## Live aircraft
-
-`--adsb` draws live aircraft over the map from a free ADS-B feed that needs no key:
-[adsb.lol](https://api.adsb.lol) (the default, ODbL) or `--adsb fi`
-([adsb.fi](https://github.com/adsbfi/opendata)), or your own readsb-format endpoint
-as a URL with `{lat}`, `{lon}` and `{nm}`. adsb.lol's data is
-[ODbL](https://opendatacommons.org/licenses/odbl/summary/), credited first on the
-status line.
-
-mapterm goes easy on these free services:
-
-- **adsb.lol's quota:** without a key it allows 500 requests a day per address, so
-  mapterm asks every 30 s (about 4 hours of watching). A free
-  [feeder key](https://www.adsb.lol/docs/feeders-only/re-api/) (7,200 a day), from
-  `ADSB_LOL_KEY` or `--adsb-key-cmd`, makes it every 12 s; the key is only sent to
-  adsb.lol. The status line shows the requests left, and as they run low mapterm
-  spreads the rest over the time until the quota resets instead of running out.
-- At most a 60 nm circle (`--adsb-radius`), a bit more than the view; panning away
-  asks sooner, but no more than three times as often.
-- Nothing below zoom 7 (the status line says to zoom in).
-- After an error, 30 s doubling to 5 minutes; after "too many requests", as long as
-  the feed's `Retry-After` says.
-
-- The map switches to `mapterm-aviation`, a dark, quiet style for this: dim land
-  and water, only motorways and larger places, and airports standing out (codes
-  from zoom 7, runways from zoom 10, taxiways and aprons closer in). `m` cycles to
-  the others; `--raster esri-dark` or `--raster esri` with `v` twice (roads and
-  labels off) puts the planes over imagery alone.
-- Each aircraft is an arrow along its track, colored by altitude (gray on the
-  ground, green low, through yellow and orange, to pink at cruise), with its
-  callsign. A trail shows the last 90 s, fading: drawn as an image under the text
-  in terminals with kitty graphics (braille lines would shimmer as they grow).
-- **Click** an aircraft (or **Tab** / **shift+Tab** through them from the middle of
-  the map out) for a live panel: callsign, type, registration, altitude and climb
-  rate, speed, track, squawk, distance from you with `--at here`. **`f`** follows
-  it; **Esc** closes.
-- Aircraft move smoothly: mapterm keeps every fix with the time it was true and
-  draws the aircraft a poll interval in the past, interpolating between real fixes (Cesium's
-  sampled positions), so planes glide through turns instead of overshooting and
-  jumping back. Past the last fix they continue along their track for up to 30 s.
-
-The library side is `mapterm::timeseries` (`SampledPosition`: samples in, position
-at any time out, with trails) and `mapterm::adsb` (`Feed`, `Tracks`), for any
-moving data in your own app: update a GeoJSON source with `set_data` a few times a
-second.
-
-## Live ships
-
-`--ais` draws live ships from [aisstream.io](https://aisstream.io)'s free AIS
-stream. It needs a free key (sign in with GitHub, then create one under API keys),
-from `AISSTREAM_API_KEY` or a command (`--ais-key-cmd 'pass show aisstream/api-key'`).
-
-- Ships stream in over a WebSocket for a box around the view, from zoom 7; there's
-  no polling and no quota. Panning away reconnects with a new box (at most every
-  3 s); after a dropped connection mapterm waits 5 s, doubling to 5 minutes, and
-  three drops right after subscribing (aisstream.io's answer to a bad key) stop it.
-- Each ship is an arrow along its course (a dot when still), colored by kind:
-  cargo, tanker, passenger, fishing, pleasure, tug and service, high speed,
-  military, other. Names show beside them; trails cover the last 10 minutes.
-- Positions arrive every few seconds under way and every few minutes at anchor;
-  ships are drawn 10 s in the past and glide between fixes like aircraft.
-- **Click** a ship (or **Tab** through them when there are no aircraft) for its
-  status (under way, at anchor, moored), speed, course, destination, ETA, size,
-  draught, call sign, IMO and MMSI. Names and voyage details come in their own
-  messages every few minutes, so a ship can show only its MMSI at first.
-- With `--adsb` too, ships draw under the aircraft; a click picks an aircraft
-  before a ship.
-
-aisstream.io is free and in beta; it can take several seconds (sometimes tens of
-seconds) to accept a connection.
-
-## GeoJSON layers
-
-`--geojson FILE|URL` draws your data over the map, as many layers as you like:
-
-```sh
-mapterm --geojson sites.geojson --geojson https://example.com/routes.geojson
-mapterm --geojson stores.csv --geojson run.gpx --geojson places.kml
-mapterm --geojson parcels.shp
-# Overture's buildings, worldwide (512 files, 257 GB), loading only what's on screen:
-mapterm --geojson https://stac.overturemaps.org/2026-10-21.0/buildings/building/collection.json \
-  --at 13.70,-89.20 -z 17
-# Microsoft's current footprints (with heights) and Overture's, side by side:
-mapterm --geojson microsoft-buildings \
-  --geojson https://stac.overturemaps.org/2026-10-21.0/buildings/building/collection.json \
-  --at 38.8880,-76.9950 -z 17
-```
-
-Besides GeoJSON it reads CSV/TSV with latitude/longitude columns (`lat`,
-`latitude`, `lon`, `lng`, `longitude`, any case) or a WKT geometry column, GPX
-(waypoints, tracks, routes), KML (placemarks with their names, descriptions
-and extended data; unzip KMZ first), FlatGeobuf (lon/lat) and Shapefiles
-(lon/lat; the `.dbf` attributes, `.prj` and `.cpg` code page beside the `.shp`
-are read too), and GeoParquet (lon/lat). The format
-comes from the extension, else the content.
-
-GeoParquet is read only where needed. A GeoParquet URL, or a STAC collection of
-GeoParquet files (its `collection.json`, as Overture publishes), loads as the map
-moves: from zoom 14, the chunks under the view are fetched with HTTP range
-requests, nearest the center first, and the farthest are dropped past 600,000
-features. A collection's file index is read once and kept in `~/.cache/mapterm` (used
-without asking the catalog again for a week), and the
-parts of files already read (footers and chunks) are kept in
-`~/.cache/mapterm/geoparquet`, keyed by each file's ETag so a changed file is read
-afresh: revisiting an area needs only a quick check per file. That cache takes at most
-2 GB, least recently used out first; set it with `--geoparquet-cache SIZE` or
-`MAPTERM_GEOPARQUET_CACHE` (`0` turns it off).
-
-`mapterm --cache` lists the caches (map tiles, imagery, GeoParquet, styles and TileJSON,
-Microsoft buildings, STAC indexes) with their sizes and limits; `--cache-clear NAME` empties one, `all` every
-one. Map tiles and imagery are kept in SQLite, an MBTiles file per source in
-`~/.cache/mapterm` (so a cache opens like any MBTiles file), each kind within 2 GB by
-default (`--tile-cache SIZE`, `--imagery-cache SIZE`), least recently used out first.
-Styles and TileJSON are kept a day in `docs.sqlite` (keyed by a hash of the URL, so access
-tokens aren't stored) and then checked with their ETag, so a map you've opened starts
-without waiting on its servers, and opens offline from the last copy. Caches from earlier
-versions (a file per tile) show as `old`: `--cache-clear old` removes them.
-Over San Salvador that's one footer and one 4 MB chunk, about 3 s, out of
-Overture's 257 GB. With `--bbox W,S,E,N` a layer is instead read once for that area
-(local files are read once, in place).
-
-`microsoft-buildings` is Microsoft's Global ML Building Footprints as Microsoft keeps
-them current (refreshed every few weeks, with height estimates; the Planetary
-Computer's copy stopped in 2023). It always uses the newest release: the one Microsoft's
-README links with the latest date, checked once a day (a release's `dataset-links.csv`
-URL also works). They come as one gzipped file per ~78 km tile,
-which can't be read in parts: the first view of a tile downloads it once (DC's is
-78 MB, about 15 s) and splits it into 256 pieces under `~/.cache/mapterm/msbuildings`,
-so later views there load in a second or two. Those tiles take at most 2 GB of disk
-(about twenty dense cities), least recently used out first; set it with
-`--buildings-cache SIZE` or `MAPTERM_BUILDINGS_CACHE` (e.g. `500MB`, `10GB`; `0` keeps
-none between uses). The status bar shows each data layer's
-count of features in view, for comparing layers. Files and
-URLs up to 512 MB. The readers are checked against GDAL on a corpus of real files
-(`tests/differential.rs`).
-
-- Points, lines and polygons (including Multi* and GeometryCollection), each
-  layer in its own color with a legend in the status bar; polygon interiors are
-  tinted (left clear over a raster layer).
-- Features with a `name` (or `title`/`label`) property are labeled.
-- Without `--at`, the map starts zoomed to fit all layers.
-- Inspect mode (`i`) lists your features first, with all their properties, and
-  `--snapshot ... --pick COL,ROW` prints them as JSON lines.
-- Big files stay fast: features are spatially indexed, and a layer with more
-  than 1,000 points clusters them (`◉ 152`) until you zoom in, as MapLibre's
-  `cluster: true` does.
-
-## Raster layers
-
-`--raster` puts an image tile layer under the vector map, by provider name or URL:
-
-```sh
-mapterm --raster esri --at 38.8895,-77.0353 -z 15        # satellite
-mapterm --raster 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
-mapterm --raster gibs --date 2026-10-30 -z 6                # NASA daily imagery
-mapterm --raster naip --at 38.8895,-77.0353 -z 16           # US aerial photos, 60 cm
-mapterm --raster planetary -z 10                            # Sentinel-2, NAIP when zoomed in
-mapterm --raster mall.pmtiles                              # your own imagery, offline
-mapterm --raster ortho.mbtiles                             #   (PMTiles or MBTiles)
-mapterm --raster-list                                      # providers and the keys they need
-```
-
-`--raster` also takes a PMTiles archive of PNG, JPEG or WebP tiles, as a local
-file or an `https://` URL read with range requests: a single file of your own
-imagery that works offline.
-
-| Name | Imagery | Key |
-|---|---|---|
-| `osm` | OpenStreetMap standard map (light use only) | none |
-| `esri` | Esri World Imagery, global satellite | none |
-| `usgs` | USGS National Map imagery, US only, public domain | none |
-| `eox` | Sentinel-2 cloudless 2024, global, ~10 m (CC BY-NC-SA) | none |
-| `gibs` | NASA GIBS daily satellite imagery, ~250 m (`--date`, default yesterday) | none |
-| `naip` | USDA NAIP aerial photos, US only, ~60 cm, public domain; from zoom 12 (Microsoft Planetary Computer) | none |
-| `sentinel2` | Sentinel-2, the latest clear scenes, global, ~10 m; from zoom 9 (Microsoft Planetary Computer) | none |
-| `planetary` | Both: Sentinel-2 from zoom 9 with NAIP on top from zoom 12; Sentinel-2 shows wherever NAIP has nothing | none |
-| `esri-light`, `esri-dark` | Esri Gray Canvas, quiet backgrounds for overlays | none |
-| `vantor` | Vantor (Maxar) Vivid basemap | `VANTOR_API_KEY` |
-| `planet` | Planet basemaps (your subscription's mosaics) | `PL_API_KEY` + a mosaic |
-| `mapbox` | Mapbox Satellite, Retina tiles | `MAPBOX_ACCESS_TOKEN` |
-| `maptiler` | MapTiler Satellite | `MAPTILER_KEY` |
-| `google`, `google-roadmap`, `google-terrain` | Google Maps satellite, road map, terrain (Map Tiles API, billed per tile) | `GOOGLE_MAP_TILES_KEY` |
-
-In a style file, a raster source can name any of these instead of a URL, so you can
-mix providers by zoom yourself (keys come from the same environment variables):
-
-```json
-"sources": {
-  "s2":   {"type": "raster", "mapterm:raster": "sentinel2", "maxzoom": 14},
-  "naip": {"type": "raster", "mapterm:raster": "naip"}
-},
-"layers": [
-  {"id": "s2",   "type": "raster", "source": "s2"},
-  {"id": "naip", "type": "raster", "source": "naip", "minzoom": 12}
-]
-```
-
-API keys never go on the command line: they come from the provider's
-environment variable or from a command that prints the key, such as your password
-manager's CLI:
-
-```sh
-mapterm --raster vantor --raster-key-cmd 'security find-generic-password -s vantor -w'  # macOS Keychain
-mapterm --raster vantor --raster-key-cmd 'op read op://Private/Vantor/credential'      # 1Password
-mapterm --raster vantor --raster-key-cmd 'secret-tool lookup service vantor'           # Linux keyring
-```
-
-Keys are only added to requests (Vantor's as the `maxar-api-key` header) and are
-blanked out of errors. Google's tiles need a session, which mapterm asks for at start;
-the status bar credits "Google Maps" and Google's imagery or map data credits for the
-view (asked again when it settles somewhere new). Google tiles are kept on disk only as
-long as each tile's `Cache-Control` header allows (a day, as of 2026), then checked with
-its `ETag` instead of downloaded again, as Google's terms ask; `--raster-no-cache` turns
-that off. Mapbox's tiles (`--raster mapbox`, and the vector tiles of `mapbox://` styles)
-are cached the same way (12 hours, as of 2026); one token, from `--mapbox-token-cmd` or
-`MAPBOX_ACCESS_TOKEN`, serves both. While the camera moves, paid imagery loads for where it
-will stop, not for the views on the way, and `--raster-limit N|off` caps imagery requests
-a minute (300 by default for keyed providers). Keyed providers don't cache tiles on disk unless you pass
-`--raster-cache`, since commercial licenses often limit storing them. For any
-other service, use its URL with `{key}` where the key goes (filled from
-`MAPTERM_RASTER_KEY` or `--raster-key-cmd`), or for header-based keys
-`--raster-header 'Name: {key}'` (e.g. `'Authorization: Bearer {key}'`). Write `{key}`
-rather than the key itself: anything on the command line shows up in `ps` and in your
-shell history.
-
-Planet serves each customer's named mosaics: list the ones your key can use
-with `mapterm --raster-list-mosaics`, then pick one with
-`--raster planet --raster-param mosaic=NAME` (or `PLANET_MOSAIC`). Planet only
-accepts the key in the tile URL; mapterm still never prints it.
-`--raster-param NAME=VALUE` fills any other `{NAME}` in a custom URL; for GIBS,
-`--raster-param layer=VIIRS_SNPP_CorrectedReflectance_TrueColor` picks another
-layer (JPEG layers at 250 m).
-
-- URLs use `{z}`, `{x}` and `{y}` in any order; for TMS services (rows counted
-  from the bottom) use `{-y}` or add `--tms`.
-- The status bar credits the imagery: Esri, USGS, OpenStreetMap and EOX are
-  known; give anything else with `--raster-attribution TEXT`.
-- On terminals with the kitty graphics protocol (Ghostty, kitty, WezTerm, Rex,
-  and through herdr) tiles are real images underneath the text, so vector labels,
-  lines, markers and inspect draw on top. Each tile is sent once; panning and
-  zooming only move it. Elsewhere the layer becomes cell background colors.
-  `MAPTERM_GRAPHICS=kitty` or `cells` overrides the guess.
-- When the terminal says it can (mapterm asks at startup), tiles go to it through
-  POSIX shared memory instead of inline base64, which the terminal reads and frees
-  itself: Ghostty, kitty, and herdr panes, among others. Over SSH, and in terminals
-  that say no, they're sent inline. `MAPTERM_KITTY_MEDIUM=shm` or `direct` overrides
-  the check.
-- mapterm keeps at most 48 MiB of decoded images in the terminal (herdr allows
-  64 MiB per pane), freeing tiles that are off screen first, so the terminal never
-  drops one that is showing. `MAPTERM_KITTY_BUDGET_MB` changes it.
-- **`v`** cycles the vector overlay: lines and labels, labels only, off. Area
-  fills are always off over a raster layer.
-- Tiles are cached on disk for 30 days and fetched at most two at a time.
-  Respect each tile server's usage policy: OpenStreetMap's own tile servers
-  allow only light use, with attribution.
-
-## Inspect
-
-Press **`i`** to switch to inspect mode, and `i` (or `Esc`) again to leave it.
-
-- **Hover** shows the top feature under the pointer in the status bar.
-- **Click** lists every feature at that spot, drawn or not (roads, street names,
-  buildings, parks, landcover, points of interest...), most specific first,
-  and highlights the selected one on the map.
-- The panel shows the style layer that draws the feature (or that none does),
-  its source layer, geometry type, center, length or area, vertex count, source
-  tile, and all its properties.
-- **Click an entry** or press **Tab / Shift+Tab** to switch between them;
-  **`y`** copies the selected feature as JSON to the clipboard (OSC 52).
-
-For scripts, `--pick` prints the same information as JSON lines:
-
-```sh
-mapterm --at 38.8895,-77.0353 -z 16 --snapshot 100x40 --pick 50,20
-```
-
-## What it reads
-
-- **PMTiles v3**, from a local file or over HTTP range requests (own reader)
-- **MBTiles** files (SQLite), vector or raster, from the command line or a style's
-  `mbtiles://` source
-- **XYZ** URL templates (`…/{z}/{x}/{y}.pbf`) and **TileJSON** endpoints
-- Vector tiles in the **OpenMapTiles** schema (OpenFreeMap, MapTiler) or the
-  **Protomaps** basemap schema, in dark and light styles
-
-Every download has a 30 s timeout and an 8 MB cap, decompression is capped at
-32 MB, and HTTP tiles are cached on disk for up to 30 days, an MBTiles file per source in
-`~/.cache/mapterm` with a size limit (`mapterm --cache` lists the caches).
-
-## Rendering
-
-Roads, rivers and boundaries are braille lines (2x4 dots per character); water,
-parks and buildings fill the cell background; labels avoid each other. While
-sharper tiles load, lower-zoom tiles stand in for them.
+- [Snapshots and scripting](docs/snapshots.md): `--snapshot`, `--format describe` and
+  `png` for language models, `--pick`
+- [Styles and rendering](docs/styles.md): the built-in and MapLibre styles, local
+  tiles, what mapterm reads
+- [Your data and inspecting the map](docs/data-layers.md): GeoJSON, CSV, GPX, KML,
+  FlatGeobuf, Shapefiles, GeoParquet, and `i` inspect
+- [Imagery](docs/imagery.md): satellite and aerial layers, keys and limits
+- [Live layers](docs/live-layers.md): your location, aircraft (`--adsb`), ships
+  (`--ais`)
+- [Use it in your own app](docs/library.md): the library API
+- [Experimental](docs/experimental.md): pixel mode and smooth scrolling
 
 ## Use it in your own app
 
@@ -472,57 +126,11 @@ sources and an ordered list of style layers that say how to draw them.
 let mut map = Map::from_style("liberty").await?;          // any MapLibre style
 map.add_source("sites", MapSource::geojson(&sites)?)?;
 map.add_layer(StyleLayer::fill("sites", "sites").color("#204060"))?;
-map.add_layer(StyleLayer::symbol("pins", "sites")
-    .filter(json!(["==", ["geometry-type"], "Point"]))
-    .glyph("◆").text(json!(["get", "name"])).color("cyan"))?;
-
 map.load_tiles(&ctl.cam, area).await?;
 frame.render_widget(map.view(&ctl.cam), area);
-let under = map.query_rendered_features(&ctl.cam, area, dot, Some(&["pins"]));
 ```
 
-- Styles: `Map::from_style` takes an OpenFreeMap name (`liberty`, `positron`,
-  `bright`, `dark`, `fiord`), a style URL or file, a Mapbox `mapbox://styles/...` URL
-  (after `mapbox::set_access_token`), or `mapterm-dark` /
-  `mapterm-light`, built-in styles tuned for terminal cells. Style layers can
-  also be built in Rust with `StyleLayer`.
-- Change the map with `set_data`, `set_paint`, `set_layout`, `set_filter`,
-  `set_visibility` and `move_layer`. Filters and paint values are MapLibre
-  expressions (`get`, `match`, `case`, `interpolate`, `step`, ... and the legacy
-  filter syntax).
-- A terminal cell can't show line widths, blur or fonts, so only colors,
-  opacity (blended with the background), filters, zoom ranges, `text-field`,
-  bold and italic fonts, `text-anchor` and `symbol-sort-key` are used. The
-  `mapterm:glyph` layout property sets the character drawn at points.
-- GeoJSON sources are spatially indexed, and `with_cluster` (or `cluster: true`
-  in a style) clusters points; clusters carry `point_count` and
-  `point_count_abbreviated`, and `cluster_expansion_zoom` says where they split.
-- `events::Events` turns the pointer and clicks into MapLibre-style layer events
-  (`Click`, `Enter`, `Leave` for the layers you name) and can set a `hover` feature
-  state, so a layer styled with `["feature-state", "hover"]` lights up under the
-  pointer. `set_feature_state` works for any feature with an id (GeoJSON `id`,
-  vector tile ids, or a source's `promoteId` property).
-- Anything else is a `CustomLayer`: `draw` (lines, fills, markers and labels
-  through a `DrawContext`) and `pick`. Markers and labels from every layer are
-  placed together, so they never overlap.
-- `Controller` gives MapLibre-style mouse and keyboard handling and camera
-  moves (`fly_to`, `ease_to`, `fit_bounds`), and `take_click` reports clicks for
-  your own popups and panels. `geocode::Geocoder` searches places.
-
-[`examples/hello_map.rs`](examples/hello_map.rs) builds a basemap from a few
-style layers and adds a pin in about 50 lines, and
-[`examples/style.rs`](examples/style.rs) shows any style
-(`cargo run --release --example style -- dark`). `src/bin/mapterm.rs` is the
-full viewer built on the same `Map` (background tile loading with
-`tile_requests` / `insert_loaded`, kitty images with `kitty_commands`, and
-`query_features` for inspect).
-
-## Experimental: pixel mode
-
-On terminals that show kitty graphics (Ghostty, kitty), `MAPTERM_PIXELS=1`
-draws fills and lines as a real image at the screen's resolution, with smooth edges and
-the style's own line widths and dashes, instead of braille dots. Labels and markers stay
-text. It is rough and may change. Elsewhere the variable is ignored.
+More in [docs/library.md](docs/library.md) and on [docs.rs](https://docs.rs/mapterm).
 
 ## License
 
