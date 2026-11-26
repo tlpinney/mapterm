@@ -823,6 +823,119 @@ fn find(
     v.into_iter().take(200).map(|(_, h)| h).collect()
 }
 
+/// What's running, for which parts of the key list to show.
+#[derive(Clone, Copy)]
+struct HelpOn {
+    radar: bool,
+    alerts: bool,
+    live: bool,
+    sats: bool,
+}
+
+/// The key list: sections of (keys, what they do), those that apply.
+fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+    let mut s = vec![
+        (
+            "map",
+            vec![
+                ("drag · arrows · hjkl", "pan"),
+                ("wheel · + -", "zoom (at the pointer)"),
+                ("double-click", "zoom in (shift: out)"),
+                ("shift+drag", "zoom to a box"),
+                ("g", "go to your location"),
+                ("c", "copy the coordinates"),
+            ],
+        ),
+        (
+            "look",
+            vec![
+                ("m", "next style"),
+                ("t", "light or dark"),
+                ("n", "labels on or off"),
+                ("v", "vector overlay: all, labels, none"),
+                ("L", "legends on or off"),
+            ],
+        ),
+        ("find", vec![("/", "search for a place"), ("i", "inspect: what's under the pointer"), ("y", "copy the inspected feature (JSON)")]),
+    ];
+    if on.live || on.alerts {
+        let mut v = vec![("click · Tab", "select (aircraft, ship, satellite, alert)"), ("Esc", "close the panel")];
+        if on.live {
+            v.insert(1, ("f", "follow the selected one"));
+            v.insert(2, ("p", "finder: names, countries, missions..."));
+        }
+        if on.sats {
+            v.push(("o", "satellites by orbit, country or mission"));
+        }
+        s.push(("live", v));
+    }
+    if on.radar {
+        s.push((
+            "radar and time",
+            vec![
+                ("space", "play the last two hours, or pause"),
+                ("< >", "play backward or forward"),
+                ("[ ]", "slower or faster"),
+                (", .", "a scan back or on (. past the last: now)"),
+                ("R", "radar on or off"),
+                ("timeline", "click or drag: go to a time; wheel: zoom"),
+            ],
+        ));
+    } else if on.alerts {
+        s.push(("time", vec![("timeline", "click or drag: go to a time; wheel: zoom")]));
+    }
+    s.push(("", vec![("?", "this list"), ("q", "quit")]));
+    s
+}
+
+/// The key list over the map, in two columns where it's wide enough.
+fn draw_help(f: &mut ratatui::Frame, area: Rect, on: HelpOn) {
+    use ratatui::style::Modifier;
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let key = TStyle::new().fg(Color::Rgb(0xe1, 0xa0, 0x46));
+    let head = TStyle::new().fg(Color::Rgb(0x50, 0x82, 0xbe)).add_modifier(Modifier::BOLD);
+    let section_lines = |sec: &(&str, Vec<(&str, &str)>)| -> Vec<Line<'static>> {
+        let mut l = Vec::new();
+        if !sec.0.is_empty() {
+            l.push(Line::from(Span::styled(format!(" {}", sec.0), head)));
+        }
+        for (k, what) in &sec.1 {
+            l.push(Line::from(vec![Span::styled(format!("  {k:<22}"), key), Span::raw(what.to_string())]));
+        }
+        l.push(Line::default());
+        l
+    };
+    let sections = help_sections(on);
+    let all: Vec<Vec<Line>> = sections.iter().map(section_lines).collect();
+    let total: usize = all.iter().map(Vec::len).sum();
+    let two = area.width >= 110 && total + 2 > area.height as usize;
+    // Split into two columns at the section nearest half way.
+    let mut cols: Vec<Vec<Line>> = vec![Vec::new()];
+    let mut run = 0;
+    for sec in all {
+        if two && cols.len() == 1 && run >= total / 2 {
+            cols.push(Vec::new());
+        }
+        run += sec.len();
+        cols.last_mut().expect("a column").extend(sec);
+    }
+    let col_w: u16 = 70;
+    let w = (col_w * cols.len() as u16 + 2).min(area.width);
+    let h = (cols.iter().map(Vec::len).max().unwrap_or(0) as u16 + 2).min(area.height);
+    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+    f.render_widget(ratatui::widgets::Clear, r);
+    let block = Block::bordered()
+        .border_style(dim)
+        .title(Line::from(vec![Span::raw(" "), Span::styled("⠍", key), Span::styled("⠞", TStyle::new().fg(Color::Rgb(0x50, 0x82, 0xbe))), Span::raw(" keys ")]))
+        .title_bottom(Line::from(Span::styled(" ? or esc closes ", dim)).right_aligned());
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    for (i, c) in cols.into_iter().enumerate() {
+        let cr = Rect { x: inner.x + i as u16 * col_w, width: col_w.min(inner.width.saturating_sub(i as u16 * col_w)), ..inner };
+        f.render_widget(Paragraph::new(c), cr);
+    }
+}
+
 /// Whether the timeline shows: with radar that has scans (and isn't hidden), or alerts.
 fn timeline_on(radar: &Option<mapterm::timelayer::TimeRaster>, alerts: bool) -> bool {
     alerts || radar.as_ref().is_some_and(|r| !r.is_off() && !r.frames().is_empty())
@@ -2420,6 +2533,8 @@ async fn main() -> Result<()> {
     let mut follow = false;
     // The trail image needs drawing again (new positions, or the view moved).
     let mut trails_dirty = false;
+    // The key list (?), over the map.
+    let mut show_help = false;
     let mut trails_cam: Option<(f64, f64, f64, Rect)> = None;
     // When the view last moved, when the trails were last drawn, and which trail images
     // (aircraft, ships) are up.
@@ -2702,6 +2817,15 @@ async fn main() -> Result<()> {
                 if let Some(r) = box_rect {
                     f.render_widget(Block::bordered().border_style(TStyle::new().fg(Color::Yellow)), r);
                 }
+                if show_help {
+                    let on = HelpOn {
+                        radar: radar.is_some(),
+                        alerts: a.alerts,
+                        live: adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some(),
+                        sats: a.sats.is_some(),
+                    };
+                    draw_help(f, main, on);
+                }
                 let vp = Viewport::new(&cam, m);
                 let km = vp.km_per_col(cam.lat) * 10.0;
                 let dim = TStyle::new().fg(Color::DarkGray);
@@ -2881,7 +3005,7 @@ async fn main() -> Result<()> {
                 }
                 status_rows = 1 + credit_rows;
                 if credit_rows == 0 || s.height < 2 {
-                    spans.push(Span::styled(format!("· {credits} · q quit"), dim));
+                    spans.push(Span::styled(format!("· {credits} · ? keys · q quit"), dim));
                     let row = Rect { y: s.bottom() - 1, height: 1, ..s };
                     f.render_widget(Paragraph::new(Line::from(spans)), row);
                     if logo_w > 0 {
@@ -2897,7 +3021,7 @@ async fn main() -> Result<()> {
                     if logo_w > 0 && shown > 0 {
                         f.render_widget(Paragraph::new(Line::from(logo)), Rect { x: above.right() - LOGO_W, y: above.bottom() - 1, width: LOGO_W, height: 1 });
                     }
-                    spans.push(Span::styled("· q quit", dim));
+                    spans.push(Span::styled("· ? keys · q quit", dim));
                     f.render_widget(Paragraph::new(Line::from(spans)), line);
                 }
             })?;
@@ -3082,6 +3206,10 @@ async fn main() -> Result<()> {
                             t.elapsed().as_secs_f64() * 1000.0
                         )
                     });
+                }
+                if show_help {
+                    // Images sit under the text: take them down so the key list reads.
+                    out.write_all(mapterm::kitty::CLEAR_PLACEMENTS.as_bytes())?;
                 }
                 crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;
             }
@@ -3723,6 +3851,13 @@ async fn main() -> Result<()> {
                                         _ => {}
                                     }
                                 }
+                                if show_help && matches!(k.code, KeyCode::Esc | KeyCode::Char('?')) {
+                                    show_help = false;
+                                    // The images it hid come back on the next frames.
+                                    trails_dirty = true;
+                                    sats_drawn = Instant::now() - Duration::from_secs(10);
+                                    continue;
+                                }
                                 if ctl.key(k) {
                                     continue;
                                 }
@@ -3789,6 +3924,7 @@ async fn main() -> Result<()> {
                                         }
                                         note = Some((Instant::now(), if off { "radar off · R shows it" } else { "radar on" }.into()));
                                     }
+                                    KeyCode::Char('?') => show_help = true,
                                     KeyCode::Char('L') => {
                                         show_legend = !show_legend;
                                         note = Some((Instant::now(), if show_legend { "legend on" } else { "legend off" }.into()));

@@ -84,7 +84,8 @@ More examples and every option: `mapterm --help`, and the guides below.
 
 ## Controls
 
-They follow the MapLibre GL / Mapbox GL defaults:
+They follow the MapLibre GL / Mapbox GL defaults. **`?`** shows them all over the map,
+with the keys for whatever layers are on (radar, alerts, live aircraft and satellites):
 
 - **Scroll / two-finger swipe up and down:** zoom toward the cursor
 - **Drag:** pan, and a fling keeps gliding (inertia)
