@@ -821,6 +821,18 @@ fn find(
     v.into_iter().take(200).map(|(_, h)| h).collect()
 }
 
+/// mapterm's mark, as on mapterm.com and its icon: "mt" in braille (⠍⠞), the m amber and
+/// the t blue (the road and water colors of mapterm's dark style) on the icon's dark tile.
+fn logo_spans() -> Vec<Span<'static>> {
+    let tile = Color::Rgb(0x10, 0x14, 0x18);
+    vec![
+        Span::styled(" ", TStyle::new().bg(tile)),
+        Span::styled("⠍", TStyle::new().fg(Color::Rgb(0xe1, 0xa0, 0x46)).bg(tile)),
+        Span::styled("⠞", TStyle::new().fg(Color::Rgb(0x50, 0x82, 0xbe)).bg(tile)),
+        Span::styled(" ", TStyle::new().bg(tile)),
+    ]
+}
+
 /// The credits as lines `width` wide: each line starts with a space, credits are joined
 /// with " · " and broken between credits, and only a credit wider than a whole line is
 /// broken inside (at a space when it can be).
@@ -2797,10 +2809,13 @@ async fn main() -> Result<()> {
                 // takes effect from the next frame.
                 let width = s.width.max(1) as usize;
                 let status_width: usize = spans.iter().map(Span::width).sum();
-                let together = status_width + 2 + Span::raw(credits.as_str()).width() + 10 <= width;
+                // mapterm's mark at the end of the credits, as on mapterm.com: "mt" in braille.
+                let logo = logo_spans();
+                let logo_w = if width >= 24 { 5 } else { 0 };
+                let together = status_width + 2 + Span::raw(credits.as_str()).width() + 10 + logo_w <= width;
                 // Otherwise as many lines as they take, broken between credits, up to half
                 // the window.
-                let lines = credit_lines(&credit_items, width);
+                let lines = credit_lines(&credit_items, width.saturating_sub(logo_w));
                 let most = (f.area().height / 2).max(1) as usize;
                 let want = if together { 0 } else { lines.len().min(most) as u16 };
                 if s.width != credit_width || want >= credit_rows {
@@ -2813,7 +2828,11 @@ async fn main() -> Result<()> {
                 status_rows = 1 + credit_rows;
                 if credit_rows == 0 || s.height < 2 {
                     spans.push(Span::styled(format!("· {credits} · q quit"), dim));
-                    f.render_widget(Paragraph::new(Line::from(spans)), Rect { y: s.bottom() - 1, height: 1, ..s });
+                    let row = Rect { y: s.bottom() - 1, height: 1, ..s };
+                    f.render_widget(Paragraph::new(Line::from(spans)), row);
+                    if logo_w > 0 {
+                        f.render_widget(Paragraph::new(Line::from(logo)), Rect { x: row.right() - 4, width: 4, ..row });
+                    }
                 } else {
                     let [above, line] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(s);
                     // Bottom-aligned, so a frame where the rows haven't caught up yet loses
@@ -2821,6 +2840,9 @@ async fn main() -> Result<()> {
                     let shown = lines.len().min(above.height as usize);
                     let text: Vec<Line> = lines[lines.len() - shown..].iter().map(|l| Line::from(Span::styled(l.clone(), dim))).collect();
                     f.render_widget(Paragraph::new(text), Rect { y: above.bottom() - shown as u16, height: shown as u16, ..above });
+                    if logo_w > 0 && shown > 0 {
+                        f.render_widget(Paragraph::new(Line::from(logo)), Rect { x: above.right() - 4, y: above.bottom() - 1, width: 4, height: 1 });
+                    }
                     spans.push(Span::styled("· q quit", dim));
                     f.render_widget(Paragraph::new(Line::from(spans)), line);
                 }
