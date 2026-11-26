@@ -21,7 +21,16 @@ cat <<NOTES
 
 | platform | file |
 |---|---|
+| macOS, Apple silicon and Intel (signed, notarized) | \`mapterm-$version-universal-apple-darwin.tar.gz\` |
 | Linux, x86-64 (glibc) | \`mapterm-$version-x86_64-unknown-linux-gnu.tar.gz\` |
+| Linux, ARM64 (glibc) | \`mapterm-$version-aarch64-unknown-linux-gnu.tar.gz\` |
+
+Or the install script, which picks the right one, checks it against \`SHA256SUMS\` (and its
+signature when \`ssh-keygen\` is there) and puts \`mapterm\` in \`~/.local/bin\`:
+
+\`\`\`sh
+curl -fsSL https://raw.githubusercontent.com/tlpinney/mapterm/main/install.sh | sh
+\`\`\`
 
 \`SHA256SUMS\` lists every archive's checksum, and \`SHA256SUMS.sig\` is the maintainer's SSH
 signature of it. The trusted key comes from the signing keys on the maintainer's GitHub
@@ -34,7 +43,7 @@ gh release download $tag --repo tlpinney/mapterm
 gh api users/tlpinney/ssh_signing_keys --jq '.[].key | "tlpinney namespaces=\\"mapterm-release\\" " + .' > allowed_signers
 ssh-keygen -Y verify -f allowed_signers -I tlpinney -n mapterm-release -s SHA256SUMS.sig < SHA256SUMS
 shasum -a 256 -c SHA256SUMS --ignore-missing
-tar xzf mapterm-$version-*.tar.gz
+tar xzf mapterm-$version-<platform>.tar.gz   # the one for your machine, from the table
 \`\`\`
 
 Or build it with Cargo (Rust 1.95 or newer):
@@ -42,6 +51,4 @@ Or build it with Cargo (Rust 1.95 or newer):
 \`\`\`sh
 cargo install --git https://github.com/tlpinney/mapterm --tag $tag
 \`\`\`
-
-macOS: install with Cargo (above) until there are notarized macOS binaries.
 NOTES

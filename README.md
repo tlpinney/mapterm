@@ -49,15 +49,30 @@ Docs, a tour and the full guide: [mapterm.com](https://mapterm.com)
 
 ## Install
 
-With Cargo (Rust 1.95 or newer, from [rustup.rs](https://rustup.rs)):
+**Homebrew** (macOS and Linux):
+
+```sh
+brew install tlpinney/tap/mapterm
+```
+
+**Install script** (macOS and Linux): downloads the release for your machine, checks it
+against the release's signed checksums, and puts `mapterm` in `~/.local/bin`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tlpinney/mapterm/main/install.sh | sh
+```
+
+**Binaries:** macOS (one universal binary, signed and notarized), Linux x86-64 and ARM64 on
+[Releases](https://github.com/tlpinney/mapterm/releases); the release notes show how to
+verify them.
+
+**Cargo** (Rust 1.95 or newer, from [rustup.rs](https://rustup.rs)):
 
 ```sh
 cargo install mapterm
 ```
 
-On Linux (x86-64) you can also download a signed binary from
-[Releases](https://github.com/tlpinney/mapterm/releases); the release notes show how to
-verify it. To use the library in your own app: `cargo add mapterm`.
+To use the library in your own app: `cargo add mapterm`.
 
 ## Try it
 

@@ -152,6 +152,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                           billed providers, none for free ones; also MAPTERM_RASTER_LIMIT)
   --raster-attribution T  credit for the layer (known providers are filled in)
   --tms                   count raster rows from the bottom (TMS) even with a plain {y}
+  --version     print mapterm's version and exit
   --light       light theme (the built-in style; t switches)
   --no-labels   start with labels and symbols hidden (n shows them); with --snapshot, a
                 frame of map lines and fills only
@@ -373,6 +374,10 @@ fn args() -> Result<Args> {
                 // The feed is optional: take the next argument only if it names one.
                 let feed = it.next_if(|n| ["lol", "fi", "adsb.lol", "adsb.fi"].contains(&n.as_str()) || n.contains("{lat}"));
                 a.adsb = Some(feed.unwrap_or_default());
+            }
+            "--version" | "-V" => {
+                println!("mapterm {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
             }
             "--ais" => a.ais = true,
             "--sondes" | "--balloons" => a.sondes = true,
