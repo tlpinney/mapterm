@@ -5,6 +5,12 @@ name: Release
 # release/sign-release.sh; CI never holds the signing key. The crate goes to crates.io
 # only after the maintainer approves the crates-io environment, using trusted publishing
 # (a short-lived token from GitHub's OIDC identity; no crates.io token is stored).
+#
+# Run again by hand for an existing tag, from that tag (the crates-io environment only
+# allows tags): `gh workflow run release.yml --ref vX.Y.Z -f tag=vX.Y.Z`. With
+# `-f only=publish` it skips the builds and the release and just publishes the crate. A
+# release that is already published is never touched: its signed and notarized assets
+# stay as they are.
 on:
   push:
     tags: ["v*"]
@@ -13,6 +19,11 @@ on:
       tag:
         description: "An existing version tag to build, e.g. v0.1.0-alpha.1"
         required: true
+      only:
+        description: "all: build, draft the release (unless published) and publish the crate; publish: only publish the crate"
+        type: choice
+        options: [all, publish]
+        default: all
 
 permissions:
   contents: read
@@ -32,6 +43,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
+      published: ${{ steps.release.outputs.published }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,10 +58,24 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - id: release
+        name: Whether its release is already published
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          draft="$(gh release view "$TAG" --repo "$REPO" --json isDraft --jq .isDraft 2>/dev/null || echo none)"
+          if [ "$draft" = "false" ]; then
+            echo "::notice::$TAG is already published; its release and assets are left as they are"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
 
   build:
     name: Build ${{ matrix.target }}
     needs: check
+    if: github.event.inputs.only != 'publish'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -105,6 +131,7 @@ jobs:
     # Apple certificate or credentials.
     name: Build universal-apple-darwin
     needs: check
+    if: github.event.inputs.only != 'publish'
     runs-on: macos-latest
     timeout-minutes: 40
     steps:
@@ -143,6 +170,9 @@ jobs:
   release:
     name: Draft the release
     needs: [check, build, build-macos]
+    # Never for a published release: that would put it back to draft and replace its signed
+    # assets with these unsigned ones.
+    if: needs.check.outputs.published != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -167,8 +197,12 @@ jobs:
           sh release/notes.sh "$TAG" > notes.md
           pre=""
           case "$TAG" in *-*) pre="--prerelease" ;; esac
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = "false" ]; then
+            echo "::error::$TAG is already published; not touching it"
+            exit 1
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # An existing release goes back to draft until it is signed again.
+            # An existing draft is updated.
             gh release edit "$TAG" --draft=true --notes-file notes.md
             gh release delete-asset "$TAG" SHA256SUMS.sig --yes 2>/dev/null || true
           else
@@ -180,6 +214,8 @@ jobs:
   publish:
     name: Publish to crates.io
     needs: [check, build]
+    # After the builds, or without them (only=publish).
+    if: ${{ !cancelled() && needs.check.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Required reviewers on this environment: the job waits for the maintainer's approval.
@@ -192,10 +228,25 @@ jobs:
         with:
           ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
+      - id: crate
+        name: Whether this version is on crates.io already
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          code="$(curl -s -o /dev/null -w '%{http_code}' -A "mapterm-release (github.com/tlpinney/mapterm)" "https://crates.io/api/v1/crates/mapterm/$VERSION")"
+          if [ "$code" = "200" ]; then
+            echo "::notice::mapterm $VERSION is on crates.io already; nothing to publish"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        if: steps.crate.outputs.exists != 'true'
       - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
         id: auth
+        if: steps.crate.outputs.exists != 'true'
       - name: cargo publish
+        if: steps.crate.outputs.exists != 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish --locked
