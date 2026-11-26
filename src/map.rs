@@ -2502,7 +2502,10 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
                             for it in tile.layer_items(i, l, cam.zoom, bg, env).iter() {
                                 let f = &tile.features[it.feature as usize];
                                 let to_dots = |parts: &[Vec<[f32; 2]>]| -> Vec<Vec<(f64, f64)>> {
-                                    parts.iter().map(|part| part.iter().map(|p| vp.dot((*tx as f64 + p[0] as f64) / n, (*ty as f64 + p[1] as f64) / n)).collect()).collect()
+                                    parts
+                                        .iter()
+                                        .map(|part| part.iter().map(|p| vp.dot((*tx as f64 + p[0] as f64) / n, (*ty as f64 + p[1] as f64) / n)).collect())
+                                        .collect()
                                 };
                                 let dots = to_dots(&f.parts);
                                 let outlined = matches!(it.paint, Resolved::Line { .. } | Resolved::Fill { outline: Some(_), .. });

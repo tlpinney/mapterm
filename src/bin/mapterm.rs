@@ -601,6 +601,10 @@ const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
 const PATH_IMAGE: u32 = 4_000_000_005;
 /// The kitty image of satellite dots and their names.
 const SAT_IMAGE: u32 = 4_000_000_006;
+/// The image of the weather alerts' areas.
+const ALERT_IMAGE: u32 = 4_000_000_007;
+/// The alert areas' style layers (braille, standing in while the map moves).
+const ALERT_LAYERS: [&str; 2] = ["alerts-fill", "alerts-line"];
 /// --ais draws ships this many seconds in the past (ships under way report every 2 to 10 s;
 /// small boats every 30 s, which past the last fix move along their course).
 const AIS_DELAY: f64 = 10.0;
@@ -1748,7 +1752,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
     for id in ids {
         // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
         // it is the clearest view of them.
-        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS {
+        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
         }
         let Some(l) = map.layer(&id) else { continue };
@@ -2237,7 +2241,7 @@ async fn main() -> Result<()> {
     // inline. It asks the terminal, so it runs in raw mode, before the input thread starts.
     // --adsb trails as an image under the text where the terminal shows images: braille lines
     // re-snap to their dot grid as they grow, which shimmers.
-    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some()) && mapterm::kitty::supported();
+    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts) && mapterm::kitty::supported();
     if trails_kitty {
         let _ = map.set_visibility(TRAILS, false);
     }
@@ -2444,8 +2448,15 @@ async fn main() -> Result<()> {
     // since, and which alerts were in force (a hash of their ids).
     let mut alerts_list_new = false;
     let mut alerts_zones_new = false;
+    // When the last outline arrived: from the disk cache they come all at once, so the areas
+    // go up once they stop; from the NWS, one a second, so every 10 s.
+    let mut alerts_zone_at = Instant::now();
     let mut alerts_drawn = Instant::now();
     let mut alerts_in_force: u64 = 0;
+    // Where the terminal shows images, the areas are an image once the map is still: what it
+    // was drawn for (view and data), and whether it's up.
+    let mut alerts_version = 0u64;
+    let mut alert_img: Option<(u64, u64, u64, Rect, u64, usize)> = None;
     let mut selected_alert: Option<String> = None;
     let (natx, mut narx) = mpsc::unbounded_channel::<Result<Vec<mapterm::nws::Alert>>>();
     let (nzreq, mut nzreq_rx) = mpsc::unbounded_channel::<Vec<String>>();
@@ -2607,7 +2618,8 @@ async fn main() -> Result<()> {
             }
             // The alerts in force at the clock's time. Rebuilding the layer means every area's
             // outline again, so only when what's shown changes: a new list, another set in
-            // force, or (at most every 10 s) outlines that arrived meanwhile.
+            // force, or outlines that arrived meanwhile (once they stop, or every 10 s while
+            // they keep coming).
             if a.alerts {
                 let in_force = {
                     use std::hash::{Hash, Hasher};
@@ -2615,8 +2627,10 @@ async fn main() -> Result<()> {
                     alerts.iter().filter(|al| al.in_force(clock_t)).for_each(|al| al.id.hash(&mut h));
                     h.finish()
                 };
-                if alerts_list_new || in_force != alerts_in_force || (alerts_zones_new && alerts_drawn.elapsed() >= Duration::from_secs(10)) {
+                let outlines_due = alerts_zones_new && (alerts_drawn.elapsed() >= Duration::from_secs(10) || alerts_zone_at.elapsed() >= Duration::from_millis(1500));
+                if alerts_list_new || in_force != alerts_in_force || outlines_due {
                     map.set_data(ALERTS, &mapterm::nws::features(&alerts, &alert_zones, clock_t))?;
+                    alerts_version += 1;
                     (alerts_list_new, alerts_zones_new, alerts_drawn, alerts_in_force) = (false, false, Instant::now(), in_force);
                 }
             }
@@ -3110,6 +3124,32 @@ async fn main() -> Result<()> {
                     // still; the cell glyphs and text names stand in while it moves. Full
                     // resolution when there are names to draw (text needs it), else half,
                     // scaled up by the terminal (dots don't).
+                    // Alert areas as an image once the map is still: smooth outlines and a
+                    // translucent fill, under the satellites and the text; the braille layers
+                    // stand in while it moves.
+                    if a.alerts {
+                        let key = (draw_cam.lon.to_bits(), draw_cam.lat.to_bits(), draw_cam.zoom.to_bits(), map_area, alerts_version, legend_rects.len());
+                        if settled && !show_help {
+                            if alert_img != Some(key) {
+                                let (w, h) = ((map_area.width as f64 * cpx.0).round() as u32, (map_area.height as f64 * cpx.1).round() as u32);
+                                let vp = Viewport::new(&draw_cam, map_area);
+                                let mut rgba = mapterm::nws::render(&alerts, &alert_zones, clock_t, &vp, w, h, cpx);
+                                punch(&mut rgba, w, map_area, &legend_rects, cpx);
+                                out.write_all(mapterm::kitty::show_rgba(ALERT_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -500, shm).as_bytes())?;
+                                for id in ALERT_LAYERS {
+                                    let _ = map.set_visibility(id, false);
+                                }
+                                alert_img = Some(key);
+                                dlog(|| format!("alerts: image {w}x{h}, {} alerts", alerts.len()));
+                            }
+                        } else if alert_img.is_some() {
+                            alert_img = None;
+                            out.write_all(mapterm::kitty::free(ALERT_IMAGE).as_bytes())?;
+                            for id in ALERT_LAYERS {
+                                let _ = map.set_visibility(id, true);
+                            }
+                        }
+                    }
                     let want_dots = !sats.is_empty() && settled;
                     if want_dots && sat_dots_drawn.elapsed() >= sat_every {
                         sat_dots_drawn = Instant::now();
@@ -3495,6 +3535,7 @@ async fn main() -> Result<()> {
                 Some((z, g)) = nzrx.recv() => {
                     alert_zones.insert(z, g);
                     alerts_zones_new = true;
+                    alerts_zone_at = Instant::now();
                 }
                 Some(r) = rvrx.recv() => {
                     match r {
@@ -3856,6 +3897,7 @@ async fn main() -> Result<()> {
                                     // The images it hid come back on the next frames.
                                     trails_dirty = true;
                                     sats_drawn = Instant::now() - Duration::from_secs(10);
+                                    alert_img = None;
                                     continue;
                                 }
                                 if ctl.key(k) {

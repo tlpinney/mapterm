@@ -360,6 +360,59 @@ pub fn features(alerts: &[Alert], zones: &HashMap<String, Value>, t: f64) -> Val
     json!({"type": "FeatureCollection", "features": feats})
 }
 
+/// The alerts in force at `t` drawn for the view `vp` into a `w` x `h` image (RGBA rows,
+/// for a kitty image under the text): each area a translucent fill and a smooth outline in
+/// its severity's color, the least severe first so the worst is on top. `cell_px` is the
+/// cell size in the image's pixels.
+pub fn render(alerts: &[Alert], zones: &HashMap<String, Value>, t: f64, vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64)) -> Vec<u8> {
+    use tiny_skia::{FillRule, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
+    let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
+    let px = |lon: f64, lat: f64| {
+        let (dx, dy) = vp.dot_ll(lon, lat);
+        ((dx * cell_px.0 / 2.0) as f32, (dy * cell_px.1 / 4.0) as f32)
+    };
+    let stroke = Stroke { width: (cell_px.0 / 7.0).max(1.2) as f32, line_join: LineJoin::Round, ..Stroke::default() };
+    let rings_of = |g: &Value, out: &mut Vec<Value>| match g.get("type").and_then(Value::as_str) {
+        Some("Polygon") => out.extend(g["coordinates"].as_array().cloned().unwrap_or_default()),
+        Some("MultiPolygon") => {
+            for p in g["coordinates"].as_array().into_iter().flatten() {
+                out.extend(p.as_array().cloned().unwrap_or_default());
+            }
+        }
+        _ => {}
+    };
+    for a in alerts.iter().rev().filter(|a| a.in_force(t)) {
+        let mut rings = Vec::new();
+        match &a.geometry {
+            Some(g) => rings_of(g, &mut rings),
+            None => a.zones.iter().filter_map(|z| zones.get(z)).for_each(|g| rings_of(g, &mut rings)),
+        }
+        let mut pb = PathBuilder::new();
+        for r in &rings {
+            let mut first = true;
+            for p in r.as_array().into_iter().flatten() {
+                let (Some(lon), Some(lat)) = (p.get(0).and_then(Value::as_f64), p.get(1).and_then(Value::as_f64)) else { continue };
+                let (x, y) = px(lon, lat);
+                if first {
+                    pb.move_to(x, y);
+                    first = false;
+                } else {
+                    pb.line_to(x, y);
+                }
+            }
+            pb.close();
+        }
+        let Some(path) = pb.finish() else { continue };
+        let (r, g, b) = a.severity.rgb();
+        let mut paint = Paint { anti_alias: true, ..Paint::default() };
+        paint.set_color_rgba8(r, g, b, 38);
+        pm.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+        paint.set_color_rgba8(r, g, b, 230);
+        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+    crate::timeseries::to_rgba(pm)
+}
+
 /// The map layers for alerts from GeoJSON source `source`: a faint fill and an outline in
 /// each alert's color.
 pub fn layers(source: &str) -> Result<Vec<crate::StyleLayer>> {
@@ -434,6 +487,28 @@ mod tests {
         let tiny = json!({"type": "MultiPolygon", "coordinates": [[[[0.0, 0.0], [0.001, 0.0], [0.001, 0.001], [0.0, 0.0]]]]});
         assert_eq!(simplify(&tiny, SIMPLIFY), Value::Null);
         assert_eq!(simplify(&json!({"type": "Point", "coordinates": [1, 2]}), SIMPLIFY)["type"], "Point");
+    }
+
+    #[test]
+    fn renders_areas_in_their_colors() {
+        let a = parse(SAMPLE).unwrap();
+        let (cam, area) = (crate::Camera::new(-76.5, 38.5, 7.0), ratatui::layout::Rect::new(0, 0, 80, 24));
+        let vp = crate::Viewport::new(&cam, area);
+        let (w, h) = (720, 480);
+        let rgba = render(&a, &HashMap::new(), 1_795_660_000.0, &vp, w, h, (9.0, 20.0));
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // Inside the flood warning's triangle: a faint red; far outside: clear.
+        let at = |lon: f64, lat: f64| {
+            let (dx, dy) = vp.dot_ll(lon, lat);
+            let (x, y) = ((dx * 4.5) as usize, (dy * 5.0) as usize);
+            let i = (y * w as usize + x) * 4;
+            [rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]]
+        };
+        let inside = at(-76.3, 38.2);
+        assert!(inside[3] > 20 && inside[3] < 80 && inside[0] > inside[2], "{inside:?}");
+        assert_eq!(at(-77.4, 38.9)[3], 0);
+        // After it ends: nothing drawn.
+        assert!(render(&a, &HashMap::new(), 1_900_000_000.0, &vp, w, h, (9.0, 20.0)).chunks(4).all(|p| p[3] == 0));
     }
 
     #[test]

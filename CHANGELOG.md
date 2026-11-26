@@ -32,6 +32,10 @@ All notable changes to mapterm are listed here. The format follows
   greys only (water too, since light rain is blue), coastlines and state and country borders
   as lines over the radar, faint motorways, city names that read over rain
   (`stylejson::weather_style`, `Map::weather`); in the `m` cycle.
+- Alert areas as an image where the terminal shows them: smooth outlines and a translucent
+  fill, drawn once the map is still (braille stands in while it moves), above the radar and
+  under the text (`nws::render`). From the disk cache the areas go up as soon as the
+  outlines stop arriving.
 - US weather alerts: `--alerts` draws the NWS's warnings, watches and advisories as areas
   colored by severity, each while it's in force at the clock's time (live, or the radar's);
   click one for its text. Alerts with their own outline show at once; zone outlines come
