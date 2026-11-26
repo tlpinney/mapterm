@@ -17,6 +17,11 @@ All notable changes to mapterm are listed here. The format follows
   and its credit "Weather data by RainViewer" (`mapterm::rainviewer`).
 - mapterm's mark on the map: "mt" in braille (⠍⠞) and the name, "map" amber and "term"
   blue on a dark tile as on mapterm.com, at the end of the credits line.
+- A timeline for the map's clock (`mapterm::timeline`, after Cesium's Timeline widget): tick
+  labels that fit the span, data shaded, real time and the clock's time marked; click or
+  drag to go to a time, the wheel zooms, shift+wheel pans. Under the map with `--radar` or
+  `--alerts` (the selected alert's period shaded). `<` and `>` play the radar backward or
+  forward, `[` and `]` change speed (`Clock::reverse`, `Clock::set_speed`).
 - `mapterm-weather`, a basemap for weather and the default with `--radar` and `--alerts`:
   greys only (water too, since light rain is blue), coastlines and state and country borders
   as lines over the radar, faint motorways, city names that read over rain

@@ -171,8 +171,16 @@ last two hours in 10-minute scans:
 | Key | Does |
 | --- | --- |
 | `space` | play the two hours in a loop (about six seconds), each scan fading into the next; again to pause |
+| `<` `>` | play backward or forward |
+| `[` `]` | slower or faster (60× to 4800×; 1200× plays two hours in six seconds) |
 | `,` `.` | step back or forward one scan; `.` past the latest goes back to now |
 | `R` | hide or show the radar |
+
+A **timeline** sits under the map (after Cesium's): tick labels over a bar, the radar's two
+hours shaded, real time marked ╂ and the clock's time as the needle ●. Click or drag on it
+to go to that time (at or past now goes back to live); the wheel zooms it about the
+pointer, shift+wheel (or a sideways swipe) pans it. With `--alerts`, the selected alert's
+period is shaded too.
 
 The status line shows the scan's time (☂ 22:40 UTC · 20 min ago; ▶ playing, ⏸ paused). It
 looks for new scans every 5 minutes. RainViewer serves detail to zoom 7; closer in, the

@@ -95,9 +95,11 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 course colored by kind (cargo, tanker, passenger, fishing, pleasure, tug);
                 streamed for the area in view from zoom 7; click or Tab for details
   --radar       weather radar over the map: rain and snow worldwide from RainViewer (no
-                key), the last two hours in 10-minute scans. space plays the two hours
-                in a loop (again to pause), , and . step a scan (. past the last goes
-                back to now), R hides or shows it. Detail stops at zoom 7
+                key), the last two hours in 10-minute scans, with a timeline under the
+                map: click or drag it to go to a time, wheel to zoom it. space plays the
+                two hours in a loop (again to pause), < and > play backward or forward,
+                [ and ] slower or faster, , and . step a scan (. past the last goes back
+                to now), R hides or shows it. Detail stops at zoom 7
   --alerts      US weather alerts from the National Weather Service (no key): warnings,
                 watches and advisories as areas colored by severity; click one for its
                 text. Areas that name forecast zones fill in as their outlines arrive
@@ -819,6 +821,11 @@ fn find(
     }
     v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     v.into_iter().take(200).map(|(_, h)| h).collect()
+}
+
+/// Whether the timeline shows: with radar that has scans (and isn't hidden), or alerts.
+fn timeline_on(radar: &Option<mapterm::timelayer::TimeRaster>, alerts: bool) -> bool {
+    alerts || radar.as_ref().is_some_and(|r| !r.is_off() && !r.frames().is_empty())
 }
 
 /// mapterm's mark, as on mapterm.com: "mt" in braille (⠍⠞) and the name, "map" amber and
@@ -2171,6 +2178,15 @@ async fn main() -> Result<()> {
     let mut hover_dot: Option<(f64, f64)> = None;
     let mut list_rows: Vec<(u16, usize)> = Vec::new();
     let mut panel_area = Rect::default();
+    // The timeline (with --radar or --alerts): where it was drawn, the span it shows, and
+    // whether the user moved that span (then it no longer follows the data).
+    let mut timeline_area = Rect::default();
+    let mut timeline = mapterm::timeline::Timeline::new(unix_now() - 7200.0, unix_now() + 900.0);
+    let mut timeline_moved = false;
+    // Playing speeds, map seconds per second (Cesium's shuttle ring): 1200 plays two hours in
+    // six seconds.
+    const SPEEDS: [f64; 7] = [60.0, 150.0, 300.0, 600.0, 1200.0, 2400.0, 4800.0];
+    let mut speed_i = 4usize;
     let mut note: Option<(Instant, String)> =
         (style_warnings > 0).then(|| (Instant::now(), format!("{style_warnings} style properties not drawn (MAPTERM_LOG lists them)")));
     let mut last_cam = cam;
@@ -2588,7 +2604,29 @@ async fn main() -> Result<()> {
                 m.0 = overlays;
             }
             term.draw(|f| {
-                let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(status_rows)]).areas(f.area());
+                let tl_rows = if timeline_on(&radar, a.alerts) && f.area().height >= 12 { 2 } else { 0 };
+                let [main, tl, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(tl_rows), Constraint::Length(status_rows)]).areas(f.area());
+                timeline_area = tl;
+                if tl_rows > 0 {
+                    // It follows the data until moved: the radar's two hours to a little past
+                    // now (alerts alone, an hour back to half a day ahead).
+                    let now = unix_now();
+                    if !timeline_moved {
+                        match radar.as_ref().and_then(|r| r.span()) {
+                            Some((start, _)) => timeline.set_span(start, now + 900.0),
+                            None => timeline.set_span(now - 3600.0, now + 12.0 * 3600.0),
+                        }
+                    }
+                    timeline.clear_highlights();
+                    if let Some((start, stop)) = radar.as_ref().filter(|r| !r.is_off()).and_then(|r| r.span()) {
+                        timeline.highlight(start, stop, Color::Rgb(0x22, 0x36, 0x4d));
+                    }
+                    if let Some(al) = selected_alert.as_ref().and_then(|id| alerts.iter().find(|a| &a.id == id)) {
+                        let (r, g, b) = al.severity.rgb();
+                        timeline.highlight(al.from.unwrap_or(f64::MIN), al.to.unwrap_or(f64::MAX), Color::Rgb(r / 3, g / 3, b / 3));
+                    }
+                    timeline.render(f.buffer_mut(), tl, &clock, now);
+                }
                 let results = matches!(search, Search::Results { .. }) || finder.is_some();
                 let plane = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay));
                 let ship = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY));
@@ -2761,11 +2799,11 @@ async fn main() -> Result<()> {
                         Some(t) => {
                             let ago = ((unix_now() - t) / 60.0).max(0.0).round();
                             let state = if clock.is_playing() {
-                                "▶ "
+                                format!("{} {:.0}× ", if clock.multiplier < 0.0 { "◀" } else { "▶" }, clock.multiplier.abs())
                             } else if clock.is_live() {
-                                ""
+                                String::new()
                             } else {
-                                "⏸ "
+                                "⏸ ".to_string()
                             };
                             let st = if clock.is_live() { dim } else { TStyle::new().fg(Color::Rgb(127, 178, 255)) };
                             spans.push(Span::styled(format!("☂ {state}{} UTC · {ago:.0} min ago ", hhmm(t)), st));
@@ -3697,7 +3735,7 @@ async fn main() -> Result<()> {
                                             note = Some((Instant::now(), "radar paused · space plays · . to now".into()));
                                         } else if let Some((start, stop)) = span {
                                             // Two hours in about six seconds.
-                                            clock.play(start, stop, mapterm::clock::Range::Loop, (stop - start) / 6.0);
+                                            clock.play(start, stop, mapterm::clock::Range::Loop, SPEEDS[speed_i]);
                                             note = Some((Instant::now(), "radar playing the last two hours · space pauses".into()));
                                         }
                                     }
@@ -3714,6 +3752,24 @@ async fn main() -> Result<()> {
                                         } else if let Some(t) = r.frames().step(at, if c == '.' { 1 } else { -1 }) {
                                             clock.seek(t);
                                         }
+                                    }
+                                    KeyCode::Char(c @ ('<' | '>')) if radar.as_ref().is_some_and(|r| !r.frames().is_empty()) => {
+                                        // Play backward or forward (Cesium's reverse button).
+                                        let back = c == '<';
+                                        if let Some((start, stop)) = radar.as_ref().and_then(|r| r.span()) {
+                                            let speed = SPEEDS[speed_i] * if back { -1.0 } else { 1.0 };
+                                            if clock.is_live() {
+                                                clock.seek(stop);
+                                            }
+                                            clock.play(start, stop, mapterm::clock::Range::Loop, speed);
+                                            note = Some((Instant::now(), format!("radar playing {} · space pauses", if back { "backward" } else { "forward" })));
+                                        }
+                                    }
+                                    KeyCode::Char(c @ ('[' | ']')) if radar.is_some() => {
+                                        // Slower or faster (Cesium's shuttle ring).
+                                        speed_i = if c == '[' { speed_i.saturating_sub(1) } else { (speed_i + 1).min(SPEEDS.len() - 1) };
+                                        clock.set_speed(SPEEDS[speed_i]);
+                                        note = Some((Instant::now(), format!("speed {}× (two hours in {:.0} s)", SPEEDS[speed_i], 7200.0 / SPEEDS[speed_i])));
                                     }
                                     KeyCode::Char('R') if radar.is_some() => {
                                         let r = radar.as_mut().expect("checked");
@@ -3924,6 +3980,40 @@ async fn main() -> Result<()> {
                                         None => ((cell.0 as f64 - ax) * 2.0 + 1.0, (cell.1 as f64 - ay) * 4.0 + 2.0),
                                     }
                                 });
+                                // On the timeline: click or drag to move the clock there (at or past
+                                // now: live), the wheel zooms it about the pointer, shift+wheel pans.
+                                if timeline_area.height > 0 && timeline_area.contains(pos) {
+                                    let bar = Rect { y: timeline_area.y + 1, height: 1, ..timeline_area };
+                                    let at = timeline.time_at(bar, cell.0);
+                                    let shift = m.modifiers.contains(KeyModifiers::SHIFT);
+                                    match m.kind {
+                                        event::MouseEventKind::Down(event::MouseButton::Left) | event::MouseEventKind::Drag(event::MouseButton::Left) => {
+                                            if let Some(t) = at {
+                                                if t >= unix_now() - 30.0 {
+                                                    clock.go_live(unix_now());
+                                                } else {
+                                                    clock.seek(t);
+                                                }
+                                            }
+                                        }
+                                        event::MouseEventKind::ScrollUp | event::MouseEventKind::ScrollDown => {
+                                            let out = m.kind == event::MouseEventKind::ScrollDown;
+                                            if shift {
+                                                timeline.pan((timeline.stop - timeline.start) * if out { 0.1 } else { -0.1 });
+                                            } else if let Some(t) = at {
+                                                timeline.zoom(if out { 1.25 } else { 0.8 }, t);
+                                            }
+                                            timeline_moved = true;
+                                        }
+                                        event::MouseEventKind::ScrollLeft | event::MouseEventKind::ScrollRight => {
+                                            let back = m.kind == event::MouseEventKind::ScrollLeft;
+                                            timeline.pan((timeline.stop - timeline.start) * if back { -0.1 } else { 0.1 });
+                                            timeline_moved = true;
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
                                 // Clicks in the inspector select a feature; the map never sees them.
                                 if panel_area.width > 0 && panel_area.contains(pos) {
                                     if m.kind == event::MouseEventKind::Down(event::MouseButton::Left)

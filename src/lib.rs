@@ -116,6 +116,7 @@ pub mod store;
 pub mod stylejson;
 pub mod tilecache;
 pub mod timelayer;
+pub mod timeline;
 pub mod timeseries;
 pub mod ws;
 
