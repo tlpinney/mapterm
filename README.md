@@ -62,6 +62,7 @@ mapterm                                                # OpenFreeMap planet, no 
 mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lon) at zoom 13
 mapterm --at here                                      # start where you are (see Your location)
 mapterm --adsb --at 38.85,-77.04 -z 10                 # live aircraft over DC (see Live aircraft)
+mapterm --ais --at 38.98,-76.45 -z 10                  # live ships on the Chesapeake (see Live ships)
 mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over HTTP range requests
 mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, offline
 mapterm city.mbtiles                                   # or an MBTiles file
@@ -212,6 +213,31 @@ The library side is `mapterm::timeseries` (`SampledPosition`: samples in, positi
 at any time out, with trails) and `mapterm::adsb` (`Feed`, `Tracks`), for any
 moving data in your own app: update a GeoJSON source with `set_data` a few times a
 second.
+
+## Live ships
+
+`--ais` draws live ships from [aisstream.io](https://aisstream.io)'s free AIS
+stream. It needs a free key (sign in with GitHub, then create one under API keys),
+from `AISSTREAM_API_KEY` or a command (`--ais-key-cmd 'pass show aisstream/api-key'`).
+
+- Ships stream in over a WebSocket for a box around the view, from zoom 7; there's
+  no polling and no quota. Panning away reconnects with a new box (at most every
+  3 s); after a dropped connection mapterm waits 5 s, doubling to 5 minutes, and
+  three drops right after subscribing (aisstream.io's answer to a bad key) stop it.
+- Each ship is an arrow along its course (a dot when still), colored by kind:
+  cargo, tanker, passenger, fishing, pleasure, tug and service, high speed,
+  military, other. Names show beside them; trails cover the last 10 minutes.
+- Positions arrive every few seconds under way and every few minutes at anchor;
+  ships are drawn 10 s in the past and glide between fixes like aircraft.
+- **Click** a ship (or **Tab** through them when there are no aircraft) for its
+  status (under way, at anchor, moored), speed, course, destination, ETA, size,
+  draught, call sign, IMO and MMSI. Names and voyage details come in their own
+  messages every few minutes, so a ship can show only its MMSI at first.
+- With `--adsb` too, ships draw under the aircraft; a click picks an aircraft
+  before a ship.
+
+aisstream.io is free and in beta; it can take several seconds (sometimes tens of
+seconds) to accept a connection.
 
 ## GeoJSON layers
 

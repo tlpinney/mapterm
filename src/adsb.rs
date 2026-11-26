@@ -396,42 +396,10 @@ impl Tracks {
     }
 }
 
-/// An RGBA image (not premultiplied) of the trails at time `t`, `w` x `h` pixels, for a map
-/// drawn by `vp` in cells of `cell_px` pixels: anti-aliased lines in the altitude colors,
-/// fading out over `seconds`. Meant to go under the text as a kitty image, where braille
-/// trails would shimmer as they grow.
-pub fn render_trails(tracks: &Tracks, t: f64, seconds: f64, vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64)) -> Vec<u8> {
-    use tiny_skia::{LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
-    let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
-    // Braille dots are 2 per cell across and 4 down.
-    let (sx, sy) = (cell_px.0 / 2.0, cell_px.1 / 4.0);
-    let stroke = Stroke { width: (cell_px.0 / 5.0).clamp(1.5, 4.0) as f32, line_cap: LineCap::Round, ..Stroke::default() };
-    for tr in tracks.by_hex.values().filter(|tr| !tr.latest.on_ground) {
-        let pts = tr.path.trail_samples(t, seconds);
-        for pair in pts.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            let ((ax, ay), (bx, by)) = (vp.dot_ll(a.lon, a.lat), vp.dot_ll(b.lon, b.lat));
-            let mut pb = PathBuilder::new();
-            pb.move_to((ax * sx) as f32, (ay * sy) as f32);
-            pb.line_to((bx * sx) as f32, (by * sy) as f32);
-            let Some(path) = pb.finish() else { continue };
-            // Newest end bright, fading to nothing `seconds` back.
-            let age = (t - b.t).max(0.0) / seconds;
-            let alpha = (1.0 - age).clamp(0.0, 1.0) * 0.85;
-            let (r, g, bl) = altitude_rgb(b.alt.unwrap_or(0.0));
-            let mut paint = Paint::default();
-            paint.set_color_rgba8(r, g, bl, (alpha * 255.0) as u8);
-            paint.anti_alias = true;
-            pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-        }
-    }
-    pm.pixels()
-        .iter()
-        .flat_map(|p| {
-            let c = p.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect()
+/// The airborne aircraft's trail paths at their altitude colors, for
+/// [`crate::timeseries::render_trails`].
+pub fn trail_paths(tracks: &Tracks) -> impl Iterator<Item = (&SampledPosition, (u8, u8, u8))> {
+    tracks.by_hex.values().filter(|tr| !tr.latest.on_ground).map(|tr| (&tr.path, altitude_rgb(tr.latest.alt_ft.unwrap_or(0.0))))
 }
 
 /// The altitude colors of [`by_altitude`], as RGB for images.
@@ -559,7 +527,7 @@ mod tests {
         tracks.update(ac, 105.0);
         let vp = crate::Viewport::new(&crate::Camera::new(-76.97, 38.9, 11.0), ratatui::layout::Rect::new(0, 0, 40, 10));
         let (w, h) = (40 * 8, 10 * 16);
-        let rgba = render_trails(&tracks, 105.0, 90.0, &vp, w, h, (8.0, 16.0));
+        let rgba = crate::timeseries::render_trails(trail_paths(&tracks), 105.0, 90.0, &vp, w, h, (8.0, 16.0));
         assert_eq!(rgba.len(), (w * h * 4) as usize);
         let drawn = rgba.chunks(4).filter(|p| p[3] > 0).count();
         assert!(drawn > 50, "the trail is drawn: {drawn} pixels");

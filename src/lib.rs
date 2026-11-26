@@ -69,6 +69,7 @@
 #![warn(missing_docs)]
 
 pub mod adsb;
+pub mod ais;
 pub mod cache;
 pub mod cluster;
 pub mod describe;

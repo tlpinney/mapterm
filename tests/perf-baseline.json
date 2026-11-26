@@ -1,0 +1,30 @@
+{
+  "bytes": {
+    "live_layers": {
+      "per refresh frame": 2307.0
+    },
+    "render_path": {
+      "largest frame": 71248.0,
+      "per frame held still": 25.0,
+      "total over the path": 8788561.0
+    },
+    "viewer_pans": {
+      "sent to the terminal over the run": 3318716.0
+    }
+  },
+  "ms": {
+    "macos-aarch64": {
+      "live_layers": {
+        "GeoJSON refresh p50": 1.91,
+        "aircraft trail image": 28.26,
+        "frame with live layers p95": 2.0,
+        "ship trail image": 20.97,
+        "update 300 aircraft + 500 ships": 0.38
+      },
+      "render_path": {
+        "frame p50": 1.51,
+        "frame p95": 1.96
+      }
+    }
+  }
+}

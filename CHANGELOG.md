@@ -8,6 +8,17 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Live ships: `--ais` streams ships from aisstream.io (free key: `AISSTREAM_API_KEY` or
+  `--ais-key-cmd`) over a WebSocket for the area in view: arrows along the course colored
+  by kind, names, 10-minute trails, and a panel on click or Tab (status, speed, course,
+  destination, ETA, size, MMSI). It reconnects with backoff and stops when the key is
+  refused (`mapterm::ais`).
+- Trail images are taken down while the map moves and drawn again once it settles, at most
+  once a second (each is a full-screen image the terminal must take in).
+- Nightly performance tests (`tests/perf.rs`): pans and zooms over pinned tiles, live
+  layers under load, and the viewer itself panning with a local ADS-B feed, checked
+  against `tests/perf-baseline.json`.
+
 - Live aircraft: `--adsb [lol|fi|URL]` draws aircraft from a free ADS-B feed (adsb.lol by
   default) as arrows along their tracks, colored by altitude, with callsigns and 90 s
   trails, refreshed for the area in view (`mapterm::adsb`). Gentle on the free feeds:
