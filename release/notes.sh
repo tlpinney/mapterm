@@ -22,8 +22,11 @@ cat <<NOTES
 | platform | file |
 |---|---|
 | macOS, Apple silicon and Intel (signed, notarized) | \`mapterm-$version-universal-apple-darwin.tar.gz\` |
-| Linux, x86-64 (glibc) | \`mapterm-$version-x86_64-unknown-linux-gnu.tar.gz\` |
+| Linux, x86-64 / amd64 (glibc) | \`mapterm-$version-x86_64-unknown-linux-gnu.tar.gz\` |
 | Linux, ARM64 (glibc) | \`mapterm-$version-aarch64-unknown-linux-gnu.tar.gz\` |
+
+The Linux builds need glibc 2.35 or newer (Ubuntu 22.04, Debian 12, RHEL 10 and later). They
+don't run on musl systems such as Alpine; there, build it with Cargo (below).
 
 Or the install script, which picks the right one, checks it against \`SHA256SUMS\` (and its
 signature when \`ssh-keygen\` is there) and puts \`mapterm\` in \`~/.local/bin\`:

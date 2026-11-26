@@ -62,9 +62,10 @@ against the release's signed checksums, and puts `mapterm` in `~/.local/bin`:
 curl -fsSL https://raw.githubusercontent.com/tlpinney/mapterm/main/install.sh | sh
 ```
 
-**Binaries:** macOS (one universal binary, signed and notarized), Linux x86-64 and ARM64 on
-[Releases](https://github.com/tlpinney/mapterm/releases); the release notes show how to
-verify them.
+**Binaries:** macOS (one universal binary, signed and notarized), Linux x86-64 (amd64) and
+ARM64; the Linux builds need glibc 2.35 or newer (Ubuntu 22.04, Debian 12, RHEL 10 and
+later; not musl systems such as Alpine, where Cargo works). They're on
+[Releases](https://github.com/tlpinney/mapterm/releases), with notes on how to verify them.
 
 **Cargo** (Rust 1.95 or newer, from [rustup.rs](https://rustup.rs)):
 
