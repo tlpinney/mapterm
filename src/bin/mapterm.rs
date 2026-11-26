@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--radar] [--alerts] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -48,8 +48,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 moves: only the chunks under the view, from zoom 14. `microsoft-buildings`
                 (or a dataset-links.csv URL) is Microsoft's current building footprints, each
                 ~78 km tile downloaded once and kept split in ~/.cache/mapterm
-  --cache       show mapterm's disk caches (tiles, imagery, geoparquet, buildings, stac,
-                and old files from earlier versions): how big, and their limits; then exit
+  --cache       show mapterm's disk caches (tiles, imagery, geoparquet, docs, buildings,
+                stac, orbits, radio, zones, radar, outages, and old files from earlier
+                versions): how big, and their limits; then exit
   --cache-clear NAME|all  empty one cache, or all of them, then exit
   --tile-cache SIZE, --imagery-cache SIZE  disk for map tiles and for imagery (default
                 2GB each, least recently used out first; also MAPTERM_TILE_CACHE,
@@ -106,6 +107,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 text. Areas that name forecast zones fill in as their outlines arrive
                 (one a second, kept 90 days). With --radar, the alerts in force at the
                 radar's time
+  --outages     power outages in Pennsylvania from the state's outage map (PEMA and
+                PennDOT, no key): counties, and from zoom 9 municipalities, shaded by
+                the share of customers out; click one for its numbers. The state
+                updates it every 15 minutes; mapterm asks every 5
   --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
                 this computer's time zone
   --sondes      live weather balloons (radiosondes) from SondeHub, tracked by amateur
@@ -217,6 +222,8 @@ struct Args {
     sondes: bool,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
+    /// --outages: Pennsylvania power outages (PEMA / PennDOT).
+    outages: bool,
     /// --utc: show times in UTC rather than the computer's time zone.
     utc: bool,
     /// --ais-key-cmd: prints the aisstream.io API key.
@@ -272,6 +279,7 @@ fn args() -> Result<Args> {
         radar: false,
         sondes: false,
         alerts: false,
+        outages: false,
         utc: false,
         sats: None,
         sats_country: Vec::new(),
@@ -384,6 +392,7 @@ fn args() -> Result<Args> {
             "--sondes" | "--balloons" => a.sondes = true,
             "--radar" => a.radar = true,
             "--alerts" => a.alerts = true,
+            "--outages" => a.outages = true,
             "--utc" => a.utc = true,
             "--sats" | "--satellites" => {
                 // The groups are optional: take the next argument only if it's a list of
@@ -632,6 +641,10 @@ const SAT_IMAGE: u32 = 4_000_000_006;
 const ALERT_LAYERS: [&str; 3] = ["alerts-fill", "alerts-line", "alerts-selected"];
 /// The alert areas as image tiles drawn here (where it does).
 const ALERT_TILES: &str = "alert-tiles";
+/// The outage areas' style layers (braille, where the terminal doesn't show images).
+const OUTAGE_LAYERS: [&str; 3] = ["outages-fill", "outages-line", "outages-selected"];
+/// The outage areas as image tiles drawn here (where it does).
+const OUTAGE_TILES: &str = "outage-tiles";
 /// --ais draws ships this many seconds in the past (ships under way report every 2 to 10 s;
 /// small boats every 30 s, which past the last fix move along their course).
 const AIS_DELAY: f64 = 10.0;
@@ -859,6 +872,7 @@ fn find(
 struct HelpOn {
     radar: bool,
     alerts: bool,
+    outages: bool,
     live: bool,
     sats: bool,
 }
@@ -889,8 +903,14 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
         ),
         ("find", vec![("/", "search for a place"), ("i", "inspect: what's under the pointer"), ("y", "copy the inspected feature (JSON)")]),
     ];
-    if on.live || on.alerts {
-        let mut v = vec![("click · Tab", "select (aircraft, ship, satellite; click for an alert)"), ("Esc", "close the panel")];
+    if on.live || on.alerts || on.outages {
+        let areas = on.alerts || on.outages;
+        let click = match (on.live, areas) {
+            (true, true) => ("click · Tab", "select (aircraft, ship, satellite; or click an area)"),
+            (true, false) => ("click · Tab", "select (aircraft, ship, satellite)"),
+            _ => ("click", "an area's details"),
+        };
+        let mut v = vec![click, ("Esc", "close the panel")];
         if on.live {
             v.insert(1, ("f", "follow the selected one"));
             v.insert(2, ("p", "finder: names, countries, missions..."));
@@ -1216,6 +1236,7 @@ fn draw_finder(f: &mut ratatui::Frame, area: Rect, fd: &Finder) {
 /// The --sats source and layer.
 const SATS: &str = "satellites";
 const ALERTS: &str = "alerts";
+const OUTAGES: &str = "outages";
 
 /// `HH:MM` (UTC) of a Unix time.
 /// The time zone times are shown in: this computer's, or UTC with --utc.
@@ -1490,6 +1511,54 @@ fn draw_alert(f: &mut ratatui::Frame, area: Rect, al: &mapterm::nws::Alert) {
     if let Some(i) = &al.instruction {
         para(&mut l, i, TStyle::new().fg(Color::Yellow));
     }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(" esc close", dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
+/// What the --outages task sends.
+enum OutageMsg {
+    /// A level's outlines, by key.
+    Outlines(mapterm::outages::Level, std::collections::HashMap<String, serde_json::Value>),
+    /// A level's figures (municipalities: those with customers out).
+    Counts(mapterm::outages::Level, Vec<mapterm::outages::Area>),
+    /// Why a request failed.
+    Error(String),
+}
+
+/// The --outages panel for the selected county or municipality.
+fn draw_outage(f: &mut ratatui::Frame, area: Rect, o: &mapterm::outages::Area) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" power outage ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let (r, g, b) = mapterm::outages::rgb(o);
+    let town = o.key.contains('-');
+    let key = |k: &str| Span::styled(format!(" {k:<9}"), dim);
+    let title = if town { o.name.clone() } else { format!("{} County", o.name) };
+    let mut l = vec![Line::from(Span::styled(format!(" {title}"), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
+    if town {
+        l.push(Line::from(Span::styled(format!(" {} County", o.county), dim)));
+    }
+    l.push(Line::default());
+    l.push(Line::from(vec![key("out"), Span::styled(format!("{} customers", thousands(o.out as usize)), TStyle::new().fg(Color::Rgb(r, g, b)))]));
+    if o.served > 0 {
+        l.push(Line::from(vec![key("served"), Span::raw(format!("{} (estimated)", thousands(o.served as usize)))]));
+        let pct = o.share() * 100.0;
+        l.push(Line::from(vec![key("share"), Span::raw(if pct > 0.0 && pct < 1.0 { format!("{pct:.1}%") } else { format!("{pct:.0}%") })]));
+    }
+    if let Some(c) = o.county_out {
+        l.push(Line::from(vec![key("county"), Span::raw(format!("{} out in {} County", thousands(c as usize), o.county))]));
+    }
+    if let Some(t) = o.updated {
+        let ago = ((unix_now() - t) / 60.0).max(0.0).round();
+        l.push(Line::from(vec![key("updated"), Span::raw(format!("{} · {ago:.0} min ago", hhmm(t)))]));
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(" From the utilities' reports to the state, every 15 minutes; the state's map has no restoration times.", dim)));
     l.push(Line::default());
     l.push(Line::from(Span::styled(" esc close", dim)));
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
@@ -1991,7 +2060,7 @@ async fn main() -> Result<()> {
         let schema = detect_schema(&src, &cam).await;
         // Watching weather over the default basemap: the weather style; aircraft, ships or
         // satellites alone, the aviation style; unless --light.
-        if (a.radar || a.alerts) && a.source.is_none() && !a.light {
+        if (a.radar || a.alerts || a.outages) && a.source.is_none() && !a.light {
             map = Map::weather(src, schema)?;
         } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes) && a.source.is_none() && !a.light {
             map = Map::aviation(src, schema)?;
@@ -2011,7 +2080,7 @@ async fn main() -> Result<()> {
     let builtin_source = a.source.clone().unwrap_or_else(|| OPENFREEMAP.to_string());
     let mut styles: Vec<String> = a.style.iter().cloned().collect();
     let default_dark = a.style.is_none() && a.source.is_none() && !a.light;
-    if (a.radar || a.alerts) && default_dark {
+    if (a.radar || a.alerts || a.outages) && default_dark {
         styles.push(WEATHER.to_string());
     } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes) && default_dark {
         styles.push(AVIATION.to_string());
@@ -2146,6 +2215,20 @@ async fn main() -> Result<()> {
             datasets.push(Loading { id: id.clone(), spec, ds, inflight: HashSet::new(), saved: false });
         }
         legend.push((id, color));
+    }
+    // Power outages (--outages): under the alerts.
+    let outage_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
+    if a.outages {
+        map.add_source(OUTAGES, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
+        map.set_attribution(OUTAGES, mapterm::outages::CREDIT)?;
+        map.add_layers(mapterm::outages::layers(OUTAGES)?, None)?;
+        if mapterm::kitty::supported() {
+            map.add_source(OUTAGE_TILES, MapSource::raster(mapterm::areas::tile_source(outage_tiles.clone(), "outages", mapterm::outages::CREDIT)?))?;
+            map.add_layer(mapterm::StyleLayer::raster(OUTAGE_TILES, OUTAGE_TILES))?;
+            for id in OUTAGE_LAYERS {
+                map.set_visibility(id, false)?;
+            }
+        }
     }
     // Weather alerts (--alerts): under everything that moves.
     let alert_tiles = std::sync::Arc::new(mapterm::nws::AlertTiles::default());
@@ -2584,6 +2667,64 @@ async fn main() -> Result<()> {
             }
         });
     }
+    // --outages: each level's outlines once (kept on disk for 30 days), then its counts every
+    // 5 minutes (the state updates them every 15) with their ETag; counties first, as
+    // they're shown first.
+    let mut outage_counties: Vec<mapterm::outages::Area> = Vec::new();
+    let mut outage_towns: Vec<mapterm::outages::Area> = Vec::new();
+    let mut outage_county_outlines: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let mut outage_town_outlines: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    // What the outage layer was last built from: new data since, the level, the selection.
+    let mut outages_new = false;
+    let mut outage_level: Option<mapterm::outages::Level> = None;
+    let mut outage_shown_selected: Option<String> = None;
+    let mut selected_outage: Option<String> = None;
+    let (outx, mut outrx) = mpsc::unbounded_channel::<OutageMsg>();
+    if a.outages {
+        tokio::spawn(async move {
+            use mapterm::outages::{Level, counts, outlines};
+            let mut tags: std::collections::HashMap<Level, Option<String>> = std::collections::HashMap::new();
+            let mut have: std::collections::HashSet<Level> = std::collections::HashSet::new();
+            loop {
+                let mut failed = false;
+                for level in [Level::County, Level::Municipal] {
+                    if !have.contains(&level) {
+                        let m = match outlines(level).await {
+                            Ok(o) => {
+                                have.insert(level);
+                                OutageMsg::Outlines(level, o)
+                            }
+                            Err(e) => {
+                                failed = true;
+                                OutageMsg::Error(format!("{e:#}"))
+                            }
+                        };
+                        if outx.send(m).is_err() {
+                            return;
+                        }
+                    }
+                    let tag = tags.get(&level).cloned().flatten();
+                    let m = match counts(level, tag.as_deref()).await {
+                        Ok(Some((areas, t))) => {
+                            tags.insert(level, t);
+                            Some(OutageMsg::Counts(level, areas))
+                        }
+                        Ok(None) => None,
+                        Err(e) => {
+                            failed = true;
+                            Some(OutageMsg::Error(format!("{e:#}")))
+                        }
+                    };
+                    if let Some(m) = m
+                        && outx.send(m).is_err()
+                    {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(if failed { 900 } else { 300 })).await;
+            }
+        });
+    }
     // --alerts: the NWS list every 5 minutes (with its ETag), and zone outlines one a second
     // (from the disk cache at once), the most severe alerts' first.
     let mut alerts: Vec<mapterm::nws::Alert> = Vec::new();
@@ -2795,11 +2936,27 @@ async fn main() -> Result<()> {
                 let outlines_due = alerts_zones_new && (alerts_drawn.elapsed() >= Duration::from_secs(10) || alerts_zone_at.elapsed() >= Duration::from_millis(1500));
                 if alerts_list_new || in_force != alerts_in_force || outlines_due || selected_alert != alert_shown_selected {
                     map.set_data(ALERTS, &mapterm::nws::features(&alerts, &alert_zones, clock_t, selected_alert.as_deref()))?;
-                    alert_tiles.set(&alerts, &alert_zones, clock_t, selected_alert.as_deref());
+                    alert_tiles.set(mapterm::nws::shapes(&alerts, &alert_zones, clock_t, selected_alert.as_deref()));
                     alert_shown_selected = selected_alert.clone();
                     // Drawn again from the new areas as the view asks for them.
                     map.put_raster_tile(ALERT_TILES, None, true);
                     (alerts_list_new, alerts_zones_new, alerts_drawn, alerts_in_force) = (false, false, Instant::now(), in_force);
+                }
+            }
+            // The outages at the level the zoom shows: rebuilt when new figures or outlines
+            // arrive, the level changes, or another area is selected.
+            if a.outages {
+                use mapterm::outages::Level;
+                let level = Level::at(draw_cam.zoom);
+                if outages_new || outage_level != Some(level) || selected_outage != outage_shown_selected {
+                    let (areas, outlines) = match level {
+                        Level::County => (&outage_counties, &outage_county_outlines),
+                        Level::Municipal => (&outage_towns, &outage_town_outlines),
+                    };
+                    map.set_data(OUTAGES, &mapterm::outages::features(areas, outlines, level, selected_outage.as_deref()))?;
+                    outage_tiles.set(mapterm::outages::shapes(areas, outlines, level, selected_outage.as_deref()));
+                    map.put_raster_tile(OUTAGE_TILES, None, true);
+                    (outages_new, outage_level, outage_shown_selected) = (false, Some(level), selected_outage.clone());
                 }
             }
             // Highlight the selected feature and the clicked spot.
@@ -2957,8 +3114,9 @@ async fn main() -> Result<()> {
                 let balloon = selected_balloon.as_deref().and_then(|s| balloons.get(s, unix_now() - SONDE_DELAY));
                 let sat = sats.iter().find(|s| Some(s.norad) == selected_sat).and_then(|s| Some((s, s.at(unix_now())?)));
                 let alert = selected_alert.as_ref().and_then(|id| alerts.iter().find(|a| &a.id == id));
+                let outage = selected_outage.as_ref().and_then(|k| outage_counties.iter().chain(outage_towns.iter()).find(|a| &a.key == k));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || balloon.is_some() {
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || balloon.is_some() {
                         52.min(main.width / 2)
                     } else {
                         0
@@ -2980,6 +3138,11 @@ async fn main() -> Result<()> {
                     }
                     if ais_key.is_some() && !fleet.is_empty() {
                         legends.push(mapterm::ais::legend(&fleet));
+                    }
+                    if a.outages && !outage_counties.is_empty() {
+                        let level = mapterm::outages::Level::at(cam.zoom);
+                        let areas = if level == mapterm::outages::Level::County { &outage_counties } else { &outage_towns };
+                        legends.push(mapterm::outages::legend(areas, level));
                     }
                     let mut room = m;
                     for l in &legends {
@@ -3020,6 +3183,10 @@ async fn main() -> Result<()> {
                         draw_alert(f, panel, al);
                         Vec::new()
                     }
+                    _ if let Some(o) = outage => {
+                        draw_outage(f, panel, o);
+                        Vec::new()
+                    }
                     _ => Vec::new(),
                 };
                 if let Some(r) = box_rect {
@@ -3029,6 +3196,7 @@ async fn main() -> Result<()> {
                     let on = HelpOn {
                         radar: radar.is_some(),
                         alerts: a.alerts,
+                        outages: a.outages,
                         live: adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some(),
                         sats: a.sats.is_some(),
                     };
@@ -3138,6 +3306,15 @@ async fn main() -> Result<()> {
                     let have = want.iter().filter(|z| alert_zones.contains_key(**z)).count();
                     let more = if have < want.len() { format!(" (areas {have}/{})", want.len()) } else { String::new() };
                     spans.push(Span::styled(format!("⚠ {now_in}{more} "), TStyle::new().fg(Color::Rgb(0xff, 0xa6, 0x4d))));
+                }
+                if a.outages {
+                    let st = TStyle::new().fg(Color::Rgb(0xff, 0xb4, 0x46));
+                    let text = if outage_counties.is_empty() {
+                        "⚡ … ".to_string()
+                    } else {
+                        format!("⚡ {} out ", thousands(outage_counties.iter().map(|c| c.out as usize).sum()))
+                    };
+                    spans.push(Span::styled(text, st));
                 }
                 if let Some(r) = radar.as_ref().filter(|r| !r.is_off()) {
                     match r.shown_time() {
@@ -3753,6 +3930,23 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Some(m) = outrx.recv() => {
+                    use mapterm::outages::Level;
+                    match m {
+                        OutageMsg::Outlines(Level::County, o) => outage_county_outlines = o,
+                        OutageMsg::Outlines(Level::Municipal, o) => outage_town_outlines = o,
+                        OutageMsg::Counts(Level::County, v) => {
+                            dlog(|| format!("outages: {} customers out", v.iter().map(|c| c.out).sum::<u64>()));
+                            outage_counties = v;
+                        }
+                        OutageMsg::Counts(Level::Municipal, v) => outage_towns = v,
+                        OutageMsg::Error(e) => {
+                            dlog(|| format!("outages: {e}"));
+                            note = Some((Instant::now(), format!("outages: {e}")));
+                        }
+                    }
+                    outages_new = true;
+                }
                 Some((z, g)) = nzrx.recv() => {
                     alert_zones.insert(z, g);
                     alerts_zones_new = true;
@@ -4229,8 +4423,9 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
                                         });
                                     }
-                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some() || selected_balloon.is_some()) && !inspect => {
+                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some() || selected_outage.is_some() || selected_balloon.is_some()) && !inspect => {
                                         selected_alert = None;
+                                        selected_outage = None;
                                         selected_balloon = None;
                                         selected = None;
                                         selected_ship = None;
@@ -4512,7 +4707,7 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.sondes {
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes {
                                         // A click on (or next to) an aircraft, else a balloon, else a
                                         // ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
@@ -4549,18 +4744,28 @@ async fn main() -> Result<()> {
                                             selected = None;
                                             selected_ship = None;
                                             selected_alert = None;
-                                        } else if a.alerts {
+                                        } else if a.alerts || a.outages {
+                                            let hits = map.query_features(&last_cam, map_area, dot);
                                             // An alert area under the click: the most severe.
-                                            let hit = map
-                                                .query_features(&last_cam, map_area, dot)
-                                                .into_iter()
+                                            selected_alert = hits
+                                                .iter()
                                                 .filter(|p| p.source.as_deref() == Some(ALERTS))
-                                                .filter_map(|p| p.prop("id").and_then(|v| v.as_str()).map(str::to_string))
+                                                .filter_map(|p| p.prop("id").and_then(|v| v.as_str()))
                                                 .filter_map(|id| alerts.iter().find(|a| a.id == id))
                                                 .max_by_key(|a| a.severity)
                                                 .map(|a| a.id.clone());
-                                            selected_alert = hit;
-                                            if selected_alert.is_some() {
+                                            // Else the outage area under it, at the level shown.
+                                            let level = mapterm::outages::Level::at(last_cam.zoom);
+                                            selected_outage = if selected_alert.is_some() {
+                                                None
+                                            } else {
+                                                hits.iter()
+                                                    .filter(|p| p.source.as_deref() == Some(OUTAGES))
+                                                    .filter_map(|p| p.prop("key").and_then(|v| v.as_str()))
+                                                    .find(|k| k.contains('-') == (level == mapterm::outages::Level::Municipal))
+                                                    .map(str::to_string)
+                                            };
+                                            if selected_alert.is_some() || selected_outage.is_some() {
                                                 (selected, selected_ship, selected_sat) = (None, None, None);
                                             }
                                         }

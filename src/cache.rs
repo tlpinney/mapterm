@@ -3,7 +3,10 @@
 //!
 //! Map tiles and imagery are SQLite (MBTiles) files, one per source; GeoParquet ranges one
 //! SQLite file and fetched styles and TileJSON another (see [`crate::tilecache`]). Microsoft building pieces and STAC indexes are
-//! plain files. `old` is what earlier versions left (a file per tile), no longer read.
+//! plain files, as are the live layers' (orbits, radio, alert zones, outage outlines); radar
+//! scans are an SQLite file. `old` is what earlier versions left (a folder per source, named
+//! by a hash, with a file per tile), no longer read; anything else in the folder, mapterm's
+//! or not, is left alone.
 
 use std::path::{Path, PathBuf};
 
@@ -27,10 +30,17 @@ pub struct Cache {
 }
 
 /// The cache names, in report order.
-pub const NAMES: [&str; 8] = ["tiles", "imagery", "geoparquet", "docs", "buildings", "stac", "orbits", "old"];
+pub const NAMES: [&str; 12] = ["tiles", "imagery", "geoparquet", "docs", "buildings", "stac", "orbits", "radio", "zones", "radar", "outages", "old"];
 
-/// Folders under the root that belong to a named cache (anything else there is old).
-const KNOWN: [&str; 4] = ["raster", "msbuildings", "stac", "celestrak"];
+/// A folder earlier versions kept a source's tiles in: named by [`crate::source::hash`], 16
+/// hex digits.
+fn is_old_folder(p: &Path) -> bool {
+    std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir())
+        && p.file_name().is_some_and(|n| {
+            let n = n.to_string_lossy();
+            n.len() == 16 && n.chars().all(|c| c.is_ascii_hexdigit())
+        })
+}
 
 /// Every cache under `root` (normally [`caches_root`]); `old` only when
 /// there's something in it.
@@ -48,6 +58,10 @@ pub fn caches_in(root: &Path) -> Vec<Cache> {
                 "buildings" => ("Microsoft building tiles, split into pieces", size(crate::msbuildings::cache_limit())),
                 "stac" => ("STAC collection indexes (which file covers where)", "re-read after 7 days".to_string()),
                 "orbits" => ("satellite orbits from CelesTrak (--sats), a file per group", "re-read after 2 hours".to_string()),
+                "radio" => ("satellite transmitters from the SatNOGS DB (--sats)", "re-read after a day".to_string()),
+                "zones" => ("weather alert zone outlines from the NWS (--alerts)", "kept 90 days".to_string()),
+                "radar" => ("weather radar scans from RainViewer (--radar)", "scans over 3 hours old go".to_string()),
+                "outages" => ("power outage outlines from PEMA / PennDOT (--outages)", "re-read after 30 days".to_string()),
                 _ => ("left by earlier versions (a file per tile), no longer read", "none: clear it".to_string()),
             };
             Cache { name, about, paths, bytes, files, limit }
@@ -95,14 +109,20 @@ fn paths_of(root: &Path, name: &str) -> Vec<PathBuf> {
         "buildings" => dir("msbuildings"),
         "stac" => dir("stac"),
         "orbits" => dir("celestrak"),
-        // Earlier versions: a folder per source at the top and under raster/, and the old
-        // geoparquet/ folder.
+        "radio" => dir("satnogs"),
+        "zones" => dir("nws"),
+        "radar" => entries(root)
+            .into_iter()
+            .filter(|p| p.is_file() && is_db(p, "sqlite") && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("rainviewer.")))
+            .collect(),
+        "outages" => dir("outages"),
+        // Earlier versions: a folder per source (named by its hash) at the top and under
+        // raster/, and the old geoparquet/ folder. Nothing else: other folders may not be
+        // mapterm's.
         _ => {
-            let top = entries(root)
-                .into_iter()
-                .filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()) && p.file_name().is_some_and(|n| !KNOWN.iter().any(|k| n == *k)));
-            let raster = entries(&root.join("raster")).into_iter().filter(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir()));
-            top.chain(raster).collect()
+            let top = entries(root).into_iter().filter(|p| is_old_folder(p));
+            let raster = entries(&root.join("raster")).into_iter().filter(|p| is_old_folder(p));
+            top.chain(raster).chain(dir("geoparquet")).collect()
         }
     }
 }
@@ -189,24 +209,30 @@ mod tests {
         w("docs.sqlite", 3);
         w("stac/x.json", 7);
         w("2ebdc32559b3691b/14/1/2.mvt", 30);
-        w("raster/def/1/2/3.img", 20);
+        w("raster/0b3e7421d1d5927d/1/2/3.img", 20);
+        w("satnogs/transmitters.json", 4);
+        w("nws/zones/forecast_VAZ092.json", 5);
+        w("rainviewer.sqlite", 6);
+        w("rainviewer.sqlite-wal", 1);
+        w("outages/counties.geojson", 8);
+        // Not mapterm's: never listed or cleared.
+        w("plugins/someone-elses/data.json", 9);
         let c = caches_in(&root);
         let by = |n: &str| c.iter().find(|x| x.name == n).unwrap().clone();
         assert_eq!((by("tiles").bytes, by("tiles").files), (150, 2));
         assert_eq!((by("imagery").bytes, by("geoparquet").bytes, by("stac").bytes, by("buildings").bytes, by("docs").bytes), (400, 10, 7, 0, 3));
         assert_eq!((by("old").bytes, by("old").files), (50, 2), "the file-per-tile folders of earlier versions");
+        assert_eq!((by("radio").bytes, by("zones").bytes, by("radar").bytes, by("radar").files, by("outages").bytes), (4, 5, 7, 2, 8));
         assert_eq!(clear_in(&root, "old").unwrap(), 50);
         assert!(root.join("1e77e06f15af9955.mbtiles").exists() && root.join("raster/abc.mbtiles").exists(), "only the old folders went");
         assert!(!caches_in(&root).iter().any(|c| c.name == "old"), "nothing old left: not listed");
         assert_eq!(clear_in(&root, "tiles").unwrap(), 150);
         assert!(clear_in(&root, "nope").is_err());
-        assert_eq!(clear_in(&root, "all").unwrap(), 420);
+        assert_eq!(clear_in(&root, "all").unwrap(), 444);
         let left: Vec<_> = entries(&root).into_iter().filter(|p| p.is_file()).collect();
         assert!(left.is_empty(), "{left:?}");
-        for d in ["raster", "stac"] {
-            let _ = std::fs::remove_dir(root.join(d));
-        }
-        let _ = std::fs::remove_dir(&root);
+        assert!(root.join("plugins/someone-elses/data.json").exists(), "another program's folder is left alone");
+        let _ = std::fs::remove_dir_all(&root);
         assert_eq!(size(3 << 29), "1.5 GB");
         assert_eq!(size(340 << 20), "340 MB");
     }

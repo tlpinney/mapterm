@@ -247,6 +247,29 @@ entity's availability): live, that's now; with `--radar` paused or playing, the 
 time. The NWS lists only alerts still active, so ones that ended within the radar's two
 hours don't come back.
 
+## Power outages (Pennsylvania)
+
+```
+mapterm --outages --at 40.0,-75.9 -z 8
+```
+
+Customers without power in Pennsylvania, from the state's outage map, run by PEMA (the
+Pennsylvania Emergency Management Agency) and PennDOT from the utilities' reports (a public
+service, no key). Below zoom 9 each county is shaded by the share of its customers out;
+from zoom 9, each municipality with customers out. Yellow is under 1%, through orange and
+red, to magenta at 30% or more; counties with nobody out are a faint outline. As with
+alerts, image tiles where the terminal shows images, braille elsewhere.
+
+Click an area for its numbers: customers out and served (an estimate), the share, the
+county's total for a municipality, and when the utilities' figures were gathered. The status
+line has the statewide total (⚡ 178,839 out), and the legend counts the areas in each band.
+
+The state updates the figures every 15 minutes, and mapterm asks every 5, with the
+ETag, so an unchanged answer is a tiny reply. The outlines never change: each level's are
+fetched once (about 100 KB for counties, 2 MB for municipalities) and kept for 30 days.
+There are no outage areas or restoration times; the state's map has neither. With
+`--outages` the map switches to `mapterm-weather`, like `--radar` and `--alerts`.
+
 ## Legends
 
 Whatever is colored gets a legend in the map's lower left, with how many of each:
