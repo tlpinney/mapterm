@@ -65,7 +65,7 @@ mapterm --at 38.8895,-77.0353 -z 13                    # start somewhere (lat,lo
 mapterm --at here                                      # start where you are
 mapterm --adsb --at 38.85,-77.04 -z 10                 # live aircraft over DC
 mapterm --ais --at 38.98,-76.45 -z 10                  # live ships on the Chesapeake
-mapterm --sats --at here -z 3                          # satellites and Starlink, and when they pass
+mapterm --sats --at here -z 3                          # every active satellite, and when they pass
 mapterm https://build.protomaps.com/20261031.pmtiles   # Protomaps planet over HTTP range requests
 mapterm dc.pmtiles --at 38.8899,-77.0091 -z 13          # a local PMTiles file, offline
 mapterm city.mbtiles                                   # or an MBTiles file

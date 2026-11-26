@@ -75,9 +75,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 satellites, placed from CelesTrak's orbital elements (no key): ◇ (◆ the
                 ISS) colored by orbit height, with names; click or Tab for altitude, speed,
                 period, its ground track and, with --at here, its next pass over you.
-                GROUPS is CelesTrak's, comma-separated (default visual,starlink: the ~150
-                brightest and Starlink's ~11,000, unlabelled; also stations, amateur,
-                weather, noaa, gnss, active, ...).
+                GROUPS is CelesTrak's, comma-separated (default active: every active
+                satellite, ~17,000 with Starlink's ~11,000 unlabelled; or a smaller group:
+                visual, stations, starlink, resource, amateur, weather, gnss, ...).
+                p finds one by name or operator
                 Elements are cached for 2 hours, as CelesTrak asks
   --ais          live ships from aisstream.io's free AIS stream (a free key from
                 aisstream.io: AISSTREAM_API_KEY or --ais-key-cmd). Arrows along the
@@ -332,7 +333,7 @@ fn args() -> Result<Args> {
                     n.starts_with(|c: char| c.is_ascii_alphanumeric())
                         && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == ',')
                 });
-                let groups: Vec<String> = groups.as_deref().unwrap_or("visual,starlink").split(',').filter(|g| !g.is_empty()).map(str::to_string).collect();
+                let groups: Vec<String> = groups.as_deref().unwrap_or("active").split(',').filter(|g| !g.is_empty()).map(str::to_string).collect();
                 // CelesTrak asks: the Active list already holds Starlink.
                 if groups.iter().any(|g| g == "active") && groups.iter().any(|g| g == "starlink") {
                     bail!("--sats: active already includes starlink (CelesTrak asks not to download both)");
@@ -549,6 +550,97 @@ const AIS_DELAY: f64 = 10.0;
 const AIS_TRAIL: f64 = 600.0;
 /// Below this zoom --ais streams nothing.
 const AIS_MIN_ZOOM: f64 = 7.0;
+/// Something live the finder can go to.
+#[derive(Clone, Debug, PartialEq)]
+enum Target {
+    Sat(u64),
+    Ship(u32),
+    Plane(String),
+}
+
+/// One finder result: what it is, its name, and a word or two about it.
+struct Hit {
+    target: Target,
+    name: String,
+    detail: String,
+}
+
+/// The finder: what's typed, the chosen row, and the matches, best first.
+struct Finder {
+    query: String,
+    sel: usize,
+    hits: Vec<Hit>,
+}
+
+/// Everything live matching `query` fzf-style, best first (the first 200).
+fn find(query: &str, sats: &[mapterm::satellites::Sat], aircraft: &mapterm::adsb::Tracks, fleet: &mapterm::ais::Fleet) -> Vec<Hit> {
+    let mut v: Vec<(i32, Hit)> = Vec::new();
+    for s in sats {
+        // The operator matches too (so "digitalglobe" finds WorldView and Legion), scored a
+        // little below a name match.
+        let text = format!("{} {} {}", s.name, s.norad, s.intl.as_deref().unwrap_or(""));
+        let by_name = mapterm::fuzzy::score(query, &text);
+        let by_operator = s.operator().and_then(|op| mapterm::fuzzy::score(query, op)).map(|sc| sc - 8);
+        if let Some(sc) = by_name.max(by_operator) {
+            let detail = match s.operator() {
+                Some(op) => format!("{} · {}", op.split(" (").next().unwrap_or(op), s.norad),
+                None => format!("satellite · {}", s.norad),
+            };
+            v.push((sc, Hit { target: Target::Sat(s.norad), name: s.name.clone(), detail }));
+        }
+    }
+    for a in aircraft.all() {
+        let name = a.flight.clone().or_else(|| a.registration.clone()).unwrap_or_else(|| a.hex.to_uppercase());
+        let text = format!("{name} {} {} {}", a.registration.as_deref().unwrap_or(""), a.hex, a.type_code.as_deref().unwrap_or(""));
+        if let Some(sc) = mapterm::fuzzy::score(query, &text) {
+            v.push((sc, Hit { target: Target::Plane(a.hex.clone()), name, detail: format!("aircraft · {}", a.type_code.as_deref().unwrap_or("?")) }));
+        }
+    }
+    for s in fleet.all() {
+        let text = format!("{} {}", s.label(), s.details.mmsi);
+        if let Some(sc) = mapterm::fuzzy::score(query, &text) {
+            v.push((
+                sc,
+                Hit { target: Target::Ship(s.details.mmsi), name: s.label(), detail: format!("ship · {}", mapterm::ais::category(s.details.ship_type)) },
+            ));
+        }
+    }
+    v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
+    v.into_iter().take(200).map(|(_, h)| h).collect()
+}
+
+/// The finder's list, fzf-style: the chosen row reversed, the best at the top.
+fn draw_finder(f: &mut ratatui::Frame, area: Rect, fd: &Finder) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::Borders;
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let more = if fd.hits.len() == 200 { "200+" } else { "" };
+    let count = if more.is_empty() { fd.hits.len().to_string() } else { more.to_string() };
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(format!(" find · {count} "));
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let rows = inner.height as usize;
+    // Keep the chosen row in view.
+    let first = fd.sel.saturating_sub(rows.saturating_sub(1));
+    let w = inner.width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = fd
+        .hits
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .map(|(i, h)| {
+            let room = w.saturating_sub(h.detail.chars().count() + 2);
+            let name: String = h.name.chars().take(room).collect();
+            let pad = " ".repeat(room.saturating_sub(name.chars().count()));
+            let st = if i == fd.sel { TStyle::new().add_modifier(Modifier::REVERSED) } else { TStyle::new() };
+            Line::from(vec![Span::styled(format!(" {name}{pad}"), st), Span::styled(format!("  {}", h.detail), dim)])
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 /// The --sats source and layer.
 const SATS: &str = "satellites";
 
@@ -679,6 +771,9 @@ fn draw_sat(
     l.push(Line::from(vec![key("speed"), Span::raw(format!("{:.2} km/s", fix.speed)), Span::styled(format!("  {:.0} km/h", fix.speed * 3600.0), dim)]));
     l.push(Line::from(vec![key("orbit"), Span::raw(format!("{:.1} min", s.period_min())), Span::styled(format!("  {:.1}° inclined", s.inclination), dim)]));
     l.push(Line::from(vec![key("position"), Span::raw(format!("{:.3}, {:.3}", fix.lat, fix.lon))]));
+    if let Some(op) = s.operator() {
+        l.push(Line::from(vec![key("operator"), Span::raw(op)]));
+    }
     l.push(Line::from(vec![key("NORAD"), Span::raw(s.norad.to_string())]));
     if let Some(i) = &s.intl {
         l.push(Line::from(vec![key("launched as"), Span::raw(i.clone())]));
@@ -1631,6 +1726,8 @@ async fn main() -> Result<()> {
     // Where kitty graphics work, satellites are dots in an image placed to the pixel (smooth),
     // with their names as text: while the image is up, and when it was last drawn.
     let mut sat_dots = false;
+    // `p`: the fzf-style finder over everything live (satellites, aircraft, ships).
+    let mut finder: Option<Finder> = None;
     let mut sat_dots_drawn = Instant::now();
     let mut follow = false;
     // The trail image needs drawing again (new positions, or the view moved).
@@ -1799,7 +1896,7 @@ async fn main() -> Result<()> {
             }
             term.draw(|f| {
                 let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(status_rows)]).areas(f.area());
-                let results = matches!(search, Search::Results { .. });
+                let results = matches!(search, Search::Results { .. }) || finder.is_some();
                 let plane = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay));
                 let ship = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY));
                 let sat = sats.iter().find(|s| Some(s.norad) == selected_sat).and_then(|s| Some((s, s.at(unix_now())?)));
@@ -1810,6 +1907,10 @@ async fn main() -> Result<()> {
                 panel_area = panel;
                 f.render_widget(map.view(&draw_cam), m);
                 list_rows = match &search {
+                    _ if let Some(fd) = finder.as_ref() => {
+                        draw_finder(f, panel, fd);
+                        Vec::new()
+                    }
                     Search::Results { places, sel } if panel_w > 0 => draw_results(f, panel, places, *sel),
                     _ if inspect && !picks.is_empty() => draw_inspector(f, panel, &picks, sel),
                     _ if let Some(p) = plane => {
@@ -1932,6 +2033,15 @@ async fn main() -> Result<()> {
                     credits.insert(0, f.attribution.clone());
                 }
                 let credits = if credits.is_empty() { basemap_name.clone() } else { credits.join(" · ") };
+                // While the finder is open, the status line is its prompt.
+                if let Some(fd) = finder.as_ref() {
+                    spans = vec![
+                        Span::styled(" find ", TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255))),
+                        Span::raw(format!(" > {}", fd.query)),
+                        Span::styled("█", TStyle::new().fg(Color::Rgb(127, 178, 255))),
+                        Span::styled("  ↑↓ choose · enter go · esc close ", dim),
+                    ];
+                }
                 // While typing a search, the status line is the search box.
                 if let Search::Typing(q) = &search {
                     spans = vec![
@@ -2516,6 +2626,57 @@ async fn main() -> Result<()> {
                     for ev in queued {
                         match ev {
                             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                                // The finder takes every key while it's open.
+                                if let Some(fd) = finder.as_mut() {
+                                    let mut refilter = false;
+                                    match k.code {
+                                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                                        KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                                            fd.query.clear();
+                                            refilter = true;
+                                        }
+                                        KeyCode::Esc => finder = None,
+                                        KeyCode::Down | KeyCode::Tab if !fd.hits.is_empty() => fd.sel = (fd.sel + 1) % fd.hits.len(),
+                                        KeyCode::Up | KeyCode::BackTab if !fd.hits.is_empty() => fd.sel = (fd.sel + fd.hits.len() - 1) % fd.hits.len(),
+                                        KeyCode::Char(c) => {
+                                            fd.query.push(c);
+                                            refilter = true;
+                                        }
+                                        KeyCode::Backspace => {
+                                            fd.query.pop();
+                                            refilter = true;
+                                        }
+                                        KeyCode::Enter => {
+                                            // Select it, as a click would, and fly there.
+                                            if let Some(hit) = fd.hits.get(fd.sel) {
+                                                let target = hit.target.clone();
+                                                let now = unix_now();
+                                                let at = match &target {
+                                                    Target::Sat(n) => sats.iter().find(|s| s.norad == *n).and_then(|s| s.at(now)).map(|f| (f.lon, f.lat)),
+                                                    Target::Ship(m) => fleet.get(*m, now - AIS_DELAY).map(|(_, p)| (p.lon, p.lat)),
+                                                    Target::Plane(h) => aircraft.get(h, now - adsb_delay).map(|(_, p, _)| (p.lon, p.lat)),
+                                                };
+                                                (selected, selected_ship, selected_sat) = (None, None, None);
+                                                match target {
+                                                    Target::Sat(n) => selected_sat = Some(n),
+                                                    Target::Ship(m) => selected_ship = Some(m),
+                                                    Target::Plane(h) => selected = Some(h),
+                                                }
+                                                follow = false;
+                                                if let Some((lon, lat)) = at {
+                                                    ctl.fly_to(Camera::new(lon, lat, ctl.cam.zoom.max(3.0)));
+                                                }
+                                            }
+                                            finder = None;
+                                        }
+                                        _ => {}
+                                    }
+                                    if refilter && let Some(fd) = finder.as_mut() {
+                                        fd.hits = find(&fd.query, &sats, &aircraft, &fleet);
+                                        fd.sel = 0;
+                                    }
+                                    continue;
+                                }
                                 // Typing a search: every key goes to the search box.
                                 if let Search::Typing(q) = &mut search {
                                     match k.code {
@@ -2572,6 +2733,9 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
                                 match k.code {
+                                    KeyCode::Char('p') if !sats.is_empty() || !aircraft.is_empty() || !fleet.is_empty() => {
+                                        finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &aircraft, &fleet) });
+                                    }
                                     KeyCode::Char('/') => {
                                         search = Search::Typing(String::new());
                                     }

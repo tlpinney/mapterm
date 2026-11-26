@@ -23,7 +23,10 @@ All notable changes to mapterm are listed here. The format follows
   bundled JetBrains Mono (Ghostty's built-in font; SIL OFL 1.1, `fonts/OFL.txt`) or
   `MAPTERM_FONT`, so they glide with their dots (`mapterm::imagetext`, with `fontdue`).
   The selected satellite (Starlink too) gets a ring and its name in that image. `--sats`
-  alone is `visual,starlink`: the brightest, named, and Starlink's ~11,000, unlabelled.
+  alone is `active`: every active satellite CelesTrak publishes (~17,000), Starlink's
+  unlabelled. `p` opens an fzf-style finder over satellites, aircraft and ships (by name,
+  number, callsign, MMSI or operator: `digitalglobe` finds WorldView and Legion), and the
+  panel names a satellite's operator for well-known ones (`mapterm::fuzzy`).
 
 - When the status line doesn't fit, the credits get their own line above it (up to three,
   wrapped) instead of being cut off; the data's licenses ask for them to show.

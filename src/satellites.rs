@@ -152,6 +152,26 @@ impl Sat {
         }
     }
 
+    /// Who runs it, when the name says (the elements don't): a few well-known operators,
+    /// with their former names so a search for either finds them.
+    pub fn operator(&self) -> Option<&'static str> {
+        const OPERATORS: [(&[&str], &str); 12] = [
+            (&["WORLDVIEW", "LEGION", "GEOEYE", "QUICKBIRD", "IKONOS"], "Vantor (Maxar, formerly DigitalGlobe)"),
+            (&["FLOCK", "SKYSAT", "PELICAN", "TANAGER"], "Planet"),
+            (&["SENTINEL"], "ESA (Copernicus)"),
+            (&["LANDSAT"], "USGS / NASA"),
+            (&["NOAA", "GOES"], "NOAA"),
+            (&["STARLINK"], "SpaceX"),
+            (&["ONEWEB"], "Eutelsat OneWeb"),
+            (&["KUIPER"], "Amazon (Kuiper)"),
+            (&["IRIDIUM"], "Iridium"),
+            (&["GPS"], "US Space Force (GPS)"),
+            (&["ICEYE"], "ICEYE"),
+            (&["CAPELLA"], "Capella Space"),
+        ];
+        OPERATORS.iter().find(|(prefixes, _)| prefixes.iter().any(|p| self.name.starts_with(p))).map(|(_, op)| *op)
+    }
+
     /// Minutes per orbit.
     pub fn period_min(&self) -> f64 {
         1440.0 / self.mean_motion
@@ -622,6 +642,15 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         let chosen = render_dots(&sats, sats[0].epoch, &vp, 320, 320, (8.0, 16.0), false, Some(58001));
         assert!(lit(&plain) < 40, "{}", lit(&plain));
         assert!(lit(&chosen) > lit(&plain) + 200, "ring and name: {} vs {}", lit(&chosen), lit(&plain));
+    }
+
+    #[test]
+    fn operators_by_name() {
+        let named = |n: &str| CSV.replace("\"ISS (ZARYA)\"", n);
+        assert_eq!(parse_csv(&named("LEGION 3"))[0].operator(), Some("Vantor (Maxar, formerly DigitalGlobe)"));
+        assert_eq!(parse_csv(&named("\"WORLDVIEW-3 (WV-3)\""))[0].operator(), Some("Vantor (Maxar, formerly DigitalGlobe)"));
+        assert_eq!(parse_csv(&named("FLOCK 4Y-12"))[0].operator(), Some("Planet"));
+        assert_eq!(parse_csv(CSV)[0].operator(), None);
     }
 
     #[test]

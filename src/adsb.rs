@@ -332,6 +332,11 @@ impl Tracks {
         v.into_iter().map(|(_, h)| h.clone()).collect()
     }
 
+    /// Every aircraft's latest report.
+    pub fn all(&self) -> impl Iterator<Item = &Aircraft> {
+        self.by_hex.values().map(|t| &t.latest)
+    }
+
     /// How many aircraft are tracked.
     pub fn len(&self) -> usize {
         self.by_hex.len()

@@ -285,6 +285,11 @@ impl Fleet {
         });
     }
 
+    /// Every ship known.
+    pub fn all(&self) -> impl Iterator<Item = &Ship> {
+        self.ships.values()
+    }
+
     /// How many ships are known (with or without a position yet).
     pub fn len(&self) -> usize {
         self.ships.len()
