@@ -135,8 +135,10 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
   SSTV, BPSK, LoRa...) and what it is, the uplink for transceivers and transponders, and
   ⚠ where SatNOGS flags one as off its coordinated frequency; then how many more and how
   many inactive. With the next pass over you, that's when to listen and what to tune to.
-  The finder filters to satellites with an active downlink (`radio`) or one mode (`fm`,
-  `lora`, `sstv`, `cw`...). The whole list is one request (about 4 MB) kept a day; after an
+  The finder filters to satellites with an active downlink (`radio`), one mode (`fm`,
+  `lora`, `sstv`, `cw`...), or an active uplink too (`uplink`, `repeater`): the ones you
+  can transmit through, with a licence. They combine: `amateur`, then `uplink`, then `fm`
+  leaves the amateur FM repeaters (SO-50, AO-27, AO-123, the TEVEL2s, the ISS...). The whole list is one request (about 4 MB) kept a day; after an
   error mapterm uses the old copy and doesn't ask again for 2 hours, and without one the
   panel just has no radio section. If your network can't reach db.satnogs.org,
   [`--proxy`](network.md) can.

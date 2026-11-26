@@ -598,6 +598,8 @@ enum Target {
     Operator(&'static str),
     /// Satellites with an active downlink: any (""), or in this mode.
     Radio(String),
+    /// Satellites you can transmit to: an active uplink (repeaters, transponders).
+    Uplink,
     Sat(u64),
     Ship(u32),
     Plane(String),
@@ -679,7 +681,7 @@ fn find(
         }
         // Radio, from the SatNOGS DB: any active downlink, or one mode ("fm", "lora").
         let mut modes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        let mut any = 0;
+        let (mut any, mut up) = (0, 0);
         for s in sats.iter().chain(hidden) {
             let mut seen: Vec<&str> = Vec::new();
             for t in s.radio.iter().filter(|t| t.active && t.downlink_low.is_some()) {
@@ -691,6 +693,15 @@ fn find(
                 }
             }
             any += usize::from(s.radio.iter().any(|t| t.active && t.downlink_low.is_some()));
+            up += usize::from(s.radio.iter().any(two_way));
+        }
+        if up > 0
+            && let Some(sc) = mapterm::fuzzy::score(query, "uplink repeater transponder transceiver two-way")
+        {
+            v.push((
+                sc + 44,
+                Hit { target: Target::Uplink, name: "with an uplink (repeaters, transponders)".into(), detail: format!("SatNOGS · {up} satellites") },
+            ));
         }
         if any > 0
             && let Some(sc) = mapterm::fuzzy::score(query, "radio transmitters frequencies downlink satnogs")
@@ -876,12 +887,19 @@ struct SatFilter {
     operator: Option<&'static str>,
     /// An active downlink: any (""), or in this mode.
     radio: Option<String>,
+    /// An active uplink as well: something to transmit to.
+    uplink: bool,
+}
+
+/// A transmitter you can talk through: active, with an uplink and a downlink.
+fn two_way(t: &mapterm::satnogs::Transmitter) -> bool {
+    t.active && t.uplink_low.is_some() && t.downlink_low.is_some()
 }
 
 impl SatFilter {
     /// Whether it leaves any out.
     fn on(&self) -> bool {
-        !self.countries.is_empty() || !self.missions.is_empty() || self.operator.is_some() || self.radio.is_some()
+        !self.countries.is_empty() || !self.missions.is_empty() || self.operator.is_some() || self.radio.is_some() || self.uplink
     }
 
     /// Whether `s` is shown.
@@ -893,6 +911,7 @@ impl SatFilter {
                 .radio
                 .as_deref()
                 .is_none_or(|m| s.radio.iter().any(|t| t.active && t.downlink_low.is_some() && (m.is_empty() || t.mode.as_deref() == Some(m))))
+            && (!self.uplink || s.radio.iter().any(two_way))
     }
 
     /// What it shows, for the status line: " · China · imaging", or nothing.
@@ -915,6 +934,9 @@ impl SatFilter {
             None => {}
             Some("") => out += " · radio",
             Some(m) => out += &format!(" · radio {m}"),
+        }
+        if self.uplink {
+            out += " · uplink";
         }
         out
     }
@@ -3003,7 +3025,7 @@ async fn main() -> Result<()> {
                             for s in sats.iter_mut().chain(sats_hidden.iter_mut()) {
                                 s.radio = radio.get(&s.norad).cloned().unwrap_or_default();
                             }
-                            if sat_filter.radio.is_some() {
+                            if sat_filter.radio.is_some() || sat_filter.uplink {
                                 filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
                             }
                             map.set_attribution(SATS, "CelesTrak · SatNOGS DB (CC BY-SA 4.0)")?;
@@ -3199,8 +3221,11 @@ async fn main() -> Result<()> {
                                                     finder = None;
                                                     continue;
                                                 }
-                                                if let Target::Radio(m) = &target {
-                                                    sat_filter.radio = Some(m.clone());
+                                                if matches!(target, Target::Radio(_) | Target::Uplink) {
+                                                    match &target {
+                                                        Target::Radio(m) => sat_filter.radio = Some(m.clone()),
+                                                        _ => sat_filter.uplink = true,
+                                                    }
                                                     filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
                                                     (sat_coloring, sat_legend) = recolor(&sats, sat_color);
                                                     if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
@@ -3249,11 +3274,11 @@ async fn main() -> Result<()> {
                                                     Target::Sat(n) => sats.iter().find(|s| s.norad == *n).and_then(|s| s.at(now)).map(|f| (f.lon, f.lat)),
                                                     Target::Ship(m) => fleet.get(*m, now - AIS_DELAY).map(|(_, p)| (p.lon, p.lat)),
                                                     Target::Plane(h) => aircraft.get(h, now - adsb_delay).map(|(_, p, _)| (p.lon, p.lat)),
-                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) | Target::Radio(_) => None,
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) | Target::Radio(_) | Target::Uplink => None,
                                                 };
                                                 (selected, selected_ship, selected_sat) = (None, None, None);
                                                 match target {
-                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) | Target::Radio(_) => {}
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) | Target::Radio(_) | Target::Uplink => {}
                                                     Target::Sat(n) => selected_sat = Some(n),
                                                     Target::Ship(m) => selected_ship = Some(m),
                                                     Target::Plane(h) => selected = Some(h),
