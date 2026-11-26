@@ -54,6 +54,10 @@ pub struct RasterSource {
     pub name: String,
     /// Credit to show for the imagery (known providers are filled in automatically).
     pub attribution: String,
+    /// Drawn over the map rather than as its imagery: a transparent layer such as weather
+    /// radar. The map's land, water and background stay painted under it, and in cell mode
+    /// only its visible parts color a cell. Off by default.
+    pub overlay: bool,
 }
 
 /// A named raster provider: `--raster vantor` instead of a URL.
@@ -402,6 +406,7 @@ impl RasterSource {
             min_zoom: 0,
             name: template.split('/').nth(2).unwrap_or(template).to_string(),
             attribution: known_attribution(template).unwrap_or_default().to_string(),
+            overlay: false,
         })
     }
 
@@ -467,6 +472,7 @@ impl RasterSource {
             mb: None,
             name,
             attribution,
+            overlay: false,
         })
     }
 
@@ -496,6 +502,7 @@ impl RasterSource {
             mb: Some(Arc::new(mb)),
             name,
             attribution,
+            overlay: false,
         })
     }
 
@@ -714,6 +721,31 @@ impl RasterTile {
             return Color::Reset;
         }
         Color::Rgb((r / n) as u8, (g / n) as u8, (b / n) as u8)
+    }
+
+    /// Like [`RasterTile::average`] for a transparent image: the color of its visible pixels
+    /// (weighted by their alpha) and how much of the rectangle is covered, 0 to 1.
+    pub(crate) fn average_visible(&self, x: u32, y: u32, w: u32, h: u32) -> (Color, f64) {
+        let (iw, ih) = self.size();
+        let (x0, y0) = (x.min(iw.saturating_sub(1)), y.min(ih.saturating_sub(1)));
+        let (x1, y1) = ((x + w).min(iw).max(x0 + 1).min(iw), (y + h).min(ih).max(y0 + 1).min(ih));
+        let step = ((w.max(h)) / 4).max(1);
+        let (mut r, mut g, mut b, mut a, mut n) = (0f64, 0f64, 0f64, 0f64, 0u32);
+        let mut yy = y0;
+        while yy < y1 {
+            let mut xx = x0;
+            while xx < x1 {
+                let p = self.rgba.get_pixel(xx, yy);
+                let pa = p[3] as f64 / 255.0;
+                (r, g, b, a, n) = (r + p[0] as f64 * pa, g + p[1] as f64 * pa, b + p[2] as f64 * pa, a + pa, n + 1);
+                xx += step;
+            }
+            yy += step;
+        }
+        if n == 0 || a <= 0.0 {
+            return (Color::Reset, 0.0);
+        }
+        (Color::Rgb((r / a).round() as u8, (g / a).round() as u8, (b / a).round() as u8), a / n as f64)
     }
 }
 
