@@ -392,6 +392,49 @@ pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
     crate::StyleLayer::symbol(id, source).glyph(json!(["get", "glyph"])).text(json!(["get", "label"])).color("#c9d1d9").paint("icon-color", color)
 }
 
+/// The names alone, beside where the dots are (for when [`render_dots`] draws the
+/// satellites themselves): text to the right of each point, none for Starlink.
+pub fn label_layer(id: &str, source: &str) -> crate::StyleLayer {
+    crate::StyleLayer::symbol(id, source).text(json!(["get", "label"])).color("#c9d1d9").layout("text-anchor", "left").layout("text-offset", json!([0.8, 0]))
+}
+
+/// The satellites at Unix time `t` as dots in an RGBA image (not premultiplied), `w` x `h`
+/// pixels, for a map drawn by `vp` in cells of `cell_px` pixels (the image may be smaller
+/// than the cells and scaled up by the terminal): placed to the pixel, so they move smoothly
+/// where a cell-sized glyph would hop. Starlink small, the ISS large.
+pub fn render_dots(sats: &[Sat], t: f64, vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64)) -> Vec<u8> {
+    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+    let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
+    let (sx, sy) = (cell_px.0 / 2.0, cell_px.1 / 4.0);
+    let size = (cell_px.0 / 4.0).max(1.0) as f32;
+    for s in sats {
+        let Some(f) = s.at(t) else { continue };
+        let (x, y) = vp.dot_ll(f.lon, f.lat);
+        let (x, y) = ((x * sx) as f32, (y * sy) as f32);
+        if x < -8.0 || y < -8.0 || x > w as f32 + 8.0 || y > h as f32 + 8.0 {
+            continue;
+        }
+        let r = match s {
+            s if s.norad == 25544 => size * 1.6,
+            s if s.is_starlink() => size * 0.6,
+            _ => size,
+        };
+        let Some(dot) = PathBuilder::from_circle(x, y, r.max(0.8)) else { continue };
+        let (cr, cg, cb) = orbit_rgb(f.alt_km);
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(cr, cg, cb, 235);
+        paint.anti_alias = true;
+        pm.fill_path(&dot, &paint, FillRule::Winding, Transform::identity(), None);
+    }
+    pm.pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect()
+}
+
 /// The satellite drawn nearest the braille dot `dot` at time `t`, within `within` dots.
 pub fn nearest(sats: &[Sat], t: f64, vp: &crate::Viewport, dot: (f64, f64), within: f64) -> Option<u64> {
     sats.iter()
@@ -502,6 +545,17 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         assert_eq!(doc["features"][0]["properties"]["label"], "");
         assert_eq!(doc["features"][0]["properties"]["name"], "STARLINK-31415");
         assert_eq!(parse_csv(CSV)[0].glyph(), "◆");
+    }
+
+    #[test]
+    fn dots_land_where_the_satellite_is() {
+        let iss = parse_csv(CSV);
+        let f = iss[0].at(iss[0].epoch).unwrap();
+        let vp = crate::Viewport::new(&crate::Camera::new(f.lon, f.lat, 3.0), ratatui::layout::Rect::new(0, 0, 40, 20));
+        // 40 x 20 cells of 8 x 16 pixels: 320 x 320, the satellite in the middle.
+        let rgba = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0));
+        let px = |x: usize, y: usize| rgba[(y * 320 + x) * 4 + 3];
+        assert!(px(160, 160) > 0 && px(5, 5) == 0);
     }
 
     #[test]

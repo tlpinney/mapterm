@@ -16,7 +16,10 @@ All notable changes to mapterm are listed here. The format follows
   one-download-per-update policy; the cache shows in `mapterm --cache` as `orbits`.
   Starlink's thousands are a small unnamed ·, and the selected satellite's ground track is
   a smooth image under the text where the terminal shows kitty graphics (braille elsewhere;
-  `timeseries::render_lines`).
+  `timeseries::render_lines`). There, satellites themselves are anti-aliased dots in an
+  image placed to the pixel and redrawn five times a second, so they glide instead of
+  hopping a cell at a time (`satellites::render_dots`); names stay text beside them, and the
+  cell glyphs return while the map moves.
 
 - When the status line doesn't fit, the credits get their own line above it (up to three,
   wrapped) instead of being cut off; the data's licenses ask for them to show.

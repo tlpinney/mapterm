@@ -539,6 +539,9 @@ const SHIPS: &str = "ships";
 const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
 /// The kitty image of paths: the selected satellite's ground track (over the trails).
 const PATH_IMAGE: u32 = 4_000_000_005;
+/// The kitty image of satellite dots, and the layer of their names drawn with it.
+const SAT_IMAGE: u32 = 4_000_000_006;
+const SAT_LABELS: &str = "satellite-labels";
 /// --ais draws ships this many seconds in the past (ships under way report every 2 to 10 s;
 /// small boats every 30 s, which past the last fix move along their course).
 const AIS_DELAY: f64 = 10.0;
@@ -1005,7 +1008,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
     for id in ids {
         // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
         // it is the clearest view of them.
-        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS {
+        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == SAT_LABELS {
             continue;
         }
         let Some(l) = map.layer(&id) else { continue };
@@ -1305,7 +1308,9 @@ async fn main() -> Result<()> {
         let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
         map.add_source(SATS, MapSource::geojson(&empty)?)?;
         map.set_attribution(SATS, "CelesTrak")?;
-        map.add_layers(vec![mapterm::satellites::layer(SATS, SATS)], None)?;
+        map.add_layers(vec![mapterm::satellites::layer(SATS, SATS), mapterm::satellites::label_layer(SAT_LABELS, SATS)], None)?;
+        // Names alone only while the dots are an image.
+        map.set_visibility(SAT_LABELS, false)?;
     }
     // Highlights, the crosshair and the clicked spot, on top of everything.
     map.add_custom_layer(OVERLAYS, Markers::default(), None)?;
@@ -1625,6 +1630,10 @@ async fn main() -> Result<()> {
     let mut sats_drawn = Instant::now();
     let mut selected_sat: Option<u64> = None;
     let mut sat_pass: Option<(u64, Instant, Option<mapterm::satellites::Pass>)> = None;
+    // Where kitty graphics work, satellites are dots in an image placed to the pixel (smooth),
+    // with their names as text: while the image is up, and when it was last drawn.
+    let mut sat_dots = false;
+    let mut sat_dots_drawn = Instant::now();
     let mut follow = false;
     // The trail image needs drawing again (new positions, or the view moved).
     let mut trails_dirty = false;
@@ -2023,6 +2032,29 @@ async fn main() -> Result<()> {
                         }
                         dlog(|| format!("trails: {w}x{h} px, {:.1} ms, shown {trails_shown:?}", t_trails.elapsed().as_secs_f64() * 1000.0));
                     }
+                    // Satellites as dots, five times a second once the map is still (half the
+                    // screen's resolution, scaled up: dots don't need more); the cell glyphs
+                    // stand in while it moves.
+                    let want_dots = !sats.is_empty() && settled;
+                    if want_dots && sat_dots_drawn.elapsed() >= Duration::from_millis(200) {
+                        sat_dots_drawn = Instant::now();
+                        let (w, h) = ((map_area.width as f64 * cpx.0 / 2.0).round() as u32, (map_area.height as f64 * cpx.1 / 2.0).round() as u32);
+                        let vp = Viewport::new(&draw_cam, map_area);
+                        let rgba = mapterm::satellites::render_dots(&sats, unix_now(), &vp, w, h, (cpx.0 / 2.0, cpx.1 / 2.0));
+                        out.write_all(
+                            mapterm::kitty::show_rgba(SAT_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -8, shm).as_bytes(),
+                        )?;
+                        if !sat_dots {
+                            sat_dots = true;
+                            let _ = map.set_visibility(SATS, false);
+                            let _ = map.set_visibility(SAT_LABELS, true);
+                        }
+                    } else if !want_dots && sat_dots {
+                        sat_dots = false;
+                        out.write_all(mapterm::kitty::free(SAT_IMAGE).as_bytes())?;
+                        let _ = map.set_visibility(SATS, true);
+                        let _ = map.set_visibility(SAT_LABELS, false);
+                    }
                 }
                 if kitty {
                     // Re-place the raster images under the text: images are sent once, then
@@ -2284,6 +2316,9 @@ async fn main() -> Result<()> {
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
             let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() {
                 Duration::from_millis(16)
+            } else if sat_dots {
+                // Satellite dots redraw five times a second.
+                Duration::from_millis(100)
             } else if !aircraft.is_empty() || !fleet.is_empty() || !sats.is_empty() {
                 // Aircraft and ships keep moving.
                 Duration::from_millis(250)
