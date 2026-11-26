@@ -27,6 +27,11 @@ All notable changes to mapterm are listed here. The format follows
   unlabelled. `p` opens an fzf-style finder over satellites, aircraft and ships (by name,
   number, callsign, MMSI or operator: `digitalglobe` finds WorldView and Legion), and the
   panel names a satellite's operator for well-known ones (`mapterm::fuzzy`).
+- Satellites by country: CelesTrak's satellite catalog (SATCAT, kept a day) gives every
+  satellite's owner and launch date, shown in the panel. In the finder, typing a country
+  (`china`, `japan`, `russia`, or a code such as `PRC`) offers it with its count, and Enter
+  shows only its satellites ("All countries" brings them back); `--sats-country` starts that
+  way (`satellites::load_catalog`, `owner_name`, `owner_code_for`).
 
 - When the status line doesn't fit, the credits get their own line above it (up to three,
   wrapped) instead of being cut off; the data's licenses ask for them to show.

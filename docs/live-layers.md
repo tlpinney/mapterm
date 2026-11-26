@@ -106,6 +106,11 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
 - **`p`** opens a finder over everything live (satellites, aircraft, ships), fzf-style:
   type any part of a name, NORAD number, callsign or MMSI, or an operator (`digitalglobe`,
   `planet`, `spacex`), ↑/↓ to choose, Enter to select it and fly there.
+- **By country:** the panel shows each satellite's owner and launch date, from CelesTrak's
+  satellite catalog (refreshed daily). Type a country in the finder (`china`, `japan`,
+  `russia`, `india`, or a catalog code such as `PRC`, `CIS`, `ESA`) and choose it to show
+  only its satellites; "All countries" shows them all again. `--sats-country PRC,JPN`
+  starts that way.
 - Each satellite is ◇ (the ISS ◆), colored by orbit: low, medium, geostationary. Starlink
   satellites are a small · without names, since there are thousands; select one to see
   its name.

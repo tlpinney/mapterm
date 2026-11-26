@@ -8,6 +8,7 @@
 //! hours old; after any error it leaves a marker so that no run asks again for 2 hours, and
 //! uses the old copy. It asks for CSV (a third the size of JSON) and gzip, as CelesTrak asks.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -34,6 +35,8 @@ pub struct Sat {
     pub mean_motion: f64,
     /// Degrees.
     pub inclination: f64,
+    /// Who owns it, from the satellite catalog (see [`load_catalog`]) once that's in.
+    pub catalog: Option<CatalogEntry>,
     constants: sgp4::Constants,
     /// The elements' epoch, Unix seconds.
     epoch: f64,
@@ -121,6 +124,7 @@ impl Sat {
             intl: elements.international_designator.clone(),
             mean_motion: elements.mean_motion,
             inclination: elements.inclination,
+            catalog: None,
             constants,
             epoch,
         })
@@ -288,49 +292,46 @@ pub struct Loaded {
     pub note: Option<String>,
 }
 
-fn group_path(group: &str) -> PathBuf {
-    crate::source::cache_root().join("celestrak").join(format!("{group}.csv"))
+fn cache_file(name: &str) -> PathBuf {
+    crate::source::cache_root().join("celestrak").join(name)
 }
 
 fn age(p: &std::path::Path) -> Option<Duration> {
     SystemTime::now().duration_since(std::fs::metadata(p).ok()?.modified().ok()?).ok()
 }
 
-/// The satellites in CelesTrak group `group` (such as `visual`, `stations`, `amateur`,
-/// `weather`): the cached copy while it's under 2 hours old, else a fresh download, and
-/// after any error the old copy (with a marker that keeps every run from asking again for
-/// 2 hours).
-pub async fn load(group: &str) -> Result<Loaded> {
-    if group.is_empty() || !group.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-        bail!("not a CelesTrak group: {group:?}");
-    }
-    let path = group_path(group);
+/// A CelesTrak file by the rules (see the module docs): the cached copy `name` while it's
+/// younger than `fresh`, else a download of `url` (gzip asked for) kept only when `usable`
+/// says it is, and after any error the old copy, with a marker that keeps every run from
+/// asking again for 2 hours. Returns the text, its age in seconds, and why the old copy was
+/// used, if it was.
+async fn fetch_cached(name: &str, url: &str, fresh: Duration, usable: fn(&str) -> bool) -> Result<(String, f64, Option<String>)> {
+    let path = cache_file(name);
     let marker = path.with_extension("wait");
-    let cached = || -> Option<(Vec<Sat>, f64)> {
-        let sats = parse_csv(&std::fs::read_to_string(&path).ok()?);
-        (!sats.is_empty()).then(|| (sats, age(&path).map_or(0.0, |a| a.as_secs_f64())))
+    let cached = || -> Option<(String, f64)> {
+        let text = std::fs::read_to_string(&path).ok()?;
+        usable(&text).then(|| (text, age(&path).map_or(0.0, |a| a.as_secs_f64())))
     };
-    let stale = |note: String| -> Result<Loaded> {
+    let stale = |note: String| -> Result<(String, f64, Option<String>)> {
         match cached() {
-            Some((sats, age)) => Ok(Loaded { sats, age, note: Some(note) }),
+            Some((text, age)) => Ok((text, age, Some(note))),
             None => bail!("{note}"),
         }
     };
-    if age(&path).is_some_and(|a| a < FRESH)
-        && let Some((sats, age)) = cached()
+    if age(&path).is_some_and(|a| a < fresh)
+        && let Some((text, age)) = cached()
     {
-        return Ok(Loaded { sats, age, note: None });
+        return Ok((text, age, None));
     }
     if age(&marker).is_some_and(|a| a < FRESH) {
         let why = std::fs::read_to_string(&marker).unwrap_or_default();
         return stale(format!("not asking CelesTrak again yet ({})", why.trim()));
     }
-    let url = format!("https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=csv");
     let leave = |why: &str| {
         let _ = std::fs::create_dir_all(marker.parent().unwrap_or(&marker));
         let _ = std::fs::write(&marker, why);
     };
-    let resp = match crate::source::http_client().get(&url).header("Accept-Encoding", "gzip").send().await {
+    let resp = match crate::source::http_client().get(url).header("Accept-Encoding", "gzip").send().await {
         Ok(r) => r,
         Err(e) => {
             leave("the download failed");
@@ -355,18 +356,121 @@ pub async fn load(group: &str) -> Result<Loaded> {
     } else {
         String::from_utf8_lossy(&body).into_owned()
     };
-    let sats = parse_csv(&text);
-    if sats.is_empty() {
-        leave("no satellites in the answer");
-        return stale(format!("CelesTrak sent no satellites for group {group}"));
+    if !usable(&text) {
+        leave("nothing usable in the answer");
+        return stale(format!("CelesTrak sent nothing usable for {name}"));
     }
     std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-    let tmp = path.with_extension("csv.part");
+    let tmp = path.with_extension("part");
     std::fs::write(&tmp, &text)?;
     std::fs::rename(&tmp, &path)?;
     let _ = std::fs::remove_file(&marker);
-    Ok(Loaded { sats, age: 0.0, note: None })
+    Ok((text, 0.0, None))
 }
+
+fn check_group(group: &str) -> Result<()> {
+    if group.is_empty() || !group.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        bail!("not a CelesTrak group: {group:?}");
+    }
+    Ok(())
+}
+
+/// The satellites in CelesTrak group `group` (such as `active`, `visual`, `stations`,
+/// `starlink`): the cached copy while it's under 2 hours old, else a fresh download, and
+/// after any error the old copy (with a marker that keeps every run from asking again for
+/// 2 hours).
+pub async fn load(group: &str) -> Result<Loaded> {
+    check_group(group)?;
+    let url = format!("https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=csv");
+    let (text, age, note) = fetch_cached(&format!("{group}.csv"), &url, FRESH, |t| !parse_csv(t).is_empty()).await?;
+    Ok(Loaded { sats: parse_csv(&text), age, note })
+}
+
+/// What the satellite catalog says about one satellite: its owner code (see [`owner_name`])
+/// and launch date.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CatalogEntry {
+    /// Owner code, such as `US` or `PRC`.
+    pub owner: String,
+    /// Launch date, `YYYY-MM-DD`.
+    pub launched: Option<String>,
+}
+
+/// CelesTrak's satellite catalog (SATCAT) for group `group`, by NORAD number: who owns each
+/// satellite and when it was launched. Kept for a day (owners don't change).
+pub async fn load_catalog(group: &str) -> Result<HashMap<u64, CatalogEntry>> {
+    check_group(group)?;
+    let url = format!("https://celestrak.org/satcat/records.php?GROUP={group}&FORMAT=CSV");
+    let (text, _, _) = fetch_cached(&format!("{group}-satcat.csv"), &url, Duration::from_secs(24 * 3600), |t| !parse_catalog(t).is_empty()).await?;
+    Ok(parse_catalog(&text))
+}
+
+/// Read the SATCAT CSV (a header row of field names, then a row per object).
+pub fn parse_catalog(text: &str) -> HashMap<u64, CatalogEntry> {
+    let mut rows = text.lines().filter(|l| !l.trim().is_empty()).map(split_csv);
+    let Some(header) = rows.next() else { return HashMap::new() };
+    let col = |name: &str| header.iter().position(|h| h.trim() == name);
+    let (Some(id), Some(owner)) = (col("NORAD_CAT_ID"), col("OWNER")) else { return HashMap::new() };
+    let launch = col("LAUNCH_DATE");
+    rows.filter_map(|r| {
+        let n = r.get(id)?.trim().parse::<u64>().ok()?;
+        let o = r.get(owner)?.trim().to_string();
+        (!o.is_empty()).then(|| (n, CatalogEntry { owner: o, launched: launch.and_then(|l| r.get(l)).map(|d| d.trim().to_string()).filter(|d| !d.is_empty()) }))
+    })
+    .collect()
+}
+
+/// The owner's name for a SATCAT owner code (`PRC`: People's Republic of China).
+pub fn owner_name(code: &str) -> Option<&'static str> {
+    OWNERS.iter().find(|(c, _)| *c == code).map(|(_, n)| *n)
+}
+
+/// The owner code a word names: a code (`prc`), or a name or everyday name that contains it
+/// (`china`, `japan`, `russia`), case ignored.
+pub fn owner_code_for(word: &str) -> Option<&'static str> {
+    let w = word.trim().to_lowercase();
+    if w.is_empty() {
+        return None;
+    }
+    // A code; then a name or everyday name that is the word (`china` is PRC, not
+    // China/Brazil); then the shortest name that contains it.
+    OWNERS
+        .iter()
+        .find(|(c, _)| c.to_lowercase() == w)
+        .or_else(|| OWNERS.iter().find(|(c, n)| owner_says(c, n, &w)))
+        .or_else(|| OWNERS.iter().filter(|(c, n)| n.to_lowercase().contains(&w) || owner_aliases(c).to_lowercase().contains(&w)).min_by_key(|(_, n)| n.len()))
+        .map(|(c, _)| *c)
+}
+
+/// Whether `words` (lowercase) is an owner's name, one of its everyday names, or the last
+/// word(s) of its name (`japan`, `china`, `south korea`).
+pub fn owner_says(code: &str, name: &str, words: &str) -> bool {
+    let name = name.to_lowercase();
+    let aliases = owner_aliases(code).to_lowercase();
+    name == words
+        || name.ends_with(&format!(" {words}"))
+        || aliases == words
+        || aliases.split(' ').any(|a| a == words)
+        || aliases.starts_with(&format!("{words} "))
+}
+
+/// Everyday names for owners whose catalog names don't say them, so a search for `china`,
+/// `russia` or `usa` finds them.
+pub fn owner_aliases(code: &str) -> &'static str {
+    match code {
+        "PRC" => "China",
+        "CIS" => "Russia USSR Soviet",
+        "US" => "USA America",
+        "UK" => "Britain England",
+        "SKOR" => "South Korea",
+        "NKOR" => "North Korea",
+        "ESA" => "Europe",
+        "ISS" => "Space Station",
+        _ => "",
+    }
+}
+
+include!("satellites_owners.rs");
 
 /// The colour for a satellite's height: low orbit, medium, geostationary.
 pub fn orbit_rgb(alt_km: f64) -> (u8, u8, u8) {
@@ -651,6 +755,21 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         assert_eq!(parse_csv(&named("\"WORLDVIEW-3 (WV-3)\""))[0].operator(), Some("Vantor (Maxar, formerly DigitalGlobe)"));
         assert_eq!(parse_csv(&named("FLOCK 4Y-12"))[0].operator(), Some("Planet"));
         assert_eq!(parse_csv(CSV)[0].operator(), None);
+    }
+
+    #[test]
+    fn owners_by_code_name_and_alias() {
+        assert_eq!(owner_name("PRC"), Some("People's Republic of China"));
+        assert_eq!(owner_code_for("china"), Some("PRC"));
+        assert_eq!(owner_code_for("prc"), Some("PRC"));
+        assert_eq!(owner_code_for("Russia"), Some("CIS"));
+        assert_eq!(owner_code_for("japan"), Some("JPN"));
+        assert_eq!(owner_code_for("south korea"), Some("SKOR"));
+        assert_eq!(owner_code_for("atlantis"), None);
+        let cat =
+            parse_catalog("OBJECT_NAME,OBJECT_ID,NORAD_CAT_ID,OBJECT_TYPE,OWNER,LAUNCH_DATE\nISS (ZARYA),1998-067A,25544,PAY,ISS,1998-11-20\nBAD ROW,,x,,,\n");
+        assert_eq!(cat.get(&25544), Some(&CatalogEntry { owner: "ISS".into(), launched: Some("1998-11-20".into()) }));
+        assert_eq!(cat.len(), 1);
     }
 
     #[test]

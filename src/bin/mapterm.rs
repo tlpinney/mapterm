@@ -80,6 +80,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 visual, stations, starlink, resource, amateur, weather, gnss, ...).
                 p finds one by name or operator
                 Elements are cached for 2 hours, as CelesTrak asks
+  --sats-country CODE[,CODE]
+                only the satellites of these owners: SATCAT codes (US, PRC, CIS, JPN, UK,
+                ESA, ...) or names (china, russia, japan); also from the p finder
   --ais          live ships from aisstream.io's free AIS stream (a free key from
                 aisstream.io: AISSTREAM_API_KEY or --ais-key-cmd). Arrows along the
                 course colored by kind (cargo, tanker, passenger, fishing, pleasure, tug);
@@ -170,6 +173,8 @@ struct Args {
     mapbox_token_cmd: Option<String>,
     /// --adsb: the live aircraft feed (lol, fi or a URL template).
     adsb: Option<String>,
+    /// --sats-country: owner codes or names to show satellites of.
+    sats_country: Vec<String>,
     /// --sats: CelesTrak groups to show.
     sats: Option<Vec<String>>,
     /// --ais: live ships from aisstream.io.
@@ -225,6 +230,7 @@ fn args() -> Result<Args> {
         adsb_key_cmd: None,
         ais: false,
         sats: None,
+        sats_country: Vec::new(),
         ais_key_cmd: None,
         at_here: false,
         location_cmd: None,
@@ -339,6 +345,14 @@ fn args() -> Result<Args> {
                     bail!("--sats: active already includes starlink (CelesTrak asks not to download both)");
                 }
                 a.sats = Some(groups);
+            }
+            "--sats-country" => {
+                let v = it.next().context("--sats-country CODE[,CODE] (PRC, US, JPN, or a name: china)")?;
+                for w in v.split(',').filter(|w| !w.trim().is_empty()) {
+                    let code = mapterm::satellites::owner_code_for(w).with_context(|| format!("--sats-country: no owner called {w:?}"))?;
+                    a.sats_country.push(code.to_string());
+                }
+                a.sats.get_or_insert_with(|| vec!["active".to_string()]);
             }
             "--ais-key-cmd" => a.ais_key_cmd = Some(it.next().context("--ais-key-cmd CMD")?),
             "--adsb-key-cmd" => a.adsb_key_cmd = Some(it.next().context("--adsb-key-cmd CMD")?),
@@ -553,6 +567,8 @@ const AIS_MIN_ZOOM: f64 = 7.0;
 /// Something live the finder can go to.
 #[derive(Clone, Debug, PartialEq)]
 enum Target {
+    /// A satellite owner (SATCAT code), or None: all of them again.
+    Country(Option<String>),
     Sat(u64),
     Ship(u32),
     Plane(String),
@@ -573,15 +589,59 @@ struct Finder {
 }
 
 /// Everything live matching `query` fzf-style, best first (the first 200).
-fn find(query: &str, sats: &[mapterm::satellites::Sat], aircraft: &mapterm::adsb::Tracks, fleet: &mapterm::ais::Fleet) -> Vec<Hit> {
+fn find(
+    query: &str,
+    sats: &[mapterm::satellites::Sat],
+    hidden: &[mapterm::satellites::Sat],
+    country: &[String],
+    aircraft: &mapterm::adsb::Tracks,
+    fleet: &mapterm::ais::Fleet,
+) -> Vec<Hit> {
     let mut v: Vec<(i32, Hit)> = Vec::new();
-    for s in sats {
+    // Countries first: the owners among the satellites, with how many each has.
+    let mut owners: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for s in sats.iter().chain(hidden) {
+        if let Some(c) = &s.catalog {
+            *owners.entry(c.owner.as_str()).or_insert(0) += 1;
+        }
+    }
+    if !country.is_empty() && mapterm::fuzzy::score(query, "all countries every satellite").is_some() {
+        v.push((10_000, Hit { target: Target::Country(None), name: "All countries".into(), detail: format!("{} satellites", sats.len() + hidden.len()) }));
+    }
+    if !query.trim().is_empty() {
+        let q = query.trim().to_lowercase();
+        for (code, n) in &owners {
+            let name = mapterm::satellites::owner_name(code).unwrap_or(code);
+            let text = format!("{name} {code} {}", mapterm::satellites::owner_aliases(code));
+            if let Some(sc) = mapterm::fuzzy::score(query, &text) {
+                // The country the word is (china: PRC) beats one whose name merely starts
+                // with it (China/Brazil); then the one with more satellites.
+                let exact = if code.eq_ignore_ascii_case(&q) || mapterm::satellites::owner_says(code, name, &q) { 60 } else { 0 };
+                let size = (*n as f64).log10().round() as i32;
+                v.push((
+                    sc + 40 + exact + size,
+                    Hit { target: Target::Country(Some(code.to_string())), name: name.to_string(), detail: format!("country · {n} satellites") },
+                ));
+            }
+        }
+    }
+    for s in sats.iter().chain(hidden) {
         // The operator matches too (so "digitalglobe" finds WorldView and Legion), scored a
         // little below a name match.
         let text = format!("{} {} {}", s.name, s.norad, s.intl.as_deref().unwrap_or(""));
         let by_name = mapterm::fuzzy::score(query, &text);
         let by_operator = s.operator().and_then(|op| mapterm::fuzzy::score(query, op)).map(|sc| sc - 8);
-        if let Some(sc) = by_name.max(by_operator) {
+        let by_country = s
+            .catalog
+            .as_ref()
+            .and_then(|c| {
+                mapterm::fuzzy::score(
+                    query,
+                    &format!("{} {}", mapterm::satellites::owner_name(&c.owner).unwrap_or(""), mapterm::satellites::owner_aliases(&c.owner)),
+                )
+            })
+            .map(|sc| sc - 12);
+        if let Some(sc) = by_name.max(by_operator).max(by_country) {
             let detail = match s.operator() {
                 Some(op) => format!("{} · {}", op.split(" (").next().unwrap_or(op), s.norad),
                 None => format!("satellite · {}", s.norad),
@@ -607,6 +667,25 @@ fn find(query: &str, sats: &[mapterm::satellites::Sat], aircraft: &mapterm::adsb
     }
     v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     v.into_iter().take(200).map(|(_, h)| h).collect()
+}
+
+/// Keep `sats` to the owners in `country` (all when it's empty), the rest in `hidden`.
+fn filter_sats(sats: &mut Vec<mapterm::satellites::Sat>, hidden: &mut Vec<mapterm::satellites::Sat>, country: &[String]) {
+    sats.append(hidden);
+    if country.is_empty() {
+        return;
+    }
+    let (keep, rest): (Vec<_>, Vec<_>) = std::mem::take(sats).into_iter().partition(|s| s.catalog.as_ref().is_some_and(|c| country.contains(&c.owner)));
+    *sats = keep;
+    *hidden = rest;
+}
+
+/// A short name for an owner code, for the status line (`PRC`: China).
+fn country_short(code: &str) -> String {
+    match mapterm::satellites::owner_aliases(code).split(' ').next().filter(|a| !a.is_empty()) {
+        Some(alias) if code != "SKOR" && code != "NKOR" => alias.to_string(),
+        _ => mapterm::satellites::owner_name(code).unwrap_or(code).to_string(),
+    }
 }
 
 /// The finder's list, fzf-style: the chosen row reversed, the best at the top.
@@ -773,6 +852,13 @@ fn draw_sat(
     l.push(Line::from(vec![key("position"), Span::raw(format!("{:.3}, {:.3}", fix.lat, fix.lon))]));
     if let Some(op) = s.operator() {
         l.push(Line::from(vec![key("operator"), Span::raw(op)]));
+    }
+    if let Some(c) = &s.catalog {
+        let name = mapterm::satellites::owner_name(&c.owner).unwrap_or("?");
+        l.push(Line::from(vec![key("country"), Span::raw(name.to_string()), Span::styled(format!("  {}", c.owner), dim)]));
+        if let Some(d) = &c.launched {
+            l.push(Line::from(vec![key("launched"), Span::raw(d.clone())]));
+        }
     }
     l.push(Line::from(vec![key("NORAD"), Span::raw(s.norad.to_string())]));
     if let Some(i) = &s.intl {
@@ -1712,6 +1798,17 @@ async fn main() -> Result<()> {
                         Err(e) => notes.push(format!("{g}: {e:#}")),
                     }
                 }
+                // Who owns each (the satellite catalog), kept for a day.
+                for g in &groups {
+                    match mapterm::satellites::load_catalog(g).await {
+                        Ok(cat) => {
+                            for s in all.iter_mut().filter(|s: &&mut mapterm::satellites::Sat| s.catalog.is_none()) {
+                                s.catalog = cat.get(&s.norad).cloned();
+                            }
+                        }
+                        Err(e) => notes.push(format!("{g} catalog: {e:#}")),
+                    }
+                }
                 if otx.send((all, oldest, notes)).is_err() {
                     return;
                 }
@@ -1728,6 +1825,9 @@ async fn main() -> Result<()> {
     let mut sat_dots = false;
     // `p`: the fzf-style finder over everything live (satellites, aircraft, ships).
     let mut finder: Option<Finder> = None;
+    // Satellites of other owners, set aside while a country filter is on.
+    let mut sat_country: Vec<String> = a.sats_country.clone();
+    let mut sats_hidden: Vec<mapterm::satellites::Sat> = Vec::new();
     let mut sat_dots_drawn = Instant::now();
     let mut follow = false;
     // The trail image needs drawing again (new positions, or the view moved).
@@ -2005,7 +2105,12 @@ async fn main() -> Result<()> {
                 }
                 if a.sats.is_some() {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
-                    spans.push(Span::styled(format!("◇ {} sats ", sats.len()), st));
+                    let of = match sat_country.as_slice() {
+                        [] => String::new(),
+                        [one] => format!(" · {}", country_short(one)),
+                        many => format!(" · {} countries", many.len()),
+                    };
+                    spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
                 }
                 if ais_key.is_some() {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
@@ -2502,7 +2607,9 @@ async fn main() -> Result<()> {
                     }
                     if !loaded.is_empty() {
                         sats = loaded;
+                        sats_hidden.clear();
                         sats_age = age;
+                        filter_sats(&mut sats, &mut sats_hidden, &sat_country);
                     }
                 }
                 Some(ev) = srx_ais.recv() => {
@@ -2651,13 +2758,34 @@ async fn main() -> Result<()> {
                                             if let Some(hit) = fd.hits.get(fd.sel) {
                                                 let target = hit.target.clone();
                                                 let now = unix_now();
+                                                // A country: filter the satellites to it (or show them all again).
+                                                if let Target::Country(code) = &target {
+                                                    sat_country = code.iter().cloned().collect();
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_country);
+                                                    if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
+                                                        selected_sat = None;
+                                                    }
+                                                    let what = code.as_deref().map_or("all countries".to_string(), country_short);
+                                                    note = Some((Instant::now(), format!("{} satellites: {what}", sats.len())));
+                                                    finder = None;
+                                                    continue;
+                                                }
+                                                // A satellite set aside by the filter: show everything again first.
+                                                if let Target::Sat(n) = &target
+                                                    && sats_hidden.iter().any(|s| s.norad == *n)
+                                                {
+                                                    sat_country.clear();
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_country);
+                                                }
                                                 let at = match &target {
                                                     Target::Sat(n) => sats.iter().find(|s| s.norad == *n).and_then(|s| s.at(now)).map(|f| (f.lon, f.lat)),
                                                     Target::Ship(m) => fleet.get(*m, now - AIS_DELAY).map(|(_, p)| (p.lon, p.lat)),
                                                     Target::Plane(h) => aircraft.get(h, now - adsb_delay).map(|(_, p, _)| (p.lon, p.lat)),
+                                                    Target::Country(_) => None,
                                                 };
                                                 (selected, selected_ship, selected_sat) = (None, None, None);
                                                 match target {
+                                                    Target::Country(_) => {}
                                                     Target::Sat(n) => selected_sat = Some(n),
                                                     Target::Ship(m) => selected_ship = Some(m),
                                                     Target::Plane(h) => selected = Some(h),
@@ -2672,7 +2800,7 @@ async fn main() -> Result<()> {
                                         _ => {}
                                     }
                                     if refilter && let Some(fd) = finder.as_mut() {
-                                        fd.hits = find(&fd.query, &sats, &aircraft, &fleet);
+                                        fd.hits = find(&fd.query, &sats, &sats_hidden, &sat_country, &aircraft, &fleet);
                                         fd.sel = 0;
                                     }
                                     continue;
@@ -2734,7 +2862,7 @@ async fn main() -> Result<()> {
                                 }
                                 match k.code {
                                     KeyCode::Char('p') if !sats.is_empty() || !aircraft.is_empty() || !fleet.is_empty() => {
-                                        finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &aircraft, &fleet) });
+                                        finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &sats_hidden, &sat_country, &aircraft, &fleet) });
                                     }
                                     KeyCode::Char('/') => {
                                         search = Search::Typing(String::new());
