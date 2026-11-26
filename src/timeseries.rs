@@ -134,6 +134,49 @@ impl SampledPosition {
     }
 }
 
+/// Draw the trails of `paths` (each with its color) at time `t` into an RGBA image (not
+/// premultiplied), `w` x `h` pixels, for a map drawn by `vp` in cells of `cell_px` pixels:
+/// anti-aliased lines fading out over `seconds`, the newest end brightest. Meant to go under
+/// the text as a kitty image, where braille trails would shimmer as they grow.
+pub fn render_trails<'a>(
+    paths: impl IntoIterator<Item = (&'a SampledPosition, (u8, u8, u8))>,
+    t: f64,
+    seconds: f64,
+    vp: &crate::Viewport,
+    w: u32,
+    h: u32,
+    cell_px: (f64, f64),
+) -> Vec<u8> {
+    use tiny_skia::{LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
+    let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
+    // Braille dots are 2 per cell across and 4 down.
+    let (sx, sy) = (cell_px.0 / 2.0, cell_px.1 / 4.0);
+    let stroke = Stroke { width: (cell_px.0 / 5.0).clamp(1.5, 4.0) as f32, line_cap: LineCap::Round, ..Stroke::default() };
+    for (path, (r, g, b)) in paths {
+        let pts = path.trail_samples(t, seconds);
+        for pair in pts.windows(2) {
+            let (p, q) = (pair[0], pair[1]);
+            let ((px, py), (qx, qy)) = (vp.dot_ll(p.lon, p.lat), vp.dot_ll(q.lon, q.lat));
+            let mut pb = PathBuilder::new();
+            pb.move_to((px * sx) as f32, (py * sy) as f32);
+            pb.line_to((qx * sx) as f32, (qy * sy) as f32);
+            let Some(line) = pb.finish() else { continue };
+            let alpha = (1.0 - (t - q.t).max(0.0) / seconds).clamp(0.0, 1.0) * 0.85;
+            let mut paint = Paint::default();
+            paint.set_color_rgba8(r, g, b, (alpha * 255.0) as u8);
+            paint.anti_alias = true;
+            pm.stroke_path(&line, &paint, &stroke, Transform::identity(), None);
+        }
+    }
+    pm.pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect()
+}
+
 /// The point `meters` from (`lon`, `lat`) along `bearing` (degrees from north), on a sphere
 /// (flat-earth steps are fine for the few kilometers between samples).
 pub fn travel(lon: f64, lat: f64, meters: f64, bearing: f64) -> (f64, f64) {

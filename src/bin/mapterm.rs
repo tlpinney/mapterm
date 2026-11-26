@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -71,6 +71,12 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 default), fi (adsb.fi), or a URL with {lat}, {lon} and {nm}. Polled every
                 10 s for the area in view; between polls planes move along their tracks.
                 Arrows point along the track, colored by altitude; i inspects one
+  --ais          live ships from aisstream.io's free AIS stream (a free key from
+                aisstream.io: AISSTREAM_API_KEY or --ais-key-cmd). Arrows along the
+                course colored by kind (cargo, tanker, passenger, fishing, pleasure, tug);
+                streamed for the area in view from zoom 7; click or Tab for details
+  --ais-key-cmd CMD
+                print the aisstream.io API key with a command (else AISSTREAM_API_KEY)
   --adsb-key-cmd CMD
                 print an adsb.lol API key with a command (else ADSB_LOL_KEY). Without
                 one adsb.lol allows 500 requests a day per address (--adsb asks every
@@ -155,6 +161,10 @@ struct Args {
     mapbox_token_cmd: Option<String>,
     /// --adsb: the live aircraft feed (lol, fi or a URL template).
     adsb: Option<String>,
+    /// --ais: live ships from aisstream.io.
+    ais: bool,
+    /// --ais-key-cmd: prints the aisstream.io API key.
+    ais_key_cmd: Option<String>,
     /// --adsb-key-cmd: prints the adsb.lol API key.
     adsb_key_cmd: Option<String>,
     /// --adsb-radius: the largest circle asked for, nautical miles.
@@ -202,6 +212,8 @@ fn args() -> Result<Args> {
         adsb: None,
         adsb_radius: ADSB_RADIUS,
         adsb_key_cmd: None,
+        ais: false,
+        ais_key_cmd: None,
         at_here: false,
         location_cmd: None,
         raster_headers: Vec::new(),
@@ -301,6 +313,8 @@ fn args() -> Result<Args> {
                 let feed = it.next_if(|n| ["lol", "fi", "adsb.lol", "adsb.fi"].contains(&n.as_str()) || n.contains("{lat}"));
                 a.adsb = Some(feed.unwrap_or_default());
             }
+            "--ais" => a.ais = true,
+            "--ais-key-cmd" => a.ais_key_cmd = Some(it.next().context("--ais-key-cmd CMD")?),
             "--adsb-key-cmd" => a.adsb_key_cmd = Some(it.next().context("--adsb-key-cmd CMD")?),
             "--adsb-radius" => {
                 let nm: f64 = it.next().context("--adsb-radius NM")?.parse().context("--adsb-radius NM")?;
@@ -490,8 +504,22 @@ const ADSB_MIN_ZOOM: f64 = 7.0;
 const ADSB_TRAIL: f64 = 90.0;
 /// The --adsb trails' source and layer.
 const TRAILS: &str = "aircraft-trails";
+/// One trail image to draw: whether its layer is on, its paths and colors, the time and
+/// seconds of trail, its kitty image id and z, and whether it's up.
+type TrailSet<'a> = (bool, Vec<(&'a mapterm::timeseries::SampledPosition, (u8, u8, u8))>, f64, f64, u32, i32, &'a mut bool);
+
 /// The kitty image id of the --adsb trail image (far from the tile ids).
 const TRAIL_IMAGE: u32 = 4_000_000_002;
+/// The --ais source and layer, and its trail image.
+const SHIPS: &str = "ships";
+const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
+/// --ais draws ships this many seconds in the past (ships under way report every 2 to 10 s;
+/// small boats every 30 s, which past the last fix move along their course).
+const AIS_DELAY: f64 = 10.0;
+/// Seconds of trail behind each ship.
+const AIS_TRAIL: f64 = 600.0;
+/// Below this zoom --ais streams nothing.
+const AIS_MIN_ZOOM: f64 = 7.0;
 
 /// Seconds since the Unix epoch, the clock aircraft fixes are kept on.
 fn unix_now() -> f64 {
@@ -586,6 +614,75 @@ fn fmt_len(km: f64) -> String {
 
 /// The inspector panel: the features under the clicked spot, then the selected one's details.
 /// Returns the screen rows of the list entries, so clicks can select them.
+/// The --ais panel for the selected ship: who it is and where it's going, live.
+fn draw_ship(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    (s, at): (&mapterm::ais::Ship, mapterm::timeseries::Sample),
+    now: f64,
+    follow: bool,
+    me: Option<&mapterm::locate::Fix>,
+) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" ship ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let d = &s.details;
+    let key = |k: &str| Span::styled(format!(" {k:<13}"), dim);
+    let cat = mapterm::ais::category(d.ship_type);
+    let (r, g, b) = mapterm::ais::category_rgb(cat);
+    let mut l = vec![Line::from(vec![
+        Span::styled(format!(" {} {}", s.glyph(), s.label()), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  {cat}"), dim),
+    ])];
+    l.push(Line::default());
+    if let Some(st) = s.status.map(mapterm::ais::status_text).filter(|t| !t.is_empty()) {
+        let style = if st.contains("distress") || st == "aground" { TStyle::new().fg(Color::Red).add_modifier(Modifier::BOLD) } else { TStyle::new() };
+        l.push(Line::from(vec![key("status"), Span::styled(st, style)]));
+    }
+    match s.sog {
+        Some(v) => l.push(Line::from(vec![key("speed"), Span::raw(format!("{v:.1} kn")), Span::styled(format!("  {:.1} km/h", v * 1.852), dim)])),
+        None => l.push(Line::from(vec![key("speed"), Span::styled("unknown", dim)])),
+    }
+    if let Some(c) = s.cog.filter(|_| s.sog.is_some_and(|v| v >= 0.5)) {
+        l.push(Line::from(vec![key("course"), Span::raw(format!("{:03.0}°", c.rem_euclid(360.0)))]));
+    }
+    if let Some(dest) = &d.destination {
+        l.push(Line::from(vec![key("destination"), Span::raw(dest.clone())]));
+    }
+    if let Some(eta) = &d.eta {
+        l.push(Line::from(vec![key("ETA"), Span::raw(format!("{eta} UTC"))]));
+    }
+    if let Some((len, beam)) = d.size {
+        l.push(Line::from(vec![key("size"), Span::raw(format!("{len:.0} × {beam:.0} m"))]));
+    }
+    if let Some(dr) = d.draught {
+        l.push(Line::from(vec![key("draught"), Span::raw(format!("{dr:.1} m"))]));
+    }
+    if let Some(c) = &d.callsign {
+        l.push(Line::from(vec![key("call sign"), Span::raw(c.clone())]));
+    }
+    if let Some(i) = d.imo {
+        l.push(Line::from(vec![key("IMO"), Span::raw(i.to_string())]));
+    }
+    l.push(Line::from(vec![key("MMSI"), Span::raw(d.mmsi.to_string())]));
+    l.push(Line::from(vec![key("position"), Span::raw(format!("{:.4}, {:.4}", at.lat, at.lon))]));
+    if let Some(me) = me {
+        let nm = mapterm::adsb::distance_nm((me.lon, me.lat), (at.lon, at.lat));
+        l.push(Line::from(vec![key("from you"), Span::raw(format!("{nm:.1} nm")), Span::styled(format!("  {:.1} km", nm * 1.852), dim)]));
+    }
+    l.push(Line::from(vec![key("last report"), Span::raw(format!("{:.0} s ago", (now - s.seen).max(0.0)))]));
+    if d.ship_type.is_none() && d.destination.is_none() {
+        l.push(Line::from(Span::styled(" (details arrive every few minutes)", dim)));
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(format!(" f {} · esc close", if follow { "stop following" } else { "follow" }), dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
 /// The --adsb panel for the selected aircraft: who it is and what it's doing, live.
 fn draw_aircraft(
     f: &mut ratatui::Frame,
@@ -819,7 +916,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
     for id in ids {
         // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
         // it is the clearest view of them.
-        if id == AIRCRAFT || id == TRAILS {
+        if id == AIRCRAFT || id == TRAILS || id == SHIPS {
             continue;
         }
         let Some(l) = map.layer(&id) else { continue };
@@ -932,7 +1029,7 @@ async fn main() -> Result<()> {
     if let Some(src) = src {
         let schema = detect_schema(&src, &cam).await;
         // Watching aircraft over the default basemap: the aviation style, unless --light.
-        if a.adsb.is_some() && a.source.is_none() && !a.light {
+        if (a.adsb.is_some() || a.ais) && a.source.is_none() && !a.light {
             map = Map::aviation(src, schema)?;
         } else {
             map = Map::terminal(src, schema, !a.light)?;
@@ -949,7 +1046,7 @@ async fn main() -> Result<()> {
     // OpenFreeMap styles.
     let builtin_source = a.source.clone().unwrap_or_else(|| OPENFREEMAP.to_string());
     let mut styles: Vec<String> = a.style.iter().cloned().collect();
-    if a.adsb.is_some() && a.style.is_none() && a.source.is_none() && !a.light {
+    if (a.adsb.is_some() || a.ais) && a.style.is_none() && a.source.is_none() && !a.light {
         styles.push(AVIATION.to_string());
     }
     for s in [BUILTIN, AVIATION].into_iter().chain(stylejson::OPENFREEMAP_STYLES) {
@@ -1099,6 +1196,20 @@ async fn main() -> Result<()> {
         map.add_source(TRAILS, MapSource::geojson(&empty)?)?;
         map.set_attribution(AIRCRAFT, &feed.attribution)?;
         map.add_layers(vec![mapterm::adsb::trail_layer(TRAILS, TRAILS), mapterm::adsb::layer(AIRCRAFT, AIRCRAFT)], None)?;
+    }
+    // Live ships (--ais), under the aircraft.
+    let ais_key = if a.ais {
+        let key = mapterm::raster::find_key(a.ais_key_cmd.as_deref(), &["AISSTREAM_API_KEY"])?;
+        Some(key.context("--ais needs a free aisstream.io API key: sign up at https://aisstream.io, then set AISSTREAM_API_KEY or --ais-key-cmd")?)
+    } else {
+        None
+    };
+    if ais_key.is_some() {
+        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
+        map.add_source(SHIPS, MapSource::geojson(&empty)?)?;
+        map.set_attribution(SHIPS, "aisstream.io")?;
+        let above = map.layer_ids().into_iter().find(|id| *id == TRAILS).map(str::to_string);
+        map.add_layers(vec![mapterm::ais::layer(SHIPS, SHIPS)], above.as_deref())?;
     }
     // Highlights, the crosshair and the clicked spot, on top of everything.
     map.add_custom_layer(OVERLAYS, Markers::default(), None)?;
@@ -1275,7 +1386,7 @@ async fn main() -> Result<()> {
     // inline. It asks the terminal, so it runs in raw mode, before the input thread starts.
     // --adsb trails as an image under the text where the terminal shows images: braille lines
     // re-snap to their dot grid as they grow, which shimmers.
-    let trails_kitty = adsb_feed.is_some() && mapterm::kitty::supported();
+    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some()) && mapterm::kitty::supported();
     if trails_kitty {
         let _ = map.set_visibility(TRAILS, false);
     }
@@ -1371,10 +1482,28 @@ async fn main() -> Result<()> {
     let mut aircraft_retry: Option<Instant> = None;
     // The aircraft clicked (its hex), shown in the panel and highlighted; `f` follows it.
     let mut selected: Option<String> = None;
+    // --ais: the ships, the stream's task and the box it streams, and the selected ship.
+    let mut fleet = mapterm::ais::Fleet::default();
+    let (area_tx, area_rx) = tokio::sync::watch::channel::<Option<mapterm::ais::BBox>>(None);
+    let (stx_ais, mut srx_ais) = mpsc::unbounded_channel::<mapterm::ais::Event>();
+    if let Some(key) = ais_key.clone() {
+        tokio::spawn(mapterm::ais::stream(key, area_rx, stx_ais));
+    } else {
+        drop((area_rx, stx_ais));
+    }
+    let mut ais_area: Option<(Instant, mapterm::ais::BBox)> = None;
+    let mut ais_state = String::new();
+    let mut ships_drawn = Instant::now();
+    let mut selected_ship: Option<u32> = None;
     let mut follow = false;
     // The trail image needs drawing again (new positions, or the view moved).
     let mut trails_dirty = false;
     let mut trails_cam: Option<(f64, f64, f64, Rect)> = None;
+    // When the view last moved, when the trails were last drawn, and which trail images
+    // (aircraft, ships) are up.
+    let mut trails_moved = Instant::now();
+    let mut trails_drawn = Instant::now() - Duration::from_secs(10);
+    let mut trails_shown = (false, false);
     // `g`: the location helper runs on a blocking task; its answer flies the map there.
     let (ltx, mut lrx) = mpsc::unbounded_channel::<Result<mapterm::locate::Fix>>();
     let mut locating = false;
@@ -1398,9 +1527,13 @@ async fn main() -> Result<()> {
             }
             ctl.tick(Instant::now());
             // Keep the followed aircraft in the middle (where it's drawn, adsb_delay back).
+            let followed = selected
+                .as_deref()
+                .and_then(|h| aircraft.get(h, unix_now() - adsb_delay).map(|x| x.1))
+                .or_else(|| selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY).map(|x| x.1)));
             if follow
                 && !ctl.animating()
-                && let Some((_, at, _)) = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay))
+                && let Some(at) = followed
             {
                 ctl.cam.lon = at.lon;
                 ctl.cam.lat = at.lat;
@@ -1438,6 +1571,11 @@ async fn main() -> Result<()> {
                 for ((ax, ay), (bx, by)) in [((x - 3.0, y), (x + 3.0, y)), ((x, y - 3.0), (x, y + 3.0))] {
                     overlays.push(Overlay::Line { pts: vec![vp.dot_to_lonlat(ax, ay), vp.dot_to_lonlat(bx, by)], color: cross });
                 }
+            }
+            // The selected ship, the same way.
+            if let Some((s, at)) = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY)) {
+                let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255)).add_modifier(ratatui::style::Modifier::BOLD);
+                overlays.push(Overlay::Marker { lon: at.lon, lat: at.lat, glyph: s.glyph().into(), style: st, label: Some((s.label(), st)), priority: 101 });
             }
             // The selected aircraft: its arrow reversed, with its callsign, over the others.
             if let Some((a, at, _)) = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay)) {
@@ -1497,7 +1635,8 @@ async fn main() -> Result<()> {
                 let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
                 let results = matches!(search, Search::Results { .. });
                 let plane = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay));
-                let panel_w = if results || (inspect && !picks.is_empty()) || plane.is_some() { 52.min(main.width / 2) } else { 0 };
+                let ship = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY));
+                let panel_w = if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() { 52.min(main.width / 2) } else { 0 };
                 let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
                 map_area = m;
                 panel_area = panel;
@@ -1507,6 +1646,10 @@ async fn main() -> Result<()> {
                     _ if inspect && !picks.is_empty() => draw_inspector(f, panel, &picks, sel),
                     _ if let Some(p) = plane => {
                         draw_aircraft(f, panel, p, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if let Some(s) = ship => {
+                        draw_ship(f, panel, s, unix_now(), follow, me.as_ref());
                         Vec::new()
                     }
                     _ => Vec::new(),
@@ -1586,6 +1729,11 @@ async fn main() -> Result<()> {
                         None => spans.push(Span::styled(format!("{name} "), dim)),
                     }
                 }
+                if ais_key.is_some() {
+                    let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
+                    let text = if cam.zoom < AIS_MIN_ZOOM { "⛴ zoom in for ships ".to_string() } else { format!("⛴ {}{} ", fleet.len(), ais_state) };
+                    spans.push(Span::styled(text, st));
+                }
                 if adsb_feed.is_some() {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let text = match aircraft_retry.map(|t| t.saturating_duration_since(Instant::now())) {
@@ -1630,15 +1778,58 @@ async fn main() -> Result<()> {
                     let decl = if shift_mode { smooth::declare_shift(0, map_area, ox, oy) } else { smooth::declare(0, map_area, &cam) };
                     out.write_all(decl.as_bytes())?;
                 }
-                if trails_kitty && map_area.width > 0 && (trails_dirty || trails_cam != Some((draw_cam.lon, draw_cam.lat, draw_cam.zoom, map_area))) {
-                    // One image over the map, above imagery and pixel tiles, under the text.
-                    trails_dirty = false;
-                    trails_cam = Some((draw_cam.lon, draw_cam.lat, draw_cam.zoom, map_area));
-                    let (w, h) = ((map_area.width as f64 * cpx.0).round() as u32, (map_area.height as f64 * cpx.1).round() as u32);
-                    let vp = Viewport::new(&draw_cam, map_area);
-                    let rgba = mapterm::adsb::render_trails(&aircraft, unix_now() - adsb_delay, ADSB_TRAIL, &vp, w, h, cpx);
-                    let img = mapterm::kitty::show_rgba(TRAIL_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -10, shm);
-                    out.write_all(img.as_bytes())?;
+                if trails_kitty && map_area.width > 0 {
+                    // The trail images cover the map, so moving it means drawing them again, a
+                    // few MB each that the terminal (and herdr) must take in. Take them down
+                    // while the view moves and draw them once it has settled; while it stays
+                    // put, at most once a second. Nothing to draw: no image at all.
+                    let view = (draw_cam.lon, draw_cam.lat, draw_cam.zoom, map_area);
+                    if trails_cam != Some(view) {
+                        trails_cam = Some(view);
+                        trails_moved = Instant::now();
+                        for (id, shown) in [(TRAIL_IMAGE, &mut trails_shown.0), (SHIP_TRAIL_IMAGE, &mut trails_shown.1)] {
+                            if std::mem::take(shown) {
+                                out.write_all(mapterm::kitty::free(id).as_bytes())?;
+                            }
+                        }
+                    }
+                    let settled = trails_moved.elapsed() >= Duration::from_millis(150) && !ctl.animating();
+                    let hidden = (adsb_feed.is_some() && !trails_shown.0) || (ais_key.is_some() && !trails_shown.1);
+                    if settled && ((trails_dirty && trails_drawn.elapsed() >= Duration::from_secs(1)) || (hidden && trails_dirty)) {
+                        trails_dirty = false;
+                        trails_drawn = Instant::now();
+                        let t_trails = Instant::now();
+                        let (w, h) = ((map_area.width as f64 * cpx.0).round() as u32, (map_area.height as f64 * cpx.1).round() as u32);
+                        let vp = Viewport::new(&draw_cam, map_area);
+                        let now = unix_now();
+                        let sets: [TrailSet; 2] = [
+                            (
+                                adsb_feed.is_some(),
+                                mapterm::adsb::trail_paths(&aircraft).collect(),
+                                now - adsb_delay,
+                                ADSB_TRAIL,
+                                TRAIL_IMAGE,
+                                -10,
+                                &mut trails_shown.0,
+                            ),
+                            (ais_key.is_some(), fleet.trail_paths().collect(), now - AIS_DELAY, AIS_TRAIL, SHIP_TRAIL_IMAGE, -11, &mut trails_shown.1),
+                        ];
+                        for (on, paths, t, secs, id, z, shown) in sets {
+                            let any = paths.iter().any(|(p, _)| p.trail_samples(t, secs).len() >= 2);
+                            if !on || !any {
+                                if std::mem::take(shown) {
+                                    out.write_all(mapterm::kitty::free(id).as_bytes())?;
+                                }
+                                continue;
+                            }
+                            let rgba = mapterm::timeseries::render_trails(paths, t, secs, &vp, w, h, cpx);
+                            out.write_all(
+                                mapterm::kitty::show_rgba(id, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, z, shm).as_bytes(),
+                            )?;
+                            *shown = true;
+                        }
+                        dlog(|| format!("trails: {w}x{h} px, {:.1} ms, shown {trails_shown:?}", t_trails.elapsed().as_secs_f64() * 1000.0));
+                    }
                 }
                 if kitty {
                     // Re-place the raster images under the text: images are sent once, then
@@ -1805,6 +1996,43 @@ async fn main() -> Result<()> {
                     });
                 }
             }
+            // --ais: stream a box around the view (half a view more on each side, at most 12° a
+            // side), a new one once the view leaves it; none when zoomed out.
+            if ais_key.is_some() && map_area.width > 0 && !ctl.animating() {
+                let want = (cam.zoom >= AIS_MIN_ZOOM).then(|| {
+                    let vp = Viewport::new(&cam, map_area);
+                    let (w, n) = vp.cell_to_lonlat(0, 0);
+                    let (e, s) = vp.cell_to_lonlat(map_area.width, map_area.height);
+                    let (dx, dy) = (((e - w) / 2.0).min(6.0 - (e - w) / 2.0).max(0.0), ((n - s) / 2.0).min(6.0 - (n - s) / 2.0).max(0.0));
+                    let view: mapterm::ais::BBox = [(s, w), (n, e)];
+                    (view, [((s - dy).max(-90.0), (w - dx).max(-180.0)), ((n + dy).min(90.0), (e + dx).min(180.0))])
+                });
+                let current = ais_area.map(|(_, b)| b);
+                let change = match (want, current) {
+                    (None, Some(_)) => Some(None),
+                    (Some((view, wide)), cur) => {
+                        let inside = cur.is_some_and(|[(cs, cw), (cn, ce)]| view[0].0 >= cs && view[0].1 >= cw && view[1].0 <= cn && view[1].1 <= ce);
+                        // Reconnect at most every 3 s.
+                        (!inside && ais_area.is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(3))).then_some(Some(wide))
+                    }
+                    _ => None,
+                };
+                if let Some(b) = change {
+                    dlog(|| format!("ais: area {b:?}"));
+                    ais_area = b.map(|b| (Instant::now(), b));
+                    let _ = area_tx.send(b);
+                }
+            }
+            if ais_key.is_some() && !fleet.is_empty() && ships_drawn.elapsed() >= Duration::from_millis(250) {
+                ships_drawn = Instant::now();
+                fleet.prune(unix_now(), None);
+                if selected_ship.is_some_and(|m| fleet.get(m, unix_now()).is_none()) {
+                    selected_ship = None;
+                    follow = false;
+                }
+                map.set_data(SHIPS, &fleet.points(unix_now() - AIS_DELAY))?;
+                trails_dirty = true;
+            }
             // Move the aircraft a few times a second, drawn adsb_delay in the past so they glide
             // between real fixes (and follow turns) rather than guess ahead.
             if adsb_feed.is_some() && !aircraft.is_empty() && aircraft_drawn.elapsed() >= Duration::from_millis(250) {
@@ -1843,8 +2071,8 @@ async fn main() -> Result<()> {
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
             let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() {
                 Duration::from_millis(16)
-            } else if !aircraft.is_empty() {
-                // Aircraft keep moving.
+            } else if !aircraft.is_empty() || !fleet.is_empty() {
+                // Aircraft and ships keep moving.
                 Duration::from_millis(250)
             } else {
                 Duration::from_millis(500)
@@ -1885,6 +2113,26 @@ async fn main() -> Result<()> {
                             } else {
                                 errors += 1;
                             }
+                        }
+                    }
+                }
+                Some(ev) = srx_ais.recv() => {
+                    match ev {
+                        mapterm::ais::Event::Update(u) => fleet.apply(u, unix_now()),
+                        mapterm::ais::Event::Connected(b) => {
+                            ais_state.clear();
+                            fleet.prune(unix_now(), Some(b));
+                            dlog(|| format!("ais: streaming {b:?}"));
+                        }
+                        mapterm::ais::Event::Retrying(e, wait) => {
+                            dlog(|| format!("ais: {e}; again in {} s", wait.as_secs()));
+                            ais_state = format!(" · reconnecting in {} s", wait.as_secs());
+                            note = Some((Instant::now(), format!("aisstream.io: {e}")));
+                        }
+                        mapterm::ais::Event::Stopped(e) => {
+                            dlog(|| format!("ais: stopped: {e}"));
+                            ais_state = " · stopped".into();
+                            note = Some((Instant::now(), e));
                         }
                     }
                 }
@@ -2056,11 +2304,12 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
                                         });
                                     }
-                                    KeyCode::Esc if selected.is_some() && !inspect => {
+                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some()) && !inspect => {
                                         selected = None;
+                                        selected_ship = None;
                                         follow = false;
                                     }
-                                    KeyCode::Char('f') if selected.is_some() => {
+                                    KeyCode::Char('f') if selected.is_some() || selected_ship.is_some() => {
                                         follow = !follow;
                                         note = Some((Instant::now(), if follow { "following" } else { "not following" }.into()));
                                     }
@@ -2096,6 +2345,20 @@ async fn main() -> Result<()> {
                                     KeyCode::Tab if !picks.is_empty() => sel = (sel + 1) % picks.len(),
                                     // --adsb: Tab / shift+Tab step through the aircraft from the
                                     // middle of the map outward.
+                                    // --ais alone: Tab steps through the ships the same way.
+                                    KeyCode::Tab | KeyCode::BackTab if !inspect && aircraft.is_empty() && !fleet.is_empty() => {
+                                        let order = fleet.by_distance(unix_now() - AIS_DELAY, ctl.cam.lon, ctl.cam.lat);
+                                        let at = selected_ship.and_then(|m| order.iter().position(|x| *x == m));
+                                        let next = match (at, k.code) {
+                                            (None, _) => 0,
+                                            (Some(i), KeyCode::BackTab) => (i + order.len() - 1) % order.len(),
+                                            (Some(i), _) => (i + 1) % order.len(),
+                                        };
+                                        if order.get(next).copied() != selected_ship {
+                                            follow = false;
+                                        }
+                                        selected_ship = order.get(next).copied();
+                                    }
                                     KeyCode::Tab | KeyCode::BackTab if !inspect && !aircraft.is_empty() => {
                                         let order = aircraft.by_distance(unix_now() - adsb_delay, ctl.cam.lon, ctl.cam.lat);
                                         let at = selected.as_ref().and_then(|h| order.iter().position(|x| x == h));
@@ -2259,14 +2522,22 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() {
-                                        // A click on (or next to) an aircraft selects it.
+                                    } else if adsb_feed.is_some() || ais_key.is_some() {
+                                        // A click on (or next to) an aircraft, else a ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
-                                        if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, vp.dot_ll(k.lon, k.lat), 6.0) {
+                                        let dot = vp.dot_ll(k.lon, k.lat);
+                                        if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, dot, 6.0) {
                                             if selected.as_deref() != Some(hex.as_str()) {
                                                 follow = false;
                                             }
                                             selected = Some(hex);
+                                            selected_ship = None;
+                                        } else if let Some((_, mmsi)) = fleet.nearest(unix_now() - AIS_DELAY, &vp, dot, 6.0) {
+                                            if selected_ship != Some(mmsi) {
+                                                follow = false;
+                                            }
+                                            selected_ship = Some(mmsi);
+                                            selected = None;
                                         }
                                     }
                                 }
