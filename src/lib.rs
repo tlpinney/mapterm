@@ -98,6 +98,7 @@ pub mod mbtiles;
 pub mod msbuildings;
 pub mod mvt;
 pub mod nws;
+pub mod odin;
 pub mod outages;
 pub mod pbf;
 pub mod pick;

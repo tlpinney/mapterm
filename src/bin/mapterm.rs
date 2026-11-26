@@ -107,11 +107,13 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 text. Areas that name forecast zones fill in as their outlines arrive
                 (one a second, kept 90 days). With --radar, the alerts in force at the
                 radar's time
-  --outages     power outages from the states that publish them (no key): Pennsylvania
-                (PEMA / PennDOT) and Maryland (MDEM). Counties, and from zoom 9
-                municipalities or ZIP codes, shaded by the share of customers out (by
-                how many where the state doesn't count customers); click one for its
-                numbers. The states update every 15 minutes; mapterm asks every 5
+  --outages     power outages by county across the US from ODIN (the Outage Data
+                Initiative Nationwide, ORNL / U.S. DOE; participating utilities only),
+                and from the states that publish a feed: Pennsylvania (PEMA / PennDOT)
+                and Maryland (MDEM), with municipalities or ZIP codes from zoom 9.
+                Shaded by the share of customers out, or by how many where that isn't
+                given; click one for its numbers, and ODIN's restoration estimates.
+                Asked for every 5 minutes; no key
   --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
                 this computer's time zone
   --sondes      live weather balloons (radiosondes) from SondeHub, tracked by amateur
@@ -1523,8 +1525,37 @@ enum OutageMsg {
     Outlines(usize, mapterm::outages::Level, std::collections::HashMap<String, serde_json::Value>),
     /// A feed's level's figures (finer areas: those with customers out).
     Counts(usize, mapterm::outages::Level, Vec<mapterm::outages::Area>),
+    /// ODIN's counties, and how many utilities were left out as not reporting lately.
+    Odin(Vec<mapterm::outages::Area>, usize),
+    /// Outlines of ODIN's counties, by area key.
+    OdinOutlines(std::collections::HashMap<String, serde_json::Value>),
     /// Why a request failed.
     Error(String),
+}
+
+/// "WEST PENN POWER COMPANY" as "West Penn Power Company" (short words like "&" kept).
+fn title_words(s: &str) -> String {
+    if s.chars().any(|c| c.is_lowercase()) {
+        return s.to_string();
+    }
+    s.split_whitespace()
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map(|f| f.to_uppercase().chain(c.flat_map(char::to_lowercase)).collect::<String>()).unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A time with its weekday when it isn't today: "03:00", "Fri 03:00".
+fn day_hhmm(t: f64) -> String {
+    let day = |t: f64| ((t + zone().at(t).0 as f64) / 86400.0).floor();
+    if day(t) == day(unix_now()) {
+        hhmm(t)
+    } else {
+        let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][(day(t) as i64).rem_euclid(7) as usize];
+        format!("{wd} {}", hhmm(t))
+    }
 }
 
 /// The --outages panel for the selected county, municipality or ZIP code.
@@ -1557,12 +1588,36 @@ fn draw_outage(f: &mut ratatui::Frame, area: Rect, o: &mapterm::outages::Area) {
     if let (Some(c), Some(county)) = (o.county_out, &o.county) {
         l.push(Line::from(vec![key("county"), Span::raw(format!("{} out in {county} County", thousands(c as usize)))]));
     }
+    for (i, (u, n)) in o.utilities.iter().take(6).enumerate() {
+        l.push(Line::from(vec![
+            key(if i == 0 { "utility" } else { "" }),
+            Span::raw(format!("{} ", title_words(u))),
+            Span::styled(thousands(*n as usize), dim),
+        ]));
+    }
+    if let Some(t) = o.restore {
+        l.push(Line::from(vec![key("back by"), Span::raw(format!("{} (the utility's estimate)", day_hhmm(t)))]));
+    }
+    if !o.causes.is_empty() {
+        l.push(Line::from(vec![key("cause"), Span::raw(o.causes.join(", "))]));
+    }
     if let Some(t) = o.updated {
         let ago = ((unix_now() - t) / 60.0).max(0.0).round();
         l.push(Line::from(vec![key("updated"), Span::raw(format!("{} · {ago:.0} min ago", hhmm(t)))]));
     }
+    if let Some(d) = &o.disclaimer {
+        l.push(Line::default());
+        l.push(Line::from(Span::styled(format!(" {d}"), dim)));
+    }
     l.push(Line::default());
-    l.push(Line::from(Span::styled(" From the utilities' reports to the state, every 15 minutes; no restoration times.", dim)));
+    if o.source == "ODIN" {
+        l.push(Line::from(Span::styled(
+            " From ODIN (Oak Ridge National Laboratory): participating utilities only. Your utility's own outage map has the details.",
+            dim,
+        )));
+    } else {
+        l.push(Line::from(Span::styled(format!(" From {}: the utilities' reports to the state, every 15 minutes.", o.source), dim)));
+    }
     l.push(Line::default());
     l.push(Line::from(Span::styled(" esc close", dim)));
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
@@ -2682,6 +2737,7 @@ async fn main() -> Result<()> {
     let mut selected_outage: Option<String> = None;
     let (outx, mut outrx) = mpsc::unbounded_channel::<OutageMsg>();
     if a.outages {
+        let odin_tx = outx.clone();
         tokio::spawn(async move {
             use mapterm::outages::{FEEDS, Level, counts, outlines};
             let mut tags: std::collections::HashMap<(usize, Level), Option<String>> = std::collections::HashMap::new();
@@ -2726,6 +2782,58 @@ async fn main() -> Result<()> {
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(if failed { 900 } else { 300 })).await;
+            }
+        });
+        // ODIN, for the counties outside the states above: the reporting utilities and the
+        // outages every 5 minutes (the outages with their ETag), and outlines for counties
+        // not seen before.
+        let outx = odin_tx;
+        tokio::spawn(async move {
+            let skip: Vec<&str> = mapterm::outages::FEEDS.iter().map(|f| f.fips).collect();
+            let mut outlines = mapterm::odin::cached_outlines();
+            let geoms = |o: &std::collections::HashMap<String, mapterm::odin::Outline>| {
+                o.iter().map(|(k, v)| (format!("odin:{k}"), v.geometry.clone())).collect::<std::collections::HashMap<_, _>>()
+            };
+            if !outlines.is_empty() && outx.send(OutageMsg::OdinOutlines(geoms(&outlines))).is_err() {
+                return;
+            }
+            let (mut etag, mut reports, mut status) = (None::<String>, Vec::new(), std::collections::HashMap::new());
+            loop {
+                let mut errors = Vec::new();
+                match mapterm::odin::status().await {
+                    Ok(s) => status = s,
+                    Err(e) => errors.push(format!("{e:#}")),
+                }
+                match mapterm::odin::reports(etag.as_deref()).await {
+                    Ok(Some((r, t))) => (reports, etag) = (r, t),
+                    Ok(None) => {}
+                    Err(e) => errors.push(format!("{e:#}")),
+                }
+                let (areas, _) = mapterm::odin::counties(&reports, &status, &outlines, unix_now(), &skip);
+                let missing: Vec<String> =
+                    areas.iter().filter_map(|a| a.key.strip_prefix("odin:")).filter(|f| !outlines.contains_key(*f)).map(str::to_string).collect();
+                if !missing.is_empty() {
+                    match mapterm::odin::fetch_outlines(&missing, &outlines).await {
+                        Ok(got) => {
+                            if outx.send(OutageMsg::OdinOutlines(geoms(&got))).is_err() {
+                                return;
+                            }
+                            outlines.extend(got);
+                        }
+                        Err(e) => errors.push(format!("{e:#}")),
+                    }
+                }
+                // Again, with the names of the counties whose outlines just came.
+                let (areas, stale) = mapterm::odin::counties(&reports, &status, &outlines, unix_now(), &skip);
+                if outx.send(OutageMsg::Odin(areas, stale)).is_err() {
+                    return;
+                }
+                for e in errors {
+                    if outx.send(OutageMsg::Error(e)).is_err() {
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(300)).await;
             }
         });
     }
@@ -3936,6 +4044,11 @@ async fn main() -> Result<()> {
                             dlog(|| format!("outages: {} {:?}: {} areas, {} out", mapterm::outages::FEEDS[f].state, level, v.len(), v.iter().map(|c| c.out).sum::<u64>()));
                             outages.set_counts(f, level, v);
                         }
+                        OutageMsg::Odin(v, stale) => {
+                            dlog(|| format!("outages: ODIN: {} counties, {} out, {stale} utilities not reporting", v.len(), v.iter().map(|c| c.out).sum::<u64>()));
+                            outages.set_odin(v, stale);
+                        }
+                        OutageMsg::OdinOutlines(o) => outages.add_odin_outlines(o),
                         OutageMsg::Error(e) => {
                             dlog(|| format!("outages: {e}"));
                             note = Some((Instant::now(), format!("outages: {e}")));

@@ -35,8 +35,8 @@ https://github.com/user-attachments/assets/8bf59b7f-3156-4820-aeeb-2b138fc5bc2b
 - **Live layers:** aircraft from free ADS-B feeds, ships from AIS and weather balloons from
   SondeHub, gliding between reports with trails; satellites placed from their orbits;
   weather radar you can play back over the last two hours and US weather alerts;
-  power outages in Pennsylvania and Maryland by county, town and ZIP code; and your own
-  location.
+  power outages by county across the US (ODIN), and by town and ZIP code in Pennsylvania
+  and Maryland; and your own location.
 - **Search and inspect:** find a place and fly there; point at anything to see its
   features and properties, and copy them as JSON.
 - **Scriptable:** `--snapshot` prints a frame as text, ANSI or HTML, and `--pick` prints
