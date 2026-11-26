@@ -271,8 +271,23 @@ pub fn cached_zone(id: &str) -> Option<Value> {
     if age > ZONE_FRESH {
         return None;
     }
-    let g: Value = serde_json::from_slice(&std::fs::read(&p).ok()?).ok()?;
-    Some(simplify(&g, SIMPLIFY))
+    let raw = std::fs::read(&p).ok()?;
+    let g = simplify(&serde_json::from_slice(&raw).ok()?, SIMPLIFY);
+    // Saved by an older mapterm at full detail: saved again simplified, keeping its date (the
+    // 90 days still count from when it was fetched).
+    if let Ok(small) = serde_json::to_vec(&g)
+        && small.len() * 5 < raw.len() * 4
+    {
+        let modified = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+        let tmp = p.with_extension("part");
+        if std::fs::write(&tmp, &small).is_ok()
+            && std::fs::rename(&tmp, &p).is_ok()
+            && let (Some(t), Ok(f)) = (modified, std::fs::File::options().write(true).open(&p))
+        {
+            let _ = f.set_modified(t);
+        }
+    }
+    Some(g)
 }
 
 /// A zone's outline (GeoJSON geometry): from the disk cache, else one request, kept. A zone

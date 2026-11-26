@@ -61,6 +61,20 @@ pub struct RasterSource {
     /// Tiles must have transparency to count: an opaque one is the service's error image
     /// (RainViewer sends one instead of an error) and is treated as empty. Off by default.
     pub require_alpha: bool,
+    /// Keep tiles in this store instead of the disk cache ([`RasterSource::cache`], one
+    /// database a source for the life of the program): for tiles that never change once
+    /// published and come from many short-lived sources, such as radar scans, all kept in one
+    /// place that removes them when they're old.
+    pub store: Option<Arc<dyn TileStore>>,
+}
+
+/// Somewhere to keep a source's tiles (see [`RasterSource::store`]). An empty tile means the
+/// service has none there.
+pub trait TileStore: Send + Sync {
+    /// The tile, if it's kept.
+    fn get(&self, z: u8, x: u32, y: u32) -> Option<Vec<u8>>;
+    /// Keep a tile.
+    fn put(&self, z: u8, x: u32, y: u32, bytes: &[u8]);
 }
 
 /// A named raster provider: `--raster vantor` instead of a URL.
@@ -411,6 +425,7 @@ impl RasterSource {
             attribution: known_attribution(template).unwrap_or_default().to_string(),
             overlay: false,
             require_alpha: false,
+            store: None,
         })
     }
 
@@ -478,6 +493,7 @@ impl RasterSource {
             attribution,
             overlay: false,
             require_alpha: false,
+            store: None,
         })
     }
 
@@ -509,6 +525,7 @@ impl RasterSource {
             attribution,
             overlay: false,
             require_alpha: false,
+            store: None,
         })
     }
 
@@ -657,6 +674,14 @@ impl RasterSource {
         }
         if self.by_headers {
             return self.tile_by_headers(z, x, y).await;
+        }
+        if let Some(store) = &self.store {
+            if let Some(b) = store.get(z, x, y) {
+                return Ok((!b.is_empty()).then_some(b));
+            }
+            let bytes = get_with(&self.http, &self.fill_key(&self.url(z, x, y)), None, &[]).await.map_err(|e| self.redact(e))?;
+            store.put(z, x, y, bytes.as_deref().unwrap_or(&[]));
+            return Ok(bytes);
         }
         let cache = if self.cache { crate::tilecache::for_dir(&self.cache_dir) } else { None };
         if let Some(b) = cache.as_ref().and_then(|c| c.fresh(z, x, y)) {
