@@ -268,7 +268,7 @@ legend boxes.
 - **Click** one (or **Tab** through them when there are no aircraft or ships) for its
   altitude, speed, period and inclination, and its ground track for the next orbit on the
   map. With `--at here` the panel shows where it is in your sky when it's up, and its next
-  pass over you that rises at least 10° (rise, highest point, set, in UTC).
+  pass over you that rises at least 10° (rise, highest point, set, in this computer's time zone; `--utc` for UTC).
 - CelesTrak updates elements every 2 hours and asks for one download per update, blocking
   repeats. mapterm keeps each group in `~/.cache/mapterm/celestrak` (`mapterm --cache`
   shows it as `orbits`) and downloads only when that copy is over 2 hours old; after any
