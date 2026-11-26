@@ -752,7 +752,8 @@ fn mission_words(m: mapterm::satellites::Mission) -> &'static str {
         Technology => "engineering demo",
         Amateur => "ham radio education cubesat",
         Military => "defense defence",
-        SpaceStation => "iss crew",
+        SpaceStation => "iss tiangong css",
+        CrewCargo => "crew cargo capsule spacecraft soyuz progress dragon shenzhou tianzhou cygnus",
         Other => "unknown",
     }
 }

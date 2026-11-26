@@ -231,7 +231,17 @@ impl Sat {
     /// (after the groups, so GLONASS's COSMOS satellites stay navigation); else
     /// [`Mission::Other`].
     pub fn mission(&self) -> Mission {
-        mission_by_name(&self.name).or(self.group_mission).or_else(|| mission_by_constellation(&self.name)).unwrap_or(Mission::Other)
+        if CREW_CARGO.iter().any(|p| self.name.starts_with(p)) {
+            return Mission::CrewCargo;
+        }
+        match mission_by_name(&self.name).or(self.group_mission).or_else(|| mission_by_constellation(&self.name)) {
+            // CelesTrak's station group also holds what's docked or deployed there: the
+            // stations are their modules; the rest (small satellites deployed from the ISS,
+            // mostly university and school ones) are amateur and education.
+            Some(Mission::SpaceStation) if !STATION_MODULES.iter().any(|p| self.name.starts_with(p)) => Mission::Amateur,
+            Some(m) => m,
+            None => Mission::Other,
+        }
     }
 
     /// Minutes per orbit.
@@ -533,8 +543,10 @@ include!("satellites_owners.rs");
 /// What a satellite is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Mission {
-    /// Space stations and the craft that visit them.
+    /// Space stations: their modules (ISS, Tiangong).
     SpaceStation,
+    /// Crew and cargo craft: Soyuz, Progress, Dragon, Cygnus, Shenzhou, Tianzhou...
+    CrewCargo,
     /// Military (CelesTrak's military group).
     Military,
     /// Navigation: GPS, GLONASS, Galileo, BeiDou, augmentation.
@@ -559,7 +571,7 @@ pub enum Mission {
 
 impl Mission {
     /// Every mission, in legend order.
-    pub const ALL: [Mission; 11] = [
+    pub const ALL: [Mission; 12] = [
         Mission::Communications,
         Mission::EarthObservation,
         Mission::Radar,
@@ -570,6 +582,7 @@ impl Mission {
         Mission::Amateur,
         Mission::Military,
         Mission::SpaceStation,
+        Mission::CrewCargo,
         Mission::Other,
     ];
 
@@ -586,6 +599,7 @@ impl Mission {
             Mission::Amateur => "amateur and education",
             Mission::Military => "military",
             Mission::SpaceStation => "space station",
+            Mission::CrewCargo => "crew and cargo craft",
             Mission::Other => "other or unknown",
         }
     }
@@ -603,6 +617,7 @@ impl Mission {
             Mission::Amateur => (0xff, 0x6b, 0xcb),
             Mission::Military => (0xff, 0x7b, 0x72),
             Mission::SpaceStation => (0xff, 0xff, 0xff),
+            Mission::CrewCargo => (0xe3, 0xb3, 0x41),
             Mission::Other => (0x6e, 0x76, 0x81),
         }
     }
@@ -649,6 +664,15 @@ pub fn mission_by_name(name: &str) -> Option<Mission> {
         None
     }
 }
+
+/// The stations' own modules, by name: the ISS's (named "ISS (...)", and Poisk) and
+/// Tiangong's ("CSS (...)").
+const STATION_MODULES: [&str; 4] = ["ISS (", "POISK", "CSS (", "TIANGONG"];
+
+/// Crew and cargo craft, by name (whichever group they're in): including the Shenzhou
+/// orbital modules left behind ("SZ-21 MODULE").
+const CREW_CARGO: [&str; 12] =
+    ["PROGRESS", "SOYUZ", "CREW DRAGON", "DRAGON", "CYGNUS", "TIANZHOU", "SHENZHOU", "SZ-", "STARLINER", "HTV", "DREAM CHASER", "ATV"];
 
 /// Constellations CelesTrak's purpose groups don't cover, by name, used only when no group
 /// claims a satellite.
@@ -1346,6 +1370,20 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         assert_eq!(mission_by_name("TIGRISAT"), None);
         assert_eq!(mission_by_name("SARAL"), None);
         assert_eq!(mission_by_name("STARLINK-5859"), Some(Mission::Communications));
+        // The station group, split: modules are the station; visiting craft and what's
+        // deployed from it aren't.
+        let in_stations = |name: &str| {
+            let mut s = parse_csv(&CSV.replace("\"ISS (ZARYA)\"", &format!("\"{name}\""))).remove(0);
+            s.group_mission = Some(Mission::SpaceStation);
+            s.mission()
+        };
+        assert_eq!(in_stations("ISS (NAUKA)"), Mission::SpaceStation);
+        assert_eq!(in_stations("CSS (TIANHE)"), Mission::SpaceStation);
+        assert_eq!(in_stations("POISK"), Mission::SpaceStation);
+        assert_eq!(in_stations("CREW DRAGON 13"), Mission::CrewCargo);
+        assert_eq!(in_stations("SHENZHOU-23 (SZ-23)"), Mission::CrewCargo);
+        assert_eq!(in_stations("SZ-21 MODULE"), Mission::CrewCargo);
+        assert_eq!(in_stations("KNACKSAT-2"), Mission::Amateur);
         // Constellations no group covers, but only after the groups have had their say.
         assert_eq!(mission_by_constellation("YAOGAN-41"), Some(Mission::Military));
         assert_eq!(mission_by_constellation("HULIANWANG DIGUI-01"), Some(Mission::Communications));

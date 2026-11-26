@@ -41,7 +41,8 @@ All notable changes to mapterm are listed here. The format follows
   altitude and ships by kind; `L` hides them, and images under the text keep clear of them.
   `examples/satellites_by_country.rs` draws every active satellite colored by owner.
 - Satellites by mission: communications, Earth observation, radar imaging (SAR), weather,
-  navigation, science, technology, amateur, military, space station, from CelesTrak's
+  navigation, science, technology, amateur, military, space station (its modules), crew and
+  cargo craft, from CelesTrak's
   purpose groups (their catalogs, kept a day, loaded after the satellites are up) and, for
   SAR and the big communications constellations, by name (`satellites::Mission`,
   `load_missions`, `Coloring::Mission`). `o` cycles orbit, country and mission colors with

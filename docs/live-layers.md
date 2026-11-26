@@ -116,7 +116,10 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
   everyone else "other"), or by mission (`--sats-color orbit|country|mission` starts with
   one).
 - **Missions:** communications, Earth observation, radar imaging (SAR), weather,
-  navigation, science, technology, amateur and education, military, space station.
+  navigation, science, technology, amateur and education, military, space station (the
+  ISS's and Tiangong's modules), crew and cargo craft (Soyuz, Progress, Dragon, Cygnus,
+  Shenzhou, Tianzhou, by name). CelesTrak's station group also holds the small satellites
+  deployed from the ISS; those count as amateur and education.
   CelesTrak groups satellites by purpose (weather, resource, gnss, science, military...),
   so mapterm reads those groups' catalogs (kept a day; a satellite in several takes the most
   specific), and knows radar imaging by name (Umbra, ICEYE, Capella, Sentinel-1, RADARSAT,
