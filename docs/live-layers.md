@@ -189,6 +189,31 @@ blends made from both (kitty can't draw an image half transparent, so a blend is
 image); the last doesn't fade into the first. Aircraft, ships and satellites stay live whatever
 the clock says.
 
+## Weather alerts (US)
+
+```
+mapterm --alerts --radar --at here -z 6
+```
+
+The National Weather Service's warnings, watches and advisories (api.weather.gov, public
+domain, no key) as areas outlined and faintly filled by severity: purple extreme, red
+severe, orange moderate, yellow minor. Click one for its text: what it is, until when, who
+issued it, the area, the headline, description and what to do. The status line counts the
+alerts in force (⚠ 431).
+
+Thunderstorm, tornado and flood warnings come with their own outline and show at once. Most
+alerts (small craft, gale, wind, winter weather...) name forecast or marine zones instead,
+and the NWS gives a zone's outline one zone a request: mapterm asks for them one a second,
+the most severe alerts' first, and keeps them for 90 days, so the first time there are a lot
+of alerts the areas fill in over some minutes (⚠ 431 (areas 340/1459)), and after that
+almost all come from the cache. The list itself is asked for every 5 minutes with its ETag,
+so an unchanged list is a tiny reply.
+
+Each alert is shown only while it's in force (from its onset to its end, like a Cesium
+entity's availability): live, that's now; with `--radar` paused or playing, the radar's
+time. The NWS lists only alerts still active, so ones that ended within the radar's two
+hours don't come back.
+
 ## Legends
 
 Whatever is colored gets a legend in the map's lower left, with how many of each:

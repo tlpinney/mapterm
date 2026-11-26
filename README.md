@@ -34,7 +34,7 @@ https://github.com/user-attachments/assets/8bf59b7f-3156-4820-aeeb-2b138fc5bc2b
   the map, with clustering for large point sets.
 - **Live layers:** aircraft from free ADS-B feeds and ships from AIS, gliding between
   reports with trails; satellites placed from their orbits; weather radar you can play
-  back over the last two hours; and your own location.
+  back over the last two hours and US weather alerts; and your own location.
 - **Search and inspect:** find a place and fly there; point at anything to see its
   features and properties, and copy them as JSON.
 - **Scriptable:** `--snapshot` prints a frame as text, ANSI or HTML, and `--pick` prints
@@ -114,7 +114,7 @@ They follow the MapLibre GL / Mapbox GL defaults:
 - [Your data and inspecting the map](docs/data-layers.md): GeoJSON, CSV, GPX, KML,
   FlatGeobuf, Shapefiles, GeoParquet, and `i` inspect
 - [Imagery](docs/imagery.md): satellite and aerial layers, keys and limits
-- [Live layers](docs/live-layers.md): your location, weather radar (`--radar`), aircraft (`--adsb`), ships
+- [Live layers](docs/live-layers.md): your location, weather radar (`--radar`) and alerts (`--alerts`), aircraft (`--adsb`), ships
   (`--ais`), satellites (`--sats`)
 - [Use it in your own app](docs/library.md): the library API
 - [Network and proxies](docs/network.md): `--proxy` (SOCKS5 or HTTP) for everything

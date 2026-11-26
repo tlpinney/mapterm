@@ -98,6 +98,11 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 key), the last two hours in 10-minute scans. space plays the two hours
                 in a loop (again to pause), , and . step a scan (. past the last goes
                 back to now), R hides or shows it. Detail stops at zoom 7
+  --alerts      US weather alerts from the National Weather Service (no key): warnings,
+                watches and advisories as areas colored by severity; click one for its
+                text. Areas that name forecast zones fill in as their outlines arrive
+                (one a second, kept 90 days). With --radar, the alerts in force at the
+                radar's time
   --ais-key-cmd CMD
                 print the aisstream.io API key with a command (else AISSTREAM_API_KEY)
   --adsb-key-cmd CMD
@@ -198,6 +203,8 @@ struct Args {
     ais: bool,
     /// --radar: weather radar from RainViewer.
     radar: bool,
+    /// --alerts: US weather alerts from the NWS.
+    alerts: bool,
     /// --ais-key-cmd: prints the aisstream.io API key.
     ais_key_cmd: Option<String>,
     /// --adsb-key-cmd: prints the adsb.lol API key.
@@ -249,6 +256,7 @@ fn args() -> Result<Args> {
         adsb_key_cmd: None,
         ais: false,
         radar: false,
+        alerts: false,
         sats: None,
         sats_country: Vec::new(),
         sats_color: SatColor::Orbit,
@@ -354,6 +362,7 @@ fn args() -> Result<Args> {
             }
             "--ais" => a.ais = true,
             "--radar" => a.radar = true,
+            "--alerts" => a.alerts = true,
             "--sats" | "--satellites" => {
                 // The groups are optional: take the next argument only if it's a list of
                 // group names (not a file, URL or option).
@@ -1034,6 +1043,7 @@ fn draw_finder(f: &mut ratatui::Frame, area: Rect, fd: &Finder) {
 
 /// The --sats source and layer.
 const SATS: &str = "satellites";
+const ALERTS: &str = "alerts";
 
 /// `HH:MM` (UTC) of a Unix time.
 fn hhmm(t: f64) -> String {
@@ -1251,6 +1261,48 @@ fn draw_sat(
     }
     l.push(Line::default());
     l.push(Line::from(Span::styled(format!(" f {} · esc close", if follow { "stop following" } else { "follow" }), dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
+fn draw_alert(f: &mut ratatui::Frame, area: Rect, al: &mapterm::nws::Alert) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" weather alert ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let (r, g, b) = al.severity.rgb();
+    let key = |k: &str| Span::styled(format!(" {k:<9}"), dim);
+    let mut l = vec![Line::from(Span::styled(format!(" {}", al.event), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
+    l.push(Line::default());
+    l.push(Line::from(vec![key("severity"), Span::styled(al.severity.label(), TStyle::new().fg(Color::Rgb(r, g, b)))]));
+    if let Some(u) = &al.until {
+        let local = u.get(..16).unwrap_or(u).replace('T', " ");
+        l.push(Line::from(vec![key("until"), Span::raw(local), Span::styled(format!(" {}", u.get(19..).unwrap_or("")), dim)]));
+    }
+    if !al.sender.is_empty() {
+        l.push(Line::from(vec![key("from"), Span::raw(al.sender.clone())]));
+    }
+    l.push(Line::from(vec![key("area"), Span::raw(al.area.clone())]));
+    let para = |l: &mut Vec<Line>, text: &str, st: TStyle| {
+        l.push(Line::default());
+        // NWS text is hard-wrapped at 69 columns: rejoin lines within a paragraph.
+        for p in text.split("\n\n") {
+            l.push(Line::from(Span::styled(format!(" {}", p.split_whitespace().collect::<Vec<_>>().join(" ")), st)));
+        }
+    };
+    if let Some(h) = &al.headline {
+        para(&mut l, h, TStyle::new().add_modifier(Modifier::BOLD));
+    }
+    if !al.description.is_empty() {
+        para(&mut l, &al.description, TStyle::new());
+    }
+    if let Some(i) = &al.instruction {
+        para(&mut l, i, TStyle::new().fg(Color::Yellow));
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(" esc close", dim)));
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
 }
 
@@ -1819,6 +1871,12 @@ async fn main() -> Result<()> {
         }
         legend.push((id, color));
     }
+    // Weather alerts (--alerts): under everything that moves.
+    if a.alerts {
+        map.add_source(ALERTS, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
+        map.set_attribution(ALERTS, mapterm::nws::CREDIT)?;
+        map.add_layers(mapterm::nws::layers(ALERTS)?, None)?;
+    }
     // Live aircraft (--adsb): a GeoJSON source the loop refills, over your layers.
     let mut adsb_feed = a.adsb.as_deref().map(mapterm::adsb::Feed::named).transpose()?;
     // adsb.lol's key, only ever sent to adsb.lol.
@@ -2222,6 +2280,73 @@ async fn main() -> Result<()> {
             }
         });
     }
+    // --alerts: the NWS list every 5 minutes (with its ETag), and zone outlines one a second
+    // (from the disk cache at once), the most severe alerts' first.
+    let mut alerts: Vec<mapterm::nws::Alert> = Vec::new();
+    let mut alert_zones: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let mut alerts_dirty = false;
+    let mut alerts_drawn = Instant::now();
+    let mut alerts_window = f64::NAN;
+    let mut selected_alert: Option<String> = None;
+    let (natx, mut narx) = mpsc::unbounded_channel::<Result<Vec<mapterm::nws::Alert>>>();
+    let (nzreq, mut nzreq_rx) = mpsc::unbounded_channel::<Vec<String>>();
+    let (nztx, mut nzrx) = mpsc::unbounded_channel::<(String, serde_json::Value)>();
+    if a.alerts {
+        tokio::spawn(async move {
+            let mut etag: Option<String> = None;
+            loop {
+                let r = mapterm::nws::active(etag.as_deref()).await;
+                let wait = if r.is_ok() { 300 } else { 600 };
+                let send = match r {
+                    Ok(Some((list, tag))) => {
+                        etag = tag;
+                        Some(Ok(list))
+                    }
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                };
+                if let Some(m) = send
+                    && natx.send(m).is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+        });
+        tokio::spawn(async move {
+            let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+            loop {
+                // Take the latest wanted list; cached outlines go straight back.
+                while let Ok(list) = nzreq_rx.try_recv() {
+                    queue = list.into();
+                }
+                while let Some(z) = queue.front().cloned() {
+                    match mapterm::nws::cached_zone(&z) {
+                        Some(g) => {
+                            queue.pop_front();
+                            if nztx.send((z, g)).is_err() {
+                                return;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                match queue.pop_front() {
+                    Some(z) => {
+                        let g = mapterm::nws::zone_outline(&z).await.unwrap_or(serde_json::Value::Null);
+                        if nztx.send((z, g)).is_err() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                    None => match nzreq_rx.recv().await {
+                        Some(list) => queue = list.into(),
+                        None => return,
+                    },
+                }
+            }
+        });
+    }
     let mut sats_drawn = Instant::now();
     let mut selected_sat: Option<u64> = None;
     let mut sat_pass: Option<(u64, Instant, Option<mapterm::satellites::Pass>)> = None;
@@ -2318,6 +2443,15 @@ async fn main() -> Result<()> {
                     1
                 };
                 r.update(&mut map, clock_t, ahead, clock.is_playing(), &draw_cam, map_area);
+            }
+            // Alerts in force at the clock's time: redrawn when outlines arrive (at most every
+            // 2 s) or when the clock crosses into another minute.
+            if a.alerts {
+                let minute = (clock_t / 60.0).floor();
+                if (alerts_dirty && alerts_drawn.elapsed() >= Duration::from_secs(2)) || minute != alerts_window {
+                    map.set_data(ALERTS, &mapterm::nws::features(&alerts, &alert_zones, clock_t))?;
+                    (alerts_dirty, alerts_drawn, alerts_window) = (false, Instant::now(), minute);
+                }
             }
             // Highlight the selected feature and the clicked spot.
             let mut overlays = Vec::new();
@@ -2432,8 +2566,13 @@ async fn main() -> Result<()> {
                 let plane = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay));
                 let ship = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY));
                 let sat = sats.iter().find(|s| Some(s.norad) == selected_sat).and_then(|s| Some((s, s.at(unix_now())?)));
+                let alert = selected_alert.as_ref().and_then(|id| alerts.iter().find(|a| &a.id == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() { 52.min(main.width / 2) } else { 0 };
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() {
+                        52.min(main.width / 2)
+                    } else {
+                        0
+                    };
                 let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
                 map_area = m;
                 panel_area = panel;
@@ -2478,6 +2617,10 @@ async fn main() -> Result<()> {
                     }
                     _ if let Some(s) = ship => {
                         draw_ship(f, panel, s, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if let Some(al) = alert => {
+                        draw_alert(f, panel, al);
                         Vec::new()
                     }
                     _ => Vec::new(),
@@ -2578,6 +2721,13 @@ async fn main() -> Result<()> {
                         },
                     };
                     spans.push(Span::styled(text, st));
+                }
+                if a.alerts {
+                    let now_in = alerts.iter().filter(|al| al.in_force(clock_t)).count();
+                    let want = alerts.iter().filter(|al| al.geometry.is_none()).flat_map(|al| &al.zones).collect::<std::collections::HashSet<_>>();
+                    let have = want.iter().filter(|z| alert_zones.contains_key(**z)).count();
+                    let more = if have < want.len() { format!(" (areas {have}/{})", want.len()) } else { String::new() };
+                    spans.push(Span::styled(format!("⚠ {now_in}{more} "), TStyle::new().fg(Color::Rgb(0xff, 0xa6, 0x4d))));
                 }
                 if let Some(r) = radar.as_ref().filter(|r| !r.is_off()) {
                     match r.shown_time() {
@@ -3113,6 +3263,27 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Some(r) = narx.recv() => {
+                    match r {
+                        Ok(list) => {
+                            dlog(|| format!("alerts: {} active", list.len()));
+                            alerts = list;
+                            let _ = nzreq.send(mapterm::nws::zones_needed(&alerts, &alert_zones));
+                            alerts_dirty = true;
+                            if selected_alert.as_ref().is_some_and(|id| !alerts.iter().any(|a| &a.id == id)) {
+                                selected_alert = None;
+                            }
+                        }
+                        Err(e) => {
+                            dlog(|| format!("alerts: {e:#}"));
+                            note = Some((Instant::now(), format!("alerts: {e:#}")));
+                        }
+                    }
+                }
+                Some((z, g)) = nzrx.recv() => {
+                    alert_zones.insert(z, g);
+                    alerts_dirty = true;
+                }
                 Some(r) = rvrx.recv() => {
                     match r {
                         Ok(scans) if scans.generated != radar_generated || radar_generated == 0 => {
@@ -3534,7 +3705,8 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
                                         });
                                     }
-                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some()) && !inspect => {
+                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some()) && !inspect => {
+                                        selected_alert = None;
                                         selected = None;
                                         selected_ship = None;
                                         selected_sat = None;
@@ -3767,7 +3939,7 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() {
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts {
                                         // A click on (or next to) an aircraft, else a ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
                                         let dot = vp.dot_ll(k.lon, k.lat);
@@ -3792,6 +3964,21 @@ async fn main() -> Result<()> {
                                             selected_sat = Some(norad);
                                             selected = None;
                                             selected_ship = None;
+                                            selected_alert = None;
+                                        } else if a.alerts {
+                                            // An alert area under the click: the most severe.
+                                            let hit = map
+                                                .query_features(&last_cam, map_area, dot)
+                                                .into_iter()
+                                                .filter(|p| p.source.as_deref() == Some(ALERTS))
+                                                .filter_map(|p| p.prop("id").and_then(|v| v.as_str()).map(str::to_string))
+                                                .filter_map(|id| alerts.iter().find(|a| a.id == id))
+                                                .max_by_key(|a| a.severity)
+                                                .map(|a| a.id.clone());
+                                            selected_alert = hit;
+                                            if selected_alert.is_some() {
+                                                (selected, selected_ship, selected_sat) = (None, None, None);
+                                            }
                                         }
                                     }
                                 }

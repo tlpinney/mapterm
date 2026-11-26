@@ -15,6 +15,11 @@ All notable changes to mapterm are listed here. The format follows
   transparent). 512-pixel tiles, the scan
   on screen only unless playing, at most 60 tile requests a minute (RainViewer allows 100),
   and its credit "Weather data by RainViewer" (`mapterm::rainviewer`).
+- US weather alerts: `--alerts` draws the NWS's warnings, watches and advisories as areas
+  colored by severity, each while it's in force at the clock's time (live, or the radar's);
+  click one for its text. Alerts with their own outline show at once; zone outlines come
+  one a second, most severe first, kept 90 days; the list is asked for every 5 minutes with
+  its ETag (`mapterm::nws`).
 - Time on the map: `mapterm::clock` (a `Clock` that's live or plays over a range, looping
   or not, and `Intervals` of time with data, after Cesium's), and
   `mapterm::timelayer::TimeRaster`, image frames that follow it: the frame for the clock's

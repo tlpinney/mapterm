@@ -96,6 +96,7 @@ pub mod mapbox;
 pub mod mbtiles;
 pub mod msbuildings;
 pub mod mvt;
+pub mod nws;
 pub mod pbf;
 pub mod pick;
 pub mod pixels;
