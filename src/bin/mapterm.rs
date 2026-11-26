@@ -2032,6 +2032,12 @@ async fn main() -> Result<()> {
     let mut frame_ms = 0.0f64;
     // Rows under the map for the status line, and the credits when they need their own.
     let mut status_rows: u16 = 1;
+    // The credits' own lines (0: they share the status line), kept steady: they grow at once
+    // but shrink only after needing fewer for a few seconds, or when the window is resized,
+    // so a status line that changes length every frame doesn't move the map up and down.
+    let mut credit_rows: u16 = 0;
+    let mut credit_shrink: Option<Instant> = None;
+    let mut credit_width: u16 = 0;
     // Place search: the state, the chosen place (marked on the map), and the geocoder.
     let geocoder = mapterm::geocode::Geocoder::from_env()?;
     let mut search = Search::Off;
@@ -2484,6 +2490,14 @@ async fn main() -> Result<()> {
                     credits.retain(|c| *c != f.attribution);
                     credits.insert(0, f.attribution.clone());
                 }
+                // Satellites drawn as an image have their style layer hidden, but they're on
+                // the map all the same: their credit stays.
+                if sat_dots
+                    && let Some(c) = map.source(SATS).and_then(MapSource::attribution)
+                    && !credits.iter().any(|x| x == c)
+                {
+                    credits.push(c.to_string());
+                }
                 let credit_items = if credits.is_empty() { vec![basemap_name.clone()] } else { credits };
                 let credits = credit_items.join(" · ");
                 // While the finder is open, the status line is its prompt.
@@ -2514,10 +2528,18 @@ async fn main() -> Result<()> {
                 let together = status_width + 2 + Span::raw(credits.as_str()).width() + 10 <= width;
                 // Otherwise as many lines as they take, broken between credits, up to half
                 // the window.
-                let lines = if together { Vec::new() } else { credit_lines(&credit_items, width) };
+                let lines = credit_lines(&credit_items, width);
                 let most = (f.area().height / 2).max(1) as usize;
-                status_rows = 1 + lines.len().min(most) as u16;
-                if together || s.height < 2 {
+                let want = if together { 0 } else { lines.len().min(most) as u16 };
+                if s.width != credit_width || want >= credit_rows {
+                    // Resized, or they need more: at once.
+                    (credit_rows, credit_shrink, credit_width) = (want, None, s.width);
+                } else if credit_shrink.get_or_insert_with(Instant::now).elapsed() >= Duration::from_secs(5) {
+                    // They've needed fewer for 5 s straight (a frame that needs more resets it).
+                    (credit_rows, credit_shrink) = (want, None);
+                }
+                status_rows = 1 + credit_rows;
+                if credit_rows == 0 || s.height < 2 {
                     spans.push(Span::styled(format!("· {credits} · q quit"), dim));
                     f.render_widget(Paragraph::new(Line::from(spans)), Rect { y: s.bottom() - 1, height: 1, ..s });
                 } else {

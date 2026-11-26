@@ -119,6 +119,11 @@ All notable changes to mapterm are listed here. The format follows
 - Credits on a narrow screen: they take as many lines above the status as they need (up to
   half the window), broken between credits rather than mid-word, so the last one is never
   cut off; before, the line count guessed character wrapping and stopped at three.
+- The credits no longer pop in and out, moving the map: once they have their own lines
+  they keep them until they've needed fewer for 5 seconds (or the window is resized),
+  instead of following a status line whose length changes every frame. And the
+  satellites' credit (CelesTrak, SatNOGS DB) stays while they're drawn as smooth dots;
+  hiding their text layer for that dropped it.
 
 ## [0.4.0] - 2026-11-24
 
