@@ -397,13 +397,16 @@ pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
 /// than the cells and scaled up by the terminal): placed to the pixel, so they move smoothly
 /// where a cell-sized glyph would hop. Starlink small, the ISS large. With `labels`, their
 /// names too (not Starlink's), in [`crate::imagetext`]'s font beside each dot, the ISS
-/// first and any that would overlap one already placed left out.
-pub fn render_dots(sats: &[Sat], t: f64, vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64), labels: bool) -> Vec<u8> {
-    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
+/// first and any that would overlap one already placed left out. The `selected` satellite
+/// (Starlink too) gets a ring and its name, placed before any other.
+#[allow(clippy::too_many_arguments)]
+pub fn render_dots(sats: &[Sat], t: f64, vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64), labels: bool, selected: Option<u64>) -> Vec<u8> {
+    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
     let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
     let (sx, sy) = (cell_px.0 / 2.0, cell_px.1 / 4.0);
     let size = (cell_px.0 / 4.0).max(1.0) as f32;
     let mut named: Vec<(f32, f32, f32, &str)> = Vec::new();
+    let mut chosen: Option<(f32, f32, f32, &str)> = None;
     for s in sats {
         let Some(f) = s.at(t) else { continue };
         let (x, y) = vp.dot_ll(f.lon, f.lat);
@@ -422,16 +425,34 @@ pub fn render_dots(sats: &[Sat], t: f64, vp: &crate::Viewport, w: u32, h: u32, c
         paint.set_color_rgba8(cr, cg, cb, 235);
         paint.anti_alias = true;
         pm.fill_path(&dot, &paint, FillRule::Winding, Transform::identity(), None);
-        if labels && !s.is_starlink() {
+        if Some(s.norad) == selected {
+            chosen = Some((x, y, r, s.name.as_str()));
+        } else if labels && !s.is_starlink() {
             named.push((x, y, r, s.name.as_str()));
         }
     }
-    if labels {
+    // The selected one: a ring round its dot (in the highlight blue).
+    if let Some((x, y, r, _)) = chosen
+        && let Some(ring) = PathBuilder::from_circle(x, y, r + (cell_px.0 as f32 * 0.35).max(2.0))
+    {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(127, 178, 255, 255);
+        paint.anti_alias = true;
+        let stroke = Stroke { width: (cell_px.0 as f32 / 6.0).max(1.2), ..Stroke::default() };
+        pm.stroke_path(&ring, &paint, &stroke, Transform::identity(), None);
+    }
+    if labels || chosen.is_some() {
         // The ISS first, then the rest as they come; a label over one already placed is left
         // out (as the map's own labels are).
         named.sort_by_key(|n| !n.3.starts_with("ISS"));
         let mut glyphs = crate::imagetext::Glyphs::new((cell_px.1 * 0.62) as f32);
         let mut placed: Vec<crate::imagetext::Rect> = Vec::new();
+        // The selected one's name first, in the highlight blue; then the others around it.
+        if let Some((x, y, r, name)) = chosen {
+            let at = (x + r + cell_px.0 as f32 * 0.6, y);
+            glyphs.draw(&mut pm, name, at.0, at.1, (127, 178, 255));
+            placed.push(glyphs.bounds(name, at.0, at.1));
+        }
         for (x, y, r, name) in named {
             let at = (x + r + cell_px.0 as f32 * 0.4, y);
             let b = glyphs.bounds(name, at.0, at.1);
@@ -569,7 +590,7 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         let f = iss[0].at(iss[0].epoch).unwrap();
         let vp = crate::Viewport::new(&crate::Camera::new(f.lon, f.lat, 3.0), ratatui::layout::Rect::new(0, 0, 40, 20));
         // 40 x 20 cells of 8 x 16 pixels: 320 x 320, the satellite in the middle.
-        let rgba = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false);
+        let rgba = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false, None);
         let px = |x: usize, y: usize| rgba[(y * 320 + x) * 4 + 3];
         assert!(px(160, 160) > 0 && px(5, 5) == 0);
     }
@@ -579,14 +600,28 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         let iss = parse_csv(CSV);
         let f = iss[0].at(iss[0].epoch).unwrap();
         let vp = crate::Viewport::new(&crate::Camera::new(f.lon, f.lat, 3.0), ratatui::layout::Rect::new(0, 0, 40, 20));
-        let plain = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false);
-        let named = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), true);
+        let plain = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false, None);
+        let named = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), true, None);
         // The name lights pixels to the right of the dot, not to its left.
         let lit =
             |img: &[u8], x0: usize, x1: usize| (x0..x1).flat_map(|x| (150..170).map(move |y| (x, y))).filter(|&(x, y)| img[(y * 320 + x) * 4 + 3] > 0).count();
         assert_eq!(lit(&plain, 175, 300), 0);
         assert!(lit(&named, 175, 300) > 50);
         assert_eq!(lit(&named, 20, 140), 0);
+    }
+
+    #[test]
+    fn a_selected_starlink_satellite_gets_a_ring_and_its_name() {
+        let csv = CSV.replace("\"ISS (ZARYA)\",1998-067A", "STARLINK-31415,2024-001B").replace(",25544,", ",58001,");
+        let sats = parse_csv(&csv);
+        let f = sats[0].at(sats[0].epoch).unwrap();
+        let vp = crate::Viewport::new(&crate::Camera::new(f.lon, f.lat, 3.0), ratatui::layout::Rect::new(0, 0, 40, 20));
+        let lit = |img: &[u8]| img.chunks(4).filter(|p| p[3] > 0).count();
+        // Unselected, Starlink is a small unnamed dot even with labels on.
+        let plain = render_dots(&sats, sats[0].epoch, &vp, 320, 320, (8.0, 16.0), true, None);
+        let chosen = render_dots(&sats, sats[0].epoch, &vp, 320, 320, (8.0, 16.0), false, Some(58001));
+        assert!(lit(&plain) < 40, "{}", lit(&plain));
+        assert!(lit(&chosen) > lit(&plain) + 200, "ring and name: {} vs {}", lit(&chosen), lit(&plain));
     }
 
     #[test]

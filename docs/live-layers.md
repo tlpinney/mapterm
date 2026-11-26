@@ -97,9 +97,9 @@ elements with SGP4. No key is needed, and once the elements are in nothing more 
 the network: positions are worked out locally, several times a second, so satellites move
 smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
 
-- Groups are CelesTrak's, comma-separated: `--sats` alone is `visual` (the ~100 brightest,
-  with the ISS); others include `stations`, `amateur`, `weather`, `noaa`, `gnss` and
-  `starlink` (about 11,000; there are always a couple of hundred above the horizon).
+- Groups are CelesTrak's, comma-separated: `--sats` alone is `visual,starlink` (the ~150
+  brightest, with the ISS, and Starlink's ~11,000, of which a couple of hundred are always
+  above the horizon); others include `stations`, `amateur`, `weather`, `noaa` and `gnss`.
 - Each satellite is ◇ (the ISS ◆), colored by orbit: low, medium, geostationary. Starlink
   satellites are a small · without names, since there are thousands; select one to see
   its name.

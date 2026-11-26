@@ -75,8 +75,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 satellites, placed from CelesTrak's orbital elements (no key): ◇ (◆ the
                 ISS) colored by orbit height, with names; click or Tab for altitude, speed,
                 period, its ground track and, with --at here, its next pass over you.
-                GROUPS is CelesTrak's, comma-separated (default visual: the ~100 brightest;
-                also stations, amateur, weather, noaa, gnss, starlink, active, ...).
+                GROUPS is CelesTrak's, comma-separated (default visual,starlink: the ~150
+                brightest and Starlink's ~11,000, unlabelled; also stations, amateur,
+                weather, noaa, gnss, active, ...).
                 Elements are cached for 2 hours, as CelesTrak asks
   --ais          live ships from aisstream.io's free AIS stream (a free key from
                 aisstream.io: AISSTREAM_API_KEY or --ais-key-cmd). Arrows along the
@@ -331,7 +332,7 @@ fn args() -> Result<Args> {
                     n.starts_with(|c: char| c.is_ascii_alphanumeric())
                         && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == ',')
                 });
-                let groups: Vec<String> = groups.as_deref().unwrap_or("visual").split(',').filter(|g| !g.is_empty()).map(str::to_string).collect();
+                let groups: Vec<String> = groups.as_deref().unwrap_or("visual,starlink").split(',').filter(|g| !g.is_empty()).map(str::to_string).collect();
                 // CelesTrak asks: the Active list already holds Starlink.
                 if groups.iter().any(|g| g == "active") && groups.iter().any(|g| g == "starlink") {
                     bail!("--sats: active already includes starlink (CelesTrak asks not to download both)");
@@ -1723,8 +1724,19 @@ async fn main() -> Result<()> {
                         overlays.push(Overlay::Line { pts: part, color: dim });
                     }
                 }
-                let st = TStyle::new().fg(Color::Black).bg(dim).add_modifier(ratatui::style::Modifier::BOLD);
-                overlays.push(Overlay::Marker { lon: f.lon, lat: f.lat, glyph: s.glyph().into(), style: st, label: Some((s.name.clone(), st)), priority: 101 });
+                // While the satellites are an image, the image rings it and names it (smoothly);
+                // otherwise a text marker.
+                if !sat_dots {
+                    let st = TStyle::new().fg(Color::Black).bg(dim).add_modifier(ratatui::style::Modifier::BOLD);
+                    overlays.push(Overlay::Marker {
+                        lon: f.lon,
+                        lat: f.lat,
+                        glyph: s.glyph().into(),
+                        style: st,
+                        label: Some((s.name.clone(), st)),
+                        priority: 101,
+                    });
+                }
             }
             // The selected ship, the same way.
             if let Some((s, at)) = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY)) {
@@ -2036,11 +2048,12 @@ async fn main() -> Result<()> {
                     let want_dots = !sats.is_empty() && settled;
                     if want_dots && sat_dots_drawn.elapsed() >= Duration::from_millis(200) {
                         sat_dots_drawn = Instant::now();
+                        // Full resolution when there's text to draw: names, or the selected one's.
                         let named = sats.iter().any(|s| !s.is_starlink());
-                        let scale = if named { 1.0 } else { 0.5 };
+                        let scale = if named || selected_sat.is_some() { 1.0 } else { 0.5 };
                         let (w, h) = ((map_area.width as f64 * cpx.0 * scale).round() as u32, (map_area.height as f64 * cpx.1 * scale).round() as u32);
                         let vp = Viewport::new(&draw_cam, map_area);
-                        let rgba = mapterm::satellites::render_dots(&sats, unix_now(), &vp, w, h, (cpx.0 * scale, cpx.1 * scale), named);
+                        let rgba = mapterm::satellites::render_dots(&sats, unix_now(), &vp, w, h, (cpx.0 * scale, cpx.1 * scale), named, selected_sat);
                         out.write_all(
                             mapterm::kitty::show_rgba(SAT_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -8, shm).as_bytes(),
                         )?;
@@ -2052,6 +2065,8 @@ async fn main() -> Result<()> {
                         sat_dots = false;
                         out.write_all(mapterm::kitty::free(SAT_IMAGE).as_bytes())?;
                         let _ = map.set_visibility(SATS, true);
+                        // Bring the text layer up to date right away.
+                        sats_drawn = Instant::now() - Duration::from_secs(10);
                     }
                 }
                 if kitty {
@@ -2250,7 +2265,15 @@ async fn main() -> Result<()> {
             // one's next pass over you, once a minute.
             // Big groups (Starlink's 11,000 take ~30 ms) twice a second: half a second is a few
             // km of orbit, under a cell at the zooms they're watched at.
-            let every = if sats.len() > 2000 { Duration::from_millis(500) } else { Duration::from_millis(250) };
+            // While the dots image draws them, this text layer is only for when the map moves:
+            // every 2 s is plenty (it catches up as soon as the image comes down).
+            let every = if sat_dots {
+                Duration::from_secs(2)
+            } else if sats.len() > 2000 {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(250)
+            };
             if !sats.is_empty() && sats_drawn.elapsed() >= every {
                 sats_drawn = Instant::now();
                 // The selected one's ground track moves on with it (or goes, when deselected).
