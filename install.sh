@@ -2,7 +2,7 @@
 # Installs mapterm from its GitHub releases:
 #
 #   curl -fsSL https://raw.githubusercontent.com/tlpinney/mapterm/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/tlpinney/mapterm/main/install.sh | sh -s -- --version v0.5.0 --dir /usr/local/bin
+#   curl -fsSL https://raw.githubusercontent.com/tlpinney/mapterm/main/install.sh | sh -s -- --version v0.6.0 --dir /usr/local/bin
 #
 # Picks the build for this machine (macOS, Apple silicon or Intel: one universal binary,
 # signed and notarized; Linux on x86-64 or ARM64), downloads it with the release's

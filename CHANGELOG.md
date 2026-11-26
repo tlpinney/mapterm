@@ -6,6 +6,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-26
+
+Power outages: customers without power by county across the US from ODIN, and by town and
+ZIP code from Pennsylvania's and Maryland's own feeds. Plus `--cache` naming the live layers'
+caches, and a fix so `--cache-clear old` can't remove them or other programs' folders.
+
 ### Added
 
 - Power outages: `--outages` shades counties, and from zoom 9 finer areas, by the share of
@@ -26,7 +32,11 @@ All notable changes to mapterm are listed here. The format follows
 ### Changed
 
 - The alert areas' tile renderer is now `mapterm::areas` (`AreaTiles`, `Shape`), shared by
-  alerts and outages; `nws::AlertTiles` is an alias, given `nws::shapes(...)`.
+  alerts and outages; `nws::AlertTiles` is an alias, given `nws::shapes(...)` (a breaking
+  change for library users of `AlertTiles::set`).
+- The release workflow never touches a release that is already published (a re-run would
+  have put it back to draft and replaced its signed assets), and a manual run with
+  `only=publish` just publishes the crate.
 
 ### Fixed
 
@@ -632,7 +642,8 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
-[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/tlpinney/mapterm/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/tlpinney/mapterm/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tlpinney/mapterm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tlpinney/mapterm/compare/v0.2.0...v0.3.0
