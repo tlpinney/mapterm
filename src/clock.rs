@@ -11,6 +11,61 @@
 //!
 //! Times are seconds on one clock the caller keeps consistent: Unix seconds in the viewer.
 
+/// The time zone times are shown in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Zone {
+    /// The computer's own (daylight saving included), as the system has it.
+    #[default]
+    Local,
+    /// UTC.
+    Utc,
+}
+
+impl Zone {
+    /// Its offset from UTC at time `t` (Unix seconds), in seconds, and its abbreviation
+    /// there (EST, EDT, UTC).
+    pub fn at(self, t: f64) -> (i64, String) {
+        match self {
+            Zone::Utc => (0, "UTC".into()),
+            Zone::Local => local(t),
+        }
+    }
+
+    /// `t` as `HH:MM` in this zone.
+    pub fn hhmm(self, t: f64) -> String {
+        let s = (t + self.at(t).0 as f64).rem_euclid(86400.0) as u64;
+        format!("{:02}:{:02}", s / 3600, s / 60 % 60)
+    }
+
+    /// `t` as `HH:MM EST`.
+    pub fn hhmm_zone(self, t: f64) -> String {
+        format!("{} {}", self.hhmm(t), self.at(t).1)
+    }
+}
+
+#[cfg(unix)]
+fn local(t: f64) -> (i64, String) {
+    // The system's own rules (TZ or /etc/localtime), daylight saving included.
+    let secs = t.floor() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: localtime_r only writes into `tm`, which outlives the call.
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return (0, "UTC".into());
+    }
+    let name = if tm.tm_zone.is_null() {
+        String::new()
+    } else {
+        // SAFETY: tm_zone points at a NUL-terminated name owned by the C library.
+        unsafe { std::ffi::CStr::from_ptr(tm.tm_zone) }.to_string_lossy().into_owned()
+    };
+    (tm.tm_gmtoff as i64, if name.is_empty() { "local".into() } else { name })
+}
+
+#[cfg(not(unix))]
+fn local(_t: f64) -> (i64, String) {
+    (0, "UTC".into())
+}
+
 /// What a playing clock does when it reaches the end of its range (Cesium's `ClockRange`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Range {
@@ -231,6 +286,15 @@ impl<T> Intervals<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zones() {
+        assert_eq!(Zone::Utc.at(0.0), (0, "UTC".to_string()));
+        assert_eq!(Zone::Utc.hhmm_zone(1_795_666_800.0), "04:20 UTC");
+        // The local zone, whatever this machine's is: an offset within a day, and a name.
+        let (off, name) = Zone::Local.at(1_795_666_800.0);
+        assert!(off.abs() <= 14 * 3600 && !name.is_empty());
+    }
 
     #[test]
     fn live_until_moved() {

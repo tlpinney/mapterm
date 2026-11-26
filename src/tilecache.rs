@@ -51,7 +51,9 @@ const TOUCH_AFTER: u64 = 600;
 /// The size limit is checked every this many writes.
 const TRIM_EVERY: u32 = 64;
 
-fn connect(path: &Path) -> Result<Connection> {
+/// Open (or make) a cache database: WAL, a 5 s busy timeout, and space from deleted rows
+/// given back on `PRAGMA incremental_vacuum`.
+pub(crate) fn connect(path: &Path) -> Result<Connection> {
     if let Some(d) = path.parent() {
         std::fs::create_dir_all(d)?;
     }

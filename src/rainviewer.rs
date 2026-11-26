@@ -77,8 +77,59 @@ fn valid_path(path: &str) -> bool {
     path.strip_prefix("/v2/radar/").is_some_and(|id| !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 
-/// RainViewer's scans now (one small request).
+/// How long a scan's tiles are kept: past the two hours RainViewer lists, with room to spare.
+const KEEP_SECS: i64 = 3 * 3600;
+
+/// The radar tile database, opened once: one table of tiles by scan, zoom, column and row,
+/// with when each was saved.
+fn db() -> Option<&'static std::sync::Mutex<rusqlite::Connection>> {
+    static DB: std::sync::OnceLock<Option<std::sync::Mutex<rusqlite::Connection>>> = std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let c = crate::tilecache::connect(&crate::source::cache_root().join("rainviewer.sqlite")).ok()?;
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tiles (scan TEXT, z INTEGER, x INTEGER, y INTEGER, data BLOB, saved INTEGER,
+                 PRIMARY KEY (scan, z, x, y)) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS tiles_saved ON tiles (saved);",
+        )
+        .ok()?;
+        Some(std::sync::Mutex::new(c))
+    })
+    .as_ref()
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// One scan's tiles in the radar database.
+struct ScanTiles {
+    scan: String,
+}
+
+impl crate::raster::TileStore for ScanTiles {
+    fn get(&self, z: u8, x: u32, y: u32) -> Option<Vec<u8>> {
+        let c = db()?.lock().ok()?;
+        c.query_row("SELECT data FROM tiles WHERE scan = ?1 AND z = ?2 AND x = ?3 AND y = ?4", rusqlite::params![self.scan, z, x, y], |r| r.get(0)).ok()
+    }
+
+    fn put(&self, z: u8, x: u32, y: u32, bytes: &[u8]) {
+        if let Some(c) = db().and_then(|d| d.lock().ok()) {
+            let _ = c.execute("INSERT OR REPLACE INTO tiles VALUES (?1, ?2, ?3, ?4, ?5, ?6)", rusqlite::params![self.scan, z, x, y, bytes, unix_now()]);
+        }
+    }
+}
+
+/// Remove the tiles of scans saved more than three hours ago, and give the space back.
+fn prune() {
+    if let Some(c) = db().and_then(|d| d.lock().ok()) {
+        let _ = c.execute("DELETE FROM tiles WHERE saved < ?1", [unix_now() - KEEP_SECS]);
+        let _ = c.execute_batch("PRAGMA incremental_vacuum;");
+    }
+}
+
+/// RainViewer's scans now (one small request); old scans' cached tiles are removed too.
 pub async fn frames() -> Result<Scans> {
+    let _ = tokio::task::spawn_blocking(prune).await;
     let resp = crate::source::http_client().get(INDEX).send().await.context("RainViewer")?;
     let status = resp.status();
     if !status.is_success() {
@@ -88,9 +139,10 @@ pub async fn frames() -> Result<Scans> {
 }
 
 /// A scan as an overlay raster source: 512-pixel tiles (a quarter of the requests 256 would
-/// take), Universal Blue, smoothed, no snow colors; to zoom 7; kept in memory only (a scan is
-/// two hours old by the time it's dropped). Tiles that aren't transparent are RainViewer's
-/// error image and count as empty.
+/// take), Universal Blue, smoothed, no snow colors; to zoom 7. A scan's tiles never change,
+/// so they're kept in one database, `~/.cache/mapterm/rainviewer.sqlite` (RainViewer asks
+/// clients to cache), and [`frames`] removes scans more than three hours old. Tiles that aren't
+/// transparent are RainViewer's error image and count as empty.
 pub fn frame_source(scan: &Scan) -> Result<Arc<RasterSource>> {
     if !valid_path(&scan.path) {
         bail!("not a RainViewer scan path: {:?}", scan.path);
@@ -100,6 +152,7 @@ pub fn frame_source(scan: &Scan) -> Result<Arc<RasterSource>> {
     s.overlay = true;
     s.require_alpha = true;
     s.cache = false;
+    s.store = Some(Arc::new(ScanTiles { scan: scan.path.trim_start_matches("/v2/radar/").to_string() }));
     s.name = "radar".into();
     s.attribution = CREDIT.into();
     Ok(Arc::new(s))
@@ -121,6 +174,7 @@ mod tests {
         assert!(s.past[0].time < s.past[1].time, "oldest first");
         let src = frame_source(&s.past[1]).unwrap();
         assert!(src.overlay && src.require_alpha && !src.cache);
+        assert!(src.store.is_some(), "kept in the radar database");
         assert_eq!((src.tile_px, src.max_zoom), (512, 7));
         assert_eq!(src.attribution, CREDIT);
     }

@@ -105,6 +105,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 text. Areas that name forecast zones fill in as their outlines arrive
                 (one a second, kept 90 days). With --radar, the alerts in force at the
                 radar's time
+  --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
+                this computer's time zone
   --ais-key-cmd CMD
                 print the aisstream.io API key with a command (else AISSTREAM_API_KEY)
   --adsb-key-cmd CMD
@@ -207,6 +209,8 @@ struct Args {
     radar: bool,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
+    /// --utc: show times in UTC rather than the computer's time zone.
+    utc: bool,
     /// --ais-key-cmd: prints the aisstream.io API key.
     ais_key_cmd: Option<String>,
     /// --adsb-key-cmd: prints the adsb.lol API key.
@@ -259,6 +263,7 @@ fn args() -> Result<Args> {
         ais: false,
         radar: false,
         alerts: false,
+        utc: false,
         sats: None,
         sats_country: Vec::new(),
         sats_color: SatColor::Orbit,
@@ -365,6 +370,7 @@ fn args() -> Result<Args> {
             "--ais" => a.ais = true,
             "--radar" => a.radar = true,
             "--alerts" => a.alerts = true,
+            "--utc" => a.utc = true,
             "--sats" | "--satellites" => {
                 // The groups are optional: take the next argument only if it's a list of
                 // group names (not a file, URL or option).
@@ -601,6 +607,10 @@ const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
 const PATH_IMAGE: u32 = 4_000_000_005;
 /// The kitty image of satellite dots and their names.
 const SAT_IMAGE: u32 = 4_000_000_006;
+/// The alert areas' style layers (braille, where the terminal doesn't show images).
+const ALERT_LAYERS: [&str; 3] = ["alerts-fill", "alerts-line", "alerts-selected"];
+/// The alert areas as image tiles drawn here (where it does).
+const ALERT_TILES: &str = "alert-tiles";
 /// --ais draws ships this many seconds in the past (ships under way report every 2 to 10 s;
 /// small boats every 30 s, which past the last fix move along their course).
 const AIS_DELAY: f64 = 10.0;
@@ -821,6 +831,119 @@ fn find(
     }
     v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     v.into_iter().take(200).map(|(_, h)| h).collect()
+}
+
+/// What's running, for which parts of the key list to show.
+#[derive(Clone, Copy)]
+struct HelpOn {
+    radar: bool,
+    alerts: bool,
+    live: bool,
+    sats: bool,
+}
+
+/// The key list: sections of (keys, what they do), those that apply.
+fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static str)>)> {
+    let mut s = vec![
+        (
+            "map",
+            vec![
+                ("drag · arrows · hjkl", "pan"),
+                ("wheel · + -", "zoom (at the pointer)"),
+                ("double-click", "zoom in (shift: out)"),
+                ("shift+drag", "zoom to a box"),
+                ("g", "go to your location"),
+                ("c", "copy the coordinates"),
+            ],
+        ),
+        (
+            "look",
+            vec![
+                ("m", "next style"),
+                ("t", "light or dark"),
+                ("n", "labels on or off"),
+                ("v", "vector overlay: all, labels, none"),
+                ("L", "legends on or off"),
+            ],
+        ),
+        ("find", vec![("/", "search for a place"), ("i", "inspect: what's under the pointer"), ("y", "copy the inspected feature (JSON)")]),
+    ];
+    if on.live || on.alerts {
+        let mut v = vec![("click · Tab", "select (aircraft, ship, satellite, alert)"), ("Esc", "close the panel")];
+        if on.live {
+            v.insert(1, ("f", "follow the selected one"));
+            v.insert(2, ("p", "finder: names, countries, missions..."));
+        }
+        if on.sats {
+            v.push(("o", "satellites by orbit, country or mission"));
+        }
+        s.push(("live", v));
+    }
+    if on.radar {
+        s.push((
+            "radar and time",
+            vec![
+                ("space", "play the last two hours, or pause"),
+                ("< >", "play backward or forward"),
+                ("[ ]", "slower or faster"),
+                (", .", "a scan back or on (. past the last: now)"),
+                ("R", "radar on or off"),
+                ("timeline", "click or drag: go to a time; wheel: zoom"),
+            ],
+        ));
+    } else if on.alerts {
+        s.push(("time", vec![("timeline", "click or drag: go to a time; wheel: zoom")]));
+    }
+    s.push(("", vec![("?", "this list"), ("q", "quit")]));
+    s
+}
+
+/// The key list over the map, in two columns where it's wide enough.
+fn draw_help(f: &mut ratatui::Frame, area: Rect, on: HelpOn) {
+    use ratatui::style::Modifier;
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let key = TStyle::new().fg(Color::Rgb(0xe1, 0xa0, 0x46));
+    let head = TStyle::new().fg(Color::Rgb(0x50, 0x82, 0xbe)).add_modifier(Modifier::BOLD);
+    let section_lines = |sec: &(&str, Vec<(&str, &str)>)| -> Vec<Line<'static>> {
+        let mut l = Vec::new();
+        if !sec.0.is_empty() {
+            l.push(Line::from(Span::styled(format!(" {}", sec.0), head)));
+        }
+        for (k, what) in &sec.1 {
+            l.push(Line::from(vec![Span::styled(format!("  {k:<22}"), key), Span::raw(what.to_string())]));
+        }
+        l.push(Line::default());
+        l
+    };
+    let sections = help_sections(on);
+    let all: Vec<Vec<Line>> = sections.iter().map(section_lines).collect();
+    let total: usize = all.iter().map(Vec::len).sum();
+    let two = area.width >= 110 && total + 2 > area.height as usize;
+    // Split into two columns at the section nearest half way.
+    let mut cols: Vec<Vec<Line>> = vec![Vec::new()];
+    let mut run = 0;
+    for sec in all {
+        if two && cols.len() == 1 && run >= total / 2 {
+            cols.push(Vec::new());
+        }
+        run += sec.len();
+        cols.last_mut().expect("a column").extend(sec);
+    }
+    let col_w: u16 = 70;
+    let w = (col_w * cols.len() as u16 + 2).min(area.width);
+    let h = (cols.iter().map(Vec::len).max().unwrap_or(0) as u16 + 2).min(area.height);
+    let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
+    f.render_widget(ratatui::widgets::Clear, r);
+    let block = Block::bordered()
+        .border_style(dim)
+        .title(Line::from(vec![Span::raw(" "), Span::styled("⠍", key), Span::styled("⠞", TStyle::new().fg(Color::Rgb(0x50, 0x82, 0xbe))), Span::raw(" keys ")]))
+        .title_bottom(Line::from(Span::styled(" ? or esc closes ", dim)).right_aligned());
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    for (i, c) in cols.into_iter().enumerate() {
+        let cr = Rect { x: inner.x + i as u16 * col_w, width: col_w.min(inner.width.saturating_sub(i as u16 * col_w)), ..inner };
+        f.render_widget(Paragraph::new(c), cr);
+    }
 }
 
 /// Whether the timeline shows: with radar that has scans (and isn't hidden), or alerts.
@@ -1074,9 +1197,16 @@ const SATS: &str = "satellites";
 const ALERTS: &str = "alerts";
 
 /// `HH:MM` (UTC) of a Unix time.
+/// The time zone times are shown in: this computer's, or UTC with --utc.
+static ZONE: std::sync::OnceLock<mapterm::clock::Zone> = std::sync::OnceLock::new();
+
+fn zone() -> mapterm::clock::Zone {
+    ZONE.get().copied().unwrap_or_default()
+}
+
+/// `t` as `HH:MM EST` in the zone times are shown in.
 fn hhmm(t: f64) -> String {
-    let s = t.rem_euclid(86400.0) as u64;
-    format!("{:02}:{:02}", s / 3600, s / 60 % 60)
+    zone().hhmm_zone(t)
 }
 
 /// Seconds since the Unix epoch, the clock aircraft fixes are kept on.
@@ -1230,10 +1360,10 @@ fn draw_sat(
         match pass {
             Some(Some(p)) => {
                 let mins = |t: f64| ((t - now) / 60.0).max(0.0);
-                let when = if p.rise <= now { "now".to_string() } else { format!("{} UTC, in {:.0} min", hhmm(p.rise), mins(p.rise)) };
+                let when = if p.rise <= now { "now".to_string() } else { format!("{}, in {:.0} min", hhmm(p.rise), mins(p.rise)) };
                 l.push(Line::from(vec![key("next pass"), Span::raw(when)]));
-                l.push(Line::from(vec![key("highest"), Span::raw(format!("{:.0}° at {} UTC", p.max_elevation, hhmm(p.peak)))]));
-                l.push(Line::from(vec![key("sets"), Span::raw(format!("{} UTC", hhmm(p.set)))]));
+                l.push(Line::from(vec![key("highest"), Span::raw(format!("{:.0}° at {}", p.max_elevation, hhmm(p.peak)))]));
+                l.push(Line::from(vec![key("sets"), Span::raw(hhmm(p.set))]));
             }
             Some(None) => l.push(Line::from(vec![key("next pass"), Span::styled("none over 10° in 24 h", dim)])),
             None => {}
@@ -1305,9 +1435,19 @@ fn draw_alert(f: &mut ratatui::Frame, area: Rect, al: &mapterm::nws::Alert) {
     let mut l = vec![Line::from(Span::styled(format!(" {}", al.event), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
     l.push(Line::default());
     l.push(Line::from(vec![key("severity"), Span::styled(al.severity.label(), TStyle::new().fg(Color::Rgb(r, g, b)))]));
-    if let Some(u) = &al.until {
-        let local = u.get(..16).unwrap_or(u).replace('T', " ");
-        l.push(Line::from(vec![key("until"), Span::raw(local), Span::styled(format!(" {}", u.get(19..).unwrap_or("")), dim)]));
+    if let Some(to) = al.to {
+        // In the zone times are shown in, with the day when it's not today.
+        let (off, _) = zone().at(to);
+        let day = |t: f64| ((t + zone().at(t).0 as f64) / 86400.0).floor();
+        let when = if day(to) == day(unix_now()) {
+            hhmm(to)
+        } else {
+            let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][(((to + off as f64) / 86400.0).floor() as i64).rem_euclid(7) as usize];
+            format!("{wd} {}", hhmm(to))
+        };
+        l.push(Line::from(vec![key("until"), Span::raw(when)]));
+    } else if let Some(u) = &al.until {
+        l.push(Line::from(vec![key("until"), Span::raw(u.clone())]));
     }
     if !al.sender.is_empty() {
         l.push(Line::from(vec![key("from"), Span::raw(al.sender.clone())]));
@@ -1635,7 +1775,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
     for id in ids {
         // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
         // it is the clearest view of them.
-        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS {
+        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
         }
         let Some(l) = map.layer(&id) else { continue };
@@ -1665,6 +1805,7 @@ fn base_visibility(map: &Map) -> std::collections::HashMap<String, bool> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut a = args()?;
+    let _ = ZONE.set(if a.utc { mapterm::clock::Zone::Utc } else { mapterm::clock::Zone::Local });
     // --at here: ask the location helper before anything depends on the start view.
     let mut me: Option<mapterm::locate::Fix> = None;
     if a.at_here {
@@ -1906,10 +2047,20 @@ async fn main() -> Result<()> {
         legend.push((id, color));
     }
     // Weather alerts (--alerts): under everything that moves.
+    let alert_tiles = std::sync::Arc::new(mapterm::nws::AlertTiles::default());
     if a.alerts {
         map.add_source(ALERTS, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
         map.set_attribution(ALERTS, mapterm::nws::CREDIT)?;
         map.add_layers(mapterm::nws::layers(ALERTS)?, None)?;
+        // Where the terminal shows images, the areas are tiles drawn here, moved like imagery;
+        // the braille layers stay for clicking (the lookup covers hidden layers).
+        if mapterm::kitty::supported() {
+            map.add_source(ALERT_TILES, MapSource::raster(mapterm::nws::tile_source(alert_tiles.clone())?))?;
+            map.add_layer(mapterm::StyleLayer::raster(ALERT_TILES, ALERT_TILES))?;
+            for id in ALERT_LAYERS {
+                map.set_visibility(id, false)?;
+            }
+        }
     }
     // Live aircraft (--adsb): a GeoJSON source the loop refills, over your layers.
     let mut adsb_feed = a.adsb.as_deref().map(mapterm::adsb::Feed::named).transpose()?;
@@ -2178,6 +2329,7 @@ async fn main() -> Result<()> {
     let mut hover_dot: Option<(f64, f64)> = None;
     let mut list_rows: Vec<(u16, usize)> = Vec::new();
     let mut panel_area = Rect::default();
+    let mut last_panel = Rect::default();
     // The timeline (with --radar or --alerts): where it was drawn, the span it shows, and
     // whether the user moved that span (then it no longer follows the data).
     let mut timeline_area = Rect::default();
@@ -2327,9 +2479,18 @@ async fn main() -> Result<()> {
     // (from the disk cache at once), the most severe alerts' first.
     let mut alerts: Vec<mapterm::nws::Alert> = Vec::new();
     let mut alert_zones: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
-    let mut alerts_dirty = false;
+    // What the alert layer was last built from: the list changed, outlines have arrived
+    // since, and which alerts were in force (a hash of their ids).
+    let mut alerts_list_new = false;
+    let mut alerts_zones_new = false;
+    // When the last outline arrived: from the disk cache they come all at once, so the areas
+    // go up once they stop; from the NWS, one a second, so every 10 s.
+    let mut alerts_zone_at = Instant::now();
+    // The alert highlighted when the layer was last built.
+    let mut alert_shown_selected: Option<String> = None;
     let mut alerts_drawn = Instant::now();
-    let mut alerts_window = f64::NAN;
+    let mut alerts_in_force: u64 = 0;
+
     let mut selected_alert: Option<String> = None;
     let (natx, mut narx) = mpsc::unbounded_channel::<Result<Vec<mapterm::nws::Alert>>>();
     let (nzreq, mut nzreq_rx) = mpsc::unbounded_channel::<Vec<String>>();
@@ -2417,6 +2578,10 @@ async fn main() -> Result<()> {
     let mut follow = false;
     // The trail image needs drawing again (new positions, or the view moved).
     let mut trails_dirty = false;
+    // The key list (?), over the map.
+    let mut show_help = false;
+    // Image tiles still waiting to be stitched (smooth scrolling): keep frames coming.
+    let mut stitching = false;
     let mut trails_cam: Option<(f64, f64, f64, Rect)> = None;
     // When the view last moved, when the trails were last drawn, and which trail images
     // (aircraft, ships) are up.
@@ -2472,6 +2637,10 @@ async fn main() -> Result<()> {
             let (draw_cam, ox, oy) = if smooth_on && shift_mode { smooth::snap(&cam) } else { (cam, 0, 0) };
             let box_rect = ctl.box_rect();
             last_cam = draw_cam;
+            // Smooth scrolling shifts image tiles by part of a cell: give fetched ones a strip
+            // of their neighbors to shift into, a few at a time (a few ms a frame).
+            map.stitch = smooth_on && shift_mode && kitty;
+            stitching = map.stitch_some(Duration::from_millis(6));
             // The clock moves on, and the radar shows its time.
             let clock_t = clock.tick(unix_now(), clock_at.elapsed().as_secs_f64());
             clock_at = Instant::now();
@@ -2487,13 +2656,25 @@ async fn main() -> Result<()> {
                 };
                 r.update(&mut map, clock_t, ahead, clock.is_playing(), &draw_cam, map_area);
             }
-            // Alerts in force at the clock's time: redrawn when outlines arrive (at most every
-            // 2 s) or when the clock crosses into another minute.
+            // The alerts in force at the clock's time. Rebuilding the layer means every area's
+            // outline again, so only when what's shown changes: a new list, another set in
+            // force, or outlines that arrived meanwhile (once they stop, or every 10 s while
+            // they keep coming).
             if a.alerts {
-                let minute = (clock_t / 60.0).floor();
-                if (alerts_dirty && alerts_drawn.elapsed() >= Duration::from_secs(2)) || minute != alerts_window {
-                    map.set_data(ALERTS, &mapterm::nws::features(&alerts, &alert_zones, clock_t))?;
-                    (alerts_dirty, alerts_drawn, alerts_window) = (false, Instant::now(), minute);
+                let in_force = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    alerts.iter().filter(|al| al.in_force(clock_t)).for_each(|al| al.id.hash(&mut h));
+                    h.finish()
+                };
+                let outlines_due = alerts_zones_new && (alerts_drawn.elapsed() >= Duration::from_secs(10) || alerts_zone_at.elapsed() >= Duration::from_millis(1500));
+                if alerts_list_new || in_force != alerts_in_force || outlines_due || selected_alert != alert_shown_selected {
+                    map.set_data(ALERTS, &mapterm::nws::features(&alerts, &alert_zones, clock_t, selected_alert.as_deref()))?;
+                    alert_tiles.set(&alerts, &alert_zones, clock_t, selected_alert.as_deref());
+                    alert_shown_selected = selected_alert.clone();
+                    // Drawn again from the new areas as the view asks for them.
+                    map.put_raster_tile(ALERT_TILES, None, true);
+                    (alerts_list_new, alerts_zones_new, alerts_drawn, alerts_in_force) = (false, false, Instant::now(), in_force);
                 }
             }
             // Highlight the selected feature and the clicked spot.
@@ -2625,6 +2806,7 @@ async fn main() -> Result<()> {
                         let (r, g, b) = al.severity.rgb();
                         timeline.highlight(al.from.unwrap_or(f64::MIN), al.to.unwrap_or(f64::MAX), Color::Rgb(r / 3, g / 3, b / 3));
                     }
+                    timeline.zone = zone();
                     timeline.render(f.buffer_mut(), tl, &clock, now);
                 }
                 let results = matches!(search, Search::Results { .. }) || finder.is_some();
@@ -2638,7 +2820,10 @@ async fn main() -> Result<()> {
                     } else {
                         0
                     };
-                let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
+                // The panel floats over the map's right side rather than taking room from it,
+                // so opening one doesn't move the map.
+                let m = main;
+                let panel = Rect { x: main.right() - panel_w, width: panel_w, ..main };
                 map_area = m;
                 panel_area = panel;
                 f.render_widget(map.view(&draw_cam), m);
@@ -2692,6 +2877,15 @@ async fn main() -> Result<()> {
                 };
                 if let Some(r) = box_rect {
                     f.render_widget(Block::bordered().border_style(TStyle::new().fg(Color::Yellow)), r);
+                }
+                if show_help {
+                    let on = HelpOn {
+                        radar: radar.is_some(),
+                        alerts: a.alerts,
+                        live: adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some(),
+                        sats: a.sats.is_some(),
+                    };
+                    draw_help(f, main, on);
                 }
                 let vp = Viewport::new(&cam, m);
                 let km = vp.km_per_col(cam.lat) * 10.0;
@@ -2806,7 +3000,7 @@ async fn main() -> Result<()> {
                                 "⏸ ".to_string()
                             };
                             let st = if clock.is_live() { dim } else { TStyle::new().fg(Color::Rgb(127, 178, 255)) };
-                            spans.push(Span::styled(format!("☂ {state}{} UTC · {ago:.0} min ago ", hhmm(t)), st));
+                            spans.push(Span::styled(format!("☂ {state}{} · {ago:.0} min ago ", hhmm(t)), st));
                         }
                         None => spans.push(Span::styled("☂ … ", dim)),
                     }
@@ -2872,7 +3066,7 @@ async fn main() -> Result<()> {
                 }
                 status_rows = 1 + credit_rows;
                 if credit_rows == 0 || s.height < 2 {
-                    spans.push(Span::styled(format!("· {credits} · q quit"), dim));
+                    spans.push(Span::styled(format!("· {credits} · ? keys · q quit"), dim));
                     let row = Rect { y: s.bottom() - 1, height: 1, ..s };
                     f.render_widget(Paragraph::new(Line::from(spans)), row);
                     if logo_w > 0 {
@@ -2888,7 +3082,7 @@ async fn main() -> Result<()> {
                     if logo_w > 0 && shown > 0 {
                         f.render_widget(Paragraph::new(Line::from(logo)), Rect { x: above.right() - LOGO_W, y: above.bottom() - 1, width: LOGO_W, height: 1 });
                     }
-                    spans.push(Span::styled("· q quit", dim));
+                    spans.push(Span::styled("· ? keys · q quit", dim));
                     f.render_widget(Paragraph::new(Line::from(spans)), line);
                 }
             })?;
@@ -2896,6 +3090,15 @@ async fn main() -> Result<()> {
             frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
             if sync {
                 let mut out = std::io::stdout();
+                // What's drawn over the map (legends, the panel): images keep clear of it.
+                let holes: Vec<Rect> = legend_rects.iter().copied().chain((panel_area.width > 0).then_some(panel_area)).collect();
+                kstate.holes = holes.clone();
+                // A panel opened or closed: the satellite and trail images take the new holes now.
+                if panel_area != last_panel {
+                    last_panel = panel_area;
+                    trails_dirty = true;
+                    sat_dots_drawn = Instant::now() - Duration::from_secs(10);
+                }
                 if smooth_on {
                     // Declare after drawing, in the same synchronized update as the cells.
                     let decl = if shift_mode { smooth::declare_shift(0, map_area, ox, oy) } else { smooth::declare(0, map_area, &cam) };
@@ -2930,7 +3133,7 @@ async fn main() -> Result<()> {
                         trails_drawn = Instant::now();
                         let t_trails = Instant::now();
                         let (w, h) = ((map_area.width as f64 * cpx.0).round() as u32, (map_area.height as f64 * cpx.1).round() as u32);
-                        let vp = Viewport::new(&draw_cam, map_area);
+                        let vp = Viewport::new(&cam, map_area);
                         let now = unix_now();
                         let sets: [TrailSet; 2] = [
                             (
@@ -2953,7 +3156,7 @@ async fn main() -> Result<()> {
                                 continue;
                             }
                             let mut rgba = mapterm::timeseries::render_trails(paths, t, secs, &vp, w, h, cpx);
-                            punch(&mut rgba, w, map_area, &legend_rects, cpx);
+                            punch(&mut rgba, w, map_area, &holes, cpx);
                             out.write_all(
                                 mapterm::kitty::show_rgba(id, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, z, shm).as_bytes(),
                             )?;
@@ -2965,7 +3168,7 @@ async fn main() -> Result<()> {
                             }
                         } else {
                             let mut rgba = mapterm::timeseries::render_lines(&path_lines, &vp, w, h, cpx);
-                            punch(&mut rgba, w, map_area, &legend_rects, cpx);
+                            punch(&mut rgba, w, map_area, &holes, cpx);
                             out.write_all(
                                 mapterm::kitty::show_rgba(PATH_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -9, shm).as_bytes(),
                             )?;
@@ -2973,6 +3176,8 @@ async fn main() -> Result<()> {
                         }
                         dlog(|| format!("trails: {w}x{h} px, {:.1} ms, shown {trails_shown:?}", t_trails.elapsed().as_secs_f64() * 1000.0));
                     }
+                    // (The images drawn here use the true camera, not the one on the cell grid:
+                    // with smooth scrolling they land where the shifted text does.)
                     // Satellites as dots with their names, five times a second once the map is
                     // still; the cell glyphs and text names stand in while it moves. Full
                     // resolution when there are names to draw (text needs it), else half,
@@ -2984,7 +3189,7 @@ async fn main() -> Result<()> {
                         let named = sats.iter().any(|s| !s.is_starlink());
                         let scale = if named || selected_sat.is_some() { 1.0 } else { 0.5 };
                         let (w, h) = ((map_area.width as f64 * cpx.0 * scale).round() as u32, (map_area.height as f64 * cpx.1 * scale).round() as u32);
-                        let vp = Viewport::new(&draw_cam, map_area);
+                        let vp = Viewport::new(&cam, map_area);
                         // Low orbit crosses the ground at about 7 km/s: redraw so it moves ~1 px a frame,
                         // from 4 to 15 times a second (zoomed out it barely moves).
                         let px_per_km = cpx.0 / vp.km_per_col(draw_cam.lat).max(1e-6);
@@ -3002,7 +3207,7 @@ async fn main() -> Result<()> {
                             selected_sat,
                             &sat_coloring,
                         );
-                        punch(&mut rgba, w, map_area, &legend_rects, (cpx.0 * scale, cpx.1 * scale));
+                        punch(&mut rgba, w, map_area, &holes, (cpx.0 * scale, cpx.1 * scale));
                         out.write_all(
                             mapterm::kitty::show_rgba(SAT_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -8, shm).as_bytes(),
                         )?;
@@ -3021,6 +3226,9 @@ async fn main() -> Result<()> {
                 if kitty {
                     // Re-place the raster images under the text: images are sent once, then
                     // each frame only moves placements.
+                    // Smooth scrolling: the terminal shifts the text by part of a cell; the
+                    // image tiles go with it.
+                    kstate.shift = if smooth_on && shift_mode { (ox as f64 / 1000.0 * cpx.0, oy as f64 / 1000.0 * cpx.1) } else { (0.0, 0.0) };
                     let cmds = map.kitty_commands(&draw_cam, map_area, &mut kstate);
                     dlog(|| format!("frame: kitty cmds {} bytes, {} KiB of images held, cell_px={cpx:?} map={map_area:?}", cmds.len(), kstate.bytes() >> 10));
                     out.write_all(cmds.as_bytes())?;
@@ -3073,6 +3281,10 @@ async fn main() -> Result<()> {
                             t.elapsed().as_secs_f64() * 1000.0
                         )
                     });
+                }
+                if show_help {
+                    // Images sit under the text: take them down so the key list reads.
+                    out.write_all(mapterm::kitty::CLEAR_PLACEMENTS.as_bytes())?;
                 }
                 crossterm::execute!(out, crossterm::terminal::EndSynchronizedUpdate)?;
             }
@@ -3288,7 +3500,7 @@ async fn main() -> Result<()> {
             }
 
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
-            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() {
+            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() || stitching {
                 Duration::from_millis(16)
             } else if sat_dots {
                 // Satellite dots redraw up to 15 times a second (see sat_every).
@@ -3344,7 +3556,7 @@ async fn main() -> Result<()> {
                             dlog(|| format!("alerts: {} active", list.len()));
                             alerts = list;
                             let _ = nzreq.send(mapterm::nws::zones_needed(&alerts, &alert_zones));
-                            alerts_dirty = true;
+                            alerts_list_new = true;
                             if selected_alert.as_ref().is_some_and(|id| !alerts.iter().any(|a| &a.id == id)) {
                                 selected_alert = None;
                             }
@@ -3357,7 +3569,8 @@ async fn main() -> Result<()> {
                 }
                 Some((z, g)) = nzrx.recv() => {
                     alert_zones.insert(z, g);
-                    alerts_dirty = true;
+                    alerts_zones_new = true;
+                    alerts_zone_at = Instant::now();
                 }
                 Some(r) = rvrx.recv() => {
                     match r {
@@ -3370,7 +3583,9 @@ async fn main() -> Result<()> {
                                 .collect();
                             dlog(|| format!("radar: {} scans, the latest {}", frames.len(), scans.past.last().map_or(0, |s| s.time)));
                             if let Some(r) = radar.as_mut() {
-                                r.set_frames(&mut map, frames, mapterm::rainviewer::SCAN_SECS, None)?;
+                                // Under the alert areas, where they're tiles.
+                                let before = map.source(ALERT_TILES).is_some().then_some(ALERT_TILES);
+                                r.set_frames(&mut map, frames, mapterm::rainviewer::SCAN_SECS, before)?;
                             }
                         }
                         Ok(_) => {}
@@ -3714,6 +3929,13 @@ async fn main() -> Result<()> {
                                         _ => {}
                                     }
                                 }
+                                if show_help && matches!(k.code, KeyCode::Esc | KeyCode::Char('?')) {
+                                    show_help = false;
+                                    // The images it hid come back on the next frames.
+                                    trails_dirty = true;
+                                    sats_drawn = Instant::now() - Duration::from_secs(10);
+                                    continue;
+                                }
                                 if ctl.key(k) {
                                     continue;
                                 }
@@ -3780,6 +4002,7 @@ async fn main() -> Result<()> {
                                         }
                                         note = Some((Instant::now(), if off { "radar off · R shows it" } else { "radar on" }.into()));
                                     }
+                                    KeyCode::Char('?') => show_help = true,
                                     KeyCode::Char('L') => {
                                         show_legend = !show_legend;
                                         note = Some((Instant::now(), if show_legend { "legend on" } else { "legend off" }.into()));

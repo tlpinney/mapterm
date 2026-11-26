@@ -5,7 +5,7 @@
 //! ([`Timeline::time_at`]); the wheel zooms the span about the pointer ([`Timeline::zoom`])
 //! and shift+wheel pans it ([`Timeline::pan`]). It keeps no time of its own: the clock does.
 //!
-//! Two rows: the tick labels, then the bar. Times are UTC.
+//! Two rows: the tick labels, then the bar. Times are in [`Timeline::zone`] (UTC unless set).
 //!
 //! ```no_run
 //! # use mapterm::{clock::Clock, timeline::Timeline};
@@ -39,6 +39,8 @@ pub struct Timeline {
     pub start: f64,
     /// The latest.
     pub stop: f64,
+    /// The time zone its labels are in (ticks fall on round times there).
+    pub zone: crate::clock::Zone,
     highlights: Vec<Highlight>,
 }
 
@@ -52,7 +54,7 @@ const MIN_SPAN: f64 = 300.0;
 impl Timeline {
     /// A timeline showing `start..stop`.
     pub fn new(start: f64, stop: f64) -> Timeline {
-        let mut t = Timeline { start, stop, highlights: Vec::new() };
+        let mut t = Timeline { start, stop, zone: crate::clock::Zone::Utc, highlights: Vec::new() };
         t.set_span(start, stop);
         t
     }
@@ -136,21 +138,24 @@ impl Timeline {
                 buf[(x, bar.y)].set_bg(h.color);
             }
         }
-        // Ticks and their labels, on round times.
+        // Ticks and their labels, on round times in the zone.
         let step = self.step(bar.width);
-        let mut t = (self.start / step).ceil() * step;
+        let (off, zone) = self.zone.at((self.start + self.stop) / 2.0);
+        let off = off as f64;
+        let mut t = ((self.start + off) / step).ceil() * step - off;
         while t <= self.stop {
             if let Some(x) = self.col_of(bar, t) {
                 buf[(x, bar.y)].set_symbol("┼");
-                let text = label(t, step);
+                let text = label(t + off, step);
                 let lx = x.saturating_sub(text.chars().count() as u16 / 2).max(labels.x);
-                if lx + text.chars().count() as u16 <= labels.right().saturating_sub(4) {
+                if lx + text.chars().count() as u16 <= labels.right().saturating_sub(zone.chars().count() as u16 + 1) {
                     buf.set_string(lx, labels.y, &text, dim);
                 }
             }
             t += step;
         }
-        buf.set_string(labels.right() - 3, labels.y, "UTC", dim);
+        let zw = zone.chars().count() as u16;
+        buf.set_string(labels.right().saturating_sub(zw), labels.y, &zone, dim);
         // Now: where real time is.
         if let Some(x) = self.col_of(bar, now) {
             buf[(x, bar.y)].set_symbol("╂").set_fg(Color::Rgb(0x8a, 0x91, 0x9c));

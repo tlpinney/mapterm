@@ -8,6 +8,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Radar tiles are kept on disk, in one database (`rainviewer.sqlite`), by scan: a scan never
+  changes, so it's never asked for twice; scans over three hours old are removed. NWS zone
+  outlines saved at full detail are rewritten simplified (the cache went from 42 to 13 MB
+  here). `RasterSource::store` takes any `TileStore`.
 - Weather radar: `--radar` draws RainViewer's precipitation radar over the map (no key),
   the last two hours in 10-minute scans: `space` plays them in a loop or pauses, `,` and
   `.` step, `R` hides it; the status line shows the scan's time. Playing, each scan fades
@@ -17,6 +21,12 @@ All notable changes to mapterm are listed here. The format follows
   and its credit "Weather data by RainViewer" (`mapterm::rainviewer`).
 - mapterm's mark on the map: "mt" in braille (⠍⠞) and the name, "map" amber and "term"
   blue on a dark tile as on mapterm.com, at the end of the credits line.
+- Times are shown in this computer's time zone (EST, EDT...): the radar's scan time, the
+  timeline (ticks on round local times), satellite passes, and when alerts end (before, in
+  the issuing office's zone). `--utc` shows UTC as before. `clock::Zone`, and
+  `Timeline::zone`.
+- `?` shows the keys over the map, the sections for what's on (map, look, find, live
+  layers, radar and time); `?` or Esc closes it. The status line says `? keys`.
 - A timeline for the map's clock (`mapterm::timeline`, after Cesium's Timeline widget): tick
   labels that fit the span, data shaded, real time and the clock's time marked; click or
   drag to go to a time, the wheel zooms, shift+wheel pans. Under the map with `--radar` or
@@ -26,6 +36,13 @@ All notable changes to mapterm are listed here. The format follows
   greys only (water too, since light rain is blue), coastlines and state and country borders
   as lines over the radar, faint motorways, city names that read over rain
   (`stylejson::weather_style`, `Map::weather`); in the `m` cycle.
+- The selected alert's area is highlighted: a stronger fill and a bright outline, drawn over
+  the others (and a white braille outline where the terminal shows no images).
+- Alert areas as image tiles drawn here where the terminal shows images: smooth outlines
+  and a translucent fill, panned and zoomed like imagery, above the radar and under the
+  text (`nws::AlertTiles`, `RasterSource::render` for a layer whose tiles are drawn rather
+  than fetched). From the disk cache the areas go up as soon as the outlines stop
+  arriving.
 - US weather alerts: `--alerts` draws the NWS's warnings, watches and advisories as areas
   colored by severity, each while it's in force at the clock's time (live, or the radar's);
   click one for its text. Alerts with their own outline show at once; zone outlines come
@@ -151,6 +168,31 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- Smooth scrolling: image tiles no longer stretch at their edges as they shift. Tiles drawn
+  here (alerts) carry bleed, pixels past their edges (`RasterTile::bleed`); fetched ones
+  (radar, imagery, any tile URL) get it stitched from their neighbors once those are in, a
+  few ms a frame and only while smooth scrolling is on (`Map::stitch`, `Map::stitch_some`).
+- Smooth scrolling (`MAPTERM_SMOOTH=shift`, Ghostty Smooth): images now move with the text
+  instead of a cell at a time. Image tiles (radar, alerts, imagery) are placed with the same
+  sub-cell shift the terminal gives the text (`KittyState::shift`, `kitty::place_offset`),
+  and the images mapterm draws (satellite dots, trails) use the true camera.
+- Opening a panel (an alert, aircraft, ship, satellite, the finder, search results) no
+  longer moves the map: the panel floats over its right side instead of taking room from
+  it. Images keep clear of the panel and the legends (`KittyState::holes`,
+  `raster::cut`), so their text isn't over radar or imagery.
+- With imagery or radar on, satellite dots and aircraft and ship trails no longer vanish or
+  flicker: each frame the image layers cleared every placement on the screen, theirs too.
+  Now they take down only their own placements that aren't made again
+  (`kitty::unplace_one`); one made again is moved in place.
+- Outlines of polygons from vector tiles no longer draw the tile grid: the segments where a
+  tile cut a polygon (its border and the margin past it) are left out, as MapLibre leaves
+  them out by clipping each tile. Seen as straight lines across the sea in
+  `mapterm-weather`, which outlines water for its coastline.
+- `--alerts` used a lot of CPU and memory while zone outlines arrived (92% of a core and
+  760 MB on a first run): the layer was rebuilt from every outline every 2 seconds. Outlines
+  are now simplified as they arrive (`nws::simplify`, to about 300 m: finer than a cell
+  shows), and the layer is rebuilt only when the list or the set of alerts in force changes,
+  or at most every 10 seconds while outlines come in. About 150 MB and 15% now.
 - Credits on a narrow screen: they take as many lines above the status as they need (up to
   half the window), broken between credits rather than mid-word, so the last one is never
   cut off; before, the line count guessed character wrapping and stopped at three.

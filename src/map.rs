@@ -224,7 +224,12 @@ impl TileRequest {
             Fetch::Raster(src) => match src.tile(z, x, y).await? {
                 // An opaque tile from a source that's always transparent is its error image.
                 Some(b) if src.require_alpha && !crate::raster::png_has_alpha(&b) => LoadedTile::Raster(None),
-                Some(b) => LoadedTile::Raster(Some(tokio::task::spawn_blocking(move || crate::raster::decode(&b)).await??)),
+                Some(b) => {
+                    let bleed = src.bleed;
+                    let mut t = tokio::task::spawn_blocking(move || crate::raster::decode(&b)).await??;
+                    t.bleed = bleed;
+                    LoadedTile::Raster(Some(t))
+                }
                 None => LoadedTile::Raster(None),
             },
         }))
@@ -240,6 +245,8 @@ impl TileRequest {
 /// itself, freeing the least recently used images first.
 pub struct KittyState {
     sent: HashMap<u32, (usize, u64)>,
+    /// The placements made last frame (image, placement), to take down those not made again.
+    placed: HashSet<(u32, u32)>,
     frame: u64,
     /// Most decoded image bytes to keep in the terminal (default 48 MiB, under herdr's 64 MiB;
     /// `MAPTERM_KITTY_BUDGET_MB` overrides it in the viewer).
@@ -247,11 +254,18 @@ pub struct KittyState {
     /// Send image tiles through POSIX shared memory instead of inline base64 (see
     /// [`crate::kitty::shm_supported`]); falls back to inline if an object can't be made.
     pub shm: bool,
+    /// Screen rectangles drawn over the map (a panel, legends): images are cut around them,
+    /// since text over an image is hard to read. Set it before each frame.
+    pub holes: Vec<Rect>,
+    /// How far the terminal shifts the map left and up this frame, in pixels (smooth
+    /// scrolling draws on the cell grid and has the terminal shift the rest): images are
+    /// placed shifted the same, so they move with the text. (0, 0) without it.
+    pub shift: (f64, f64),
 }
 
 impl Default for KittyState {
     fn default() -> Self {
-        Self { sent: HashMap::new(), frame: 0, budget: 48 << 20, shm: false }
+        Self { sent: HashMap::new(), placed: HashSet::new(), frame: 0, budget: 48 << 20, shm: false, holes: Vec::new(), shift: (0.0, 0.0) }
     }
 }
 
@@ -604,6 +618,11 @@ pub struct Map {
     pub center: Option<(f64, f64, f64)>,
     /// When to ask again for tiles that failed to load.
     pub retry: RetryPolicy,
+    /// Give fetched image tiles bleed from their neighbors (see [`Map::stitch_some`]), for
+    /// smooth scrolling. Off by default.
+    pub stitch: bool,
+    /// Tiles waiting to be stitched: (source, tile).
+    stitch_queue: std::collections::VecDeque<(String, TileId)>,
     /// Raster sources to load for the view even while no shown layer uses them: the next
     /// frame of a time layer, so it's there when the clock gets to it.
     prefetch: Vec<String>,
@@ -1270,6 +1289,54 @@ impl Map {
         }
     }
 
+    /// Give queued image tiles bleed from their neighbors, for about `budget`: a strip of the
+    /// tiles to the right, below and diagonally attached past the tile's edges
+    /// ([`RasterTile::bleed`]), so smooth scrolling can shift a tile without stretching it.
+    /// A tile waits until its neighbors are all loaded (or it's at the world's edge). Returns
+    /// whether tiles are still waiting. Does nothing unless [`Map::stitch`] is on.
+    pub fn stitch_some(&mut self, budget: std::time::Duration) -> bool {
+        if !self.stitch {
+            self.stitch_queue.clear();
+            return false;
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed() < budget {
+            let Some((sid, (z, x, y))) = self.stitch_queue.pop_front() else { break };
+            let Some(MapSource::Raster(r)) = self.source(&sid) else { continue };
+            let Some(tile) = r.tiles.get(&(z, x, y)) else { continue };
+            let (w, h) = tile.full_size();
+            if tile.bleed > 0 || w < 16 {
+                continue;
+            }
+            let n = 1u32 << z;
+            let right = (z, (x + 1) % n, y);
+            let below = (y + 1 < n).then_some((z, x, y + 1));
+            let corner = (y + 1 < n).then_some((z, (x + 1) % n, y + 1));
+            // Wait for every neighbor there is (a missing one is stored as empty, so it counts).
+            if !r.tiles.contains(&right) || below.is_some_and(|b| !r.tiles.contains(&b)) || corner.is_some_and(|c| !r.tiles.contains(&c)) {
+                continue;
+            }
+            let b = (w / 8).max(48).min(w);
+            let mut img = image::RgbaImage::new(w + b, h + b);
+            image::imageops::replace(&mut img, &tile.rgba, 0, 0);
+            let mut copy = |from: Option<TileId>, sx: u32, sy: u32, cw: u32, ch: u32, dx: i64, dy: i64| {
+                if let Some(t) = from.and_then(|f| r.tiles.get(&f)).filter(|t| t.full_size().0 >= sx + cw && t.full_size().1 >= sy + ch) {
+                    let part = image::imageops::crop_imm(&t.rgba, sx, sy, cw, ch).to_image();
+                    image::imageops::replace(&mut img, &part, dx, dy);
+                }
+            };
+            copy(Some(right), 0, 0, b, h, w as i64, 0);
+            copy(below, 0, 0, w, b, 0, h as i64);
+            copy(corner, 0, 0, b, b, w as i64, h as i64);
+            let Ok(png) = crate::raster::encode_png(img.as_raw(), w + b, h + b) else { continue };
+            let stitched = RasterTile { bleed: b, id: crate::raster::next_image_id(), png, rgba: img };
+            if let Some((_, MapSource::Raster(r))) = self.sources.iter_mut().find(|(s, _)| *s == sid) {
+                r.tiles.insert((z, x, y), Some(stitched));
+            }
+        }
+        !self.stitch_queue.is_empty()
+    }
+
     /// Whether raster source `id` has every tile this view needs (loaded, or known empty).
     pub fn raster_ready(&self, id: &str, cam: &Camera, area: Rect) -> bool {
         let Some(MapSource::Raster(r)) = self.source(id) else { return false };
@@ -1427,7 +1494,21 @@ impl Map {
         match tile {
             LoadedTile::Vector(features) => self.insert_features(source, id, features)?,
             LoadedTile::Raster(t) => match self.sources.iter_mut().find(|(s, _)| s == source) {
-                Some((_, MapSource::Raster(r))) => r.tiles.insert(id, t),
+                Some((_, MapSource::Raster(r))) => {
+                    r.tiles.insert(id, t);
+                    // This tile, and the ones whose right, bottom or corner it borders, may now
+                    // have all their neighbors.
+                    if self.stitch && r.src.render.is_none() {
+                        let (z, x, y) = id;
+                        let n = 1u32 << z;
+                        let left = (x + n - 1) % n;
+                        for t in [(z, x, y), (z, left, y), (z, x, y.wrapping_sub(1)), (z, left, y.wrapping_sub(1))] {
+                            if t.2 < n {
+                                self.stitch_queue.push_back((source.to_string(), t));
+                            }
+                        }
+                    }
+                }
                 _ => bail!("no raster source \"{source}\""),
             },
         }
@@ -1493,9 +1574,15 @@ impl Map {
             }
             let Some(MapSource::Raster(r)) = l.source.as_deref().and_then(|s| self.source(s)) else { continue };
             let rz = self.raster_zoom(&r.src, cam);
-            pieces.extend(crate::raster::layout_max(&r.tiles, cam, area, rz, (32, 16)).into_iter().map(|b| (i, b)));
+            for b in crate::raster::layout_max(&r.tiles, cam, area, rz, (32, 16)) {
+                let mut parts = vec![b];
+                for &h in &state.holes {
+                    parts = parts.iter().flat_map(|p| crate::raster::cut(p, h)).collect();
+                }
+                pieces.extend(parts.into_iter().map(|b| (i, b)));
+            }
         }
-        if pieces.is_empty() && state.sent.is_empty() {
+        if pieces.is_empty() && state.sent.is_empty() && state.placed.is_empty() {
             return cmds;
         }
         // Stay under the budget before sending anything new: free the least recently used
@@ -1522,7 +1609,14 @@ impl Map {
                 total -= b;
             }
         }
-        cmds.push_str(kitty::CLEAR_PLACEMENTS);
+        // Take down last frame's placements that this one doesn't make again (one made again
+        // is moved in place). Only these: other images (satellite dots, trails) are the
+        // caller's and stay.
+        let now: HashSet<(u32, u32)> = pieces.iter().enumerate().map(|(p, (_, b))| (b.tile.id, p as u32 + 1)).collect();
+        for &(id, p) in state.placed.difference(&now) {
+            cmds.push_str(&kitty::unplace_one(id, p));
+        }
+        state.placed = now;
         // Higher layers stack above lower ones, all under the text.
         for (placement, (i, b)) in pieces.iter().enumerate() {
             let (w, h) = b.tile.size();
@@ -1535,7 +1629,14 @@ impl Map {
                     cmds.push_str(&shm.unwrap_or_else(|| kitty::transmit(b.tile.id, &b.tile.png)));
                 }
             }
-            cmds.push_str(&kitty::place(b.tile.id, placement as u32 + 1, b.cells.x, b.cells.y, b.src, b.cells.width, b.cells.height, -1000 + *i as i32));
+            let z = -1000 + *i as i32;
+            let RasterMode::Kitty { cell_px } = self.raster_mode else { continue };
+            match shifted(b, area, state.shift, cell_px) {
+                Some((col, row, src, xo, yo)) => {
+                    cmds.push_str(&kitty::place_offset(b.tile.id, placement as u32 + 1, col, row, src, b.cells.width, b.cells.height, z, xo, yo))
+                }
+                None => cmds.push_str(&kitty::place(b.tile.id, placement as u32 + 1, b.cells.x, b.cells.y, b.src, b.cells.width, b.cells.height, z)),
+            }
         }
         cmds
     }
@@ -2209,20 +2310,84 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
 }
 
 /// Draw one resolved feature whose parts are already in dots.
-fn draw_resolved(ctx: &mut DrawContext, r: &Resolved, geom: GeomType, dots: &[Vec<(f64, f64)>]) {
+/// A shifted placement: its cell (column, row), source rectangle, and pixel offsets.
+type Shifted = (u16, u16, (u32, u32, u32, u32), u32, u32);
+
+/// Where to place block `b` so it moves with a map the terminal shifts left and up by
+/// `shift` pixels: in its own cells, with its source window moved along the tile by the same
+/// distance (every piece the same way, so pieces stay together). Where the tile runs out of
+/// pixels (its own right or bottom edge) the window is narrower and stretched by those few
+/// pixels. Returns the cell, the source rectangle and the pixel offsets (always 0); None
+/// when there's no shift.
+fn shifted(b: &crate::raster::Block, _area: Rect, shift: (f64, f64), cell_px: (f64, f64)) -> Option<Shifted> {
+    if shift.0 < 0.5 && shift.1 < 0.5 {
+        return None;
+    }
+    // The whole image: a tile with bleed has pixels past its edge to move into.
+    let (tw, th) = b.tile.full_size();
+    let (mut sx, mut sy, mut sw, mut sh) = b.src;
+    // Source pixels per screen pixel.
+    let kx = sw as f64 / (b.cells.width as f64 * cell_px.0).max(1.0);
+    let ky = sh as f64 / (b.cells.height as f64 * cell_px.1).max(1.0);
+    sx += (shift.0 * kx).round() as u32;
+    sy += (shift.1 * ky).round() as u32;
+    if sx + sw > tw {
+        sw = tw.saturating_sub(sx).max(1);
+    }
+    if sy + sh > th {
+        sh = th.saturating_sub(sy).max(1);
+    }
+    Some((b.cells.x, b.cells.y, (sx.min(tw.saturating_sub(1)), sy.min(th.saturating_sub(1)), sw, sh), 0, 0))
+}
+
+/// A tile polygon's rings as runs without the segments that lie along the tile's border (or
+/// in the margin past it): where the tile cut the polygon. Coordinates are in tile units,
+/// 0 to 1 across the tile.
+fn inside_tile(rings: &[Vec<[f32; 2]>]) -> Vec<Vec<[f32; 2]>> {
+    const E: f32 = 1e-4;
+    let on_border = |a: [f32; 2], b: [f32; 2]| {
+        (a[0] <= E && b[0] <= E) || (a[0] >= 1.0 - E && b[0] >= 1.0 - E) || (a[1] <= E && b[1] <= E) || (a[1] >= 1.0 - E && b[1] >= 1.0 - E)
+    };
+    let mut out = Vec::new();
+    for ring in rings {
+        let mut run: Vec<[f32; 2]> = Vec::new();
+        for s in ring.windows(2) {
+            if on_border(s[0], s[1]) {
+                if run.len() >= 2 {
+                    out.push(std::mem::take(&mut run));
+                }
+                run.clear();
+                continue;
+            }
+            if run.is_empty() {
+                run.push(s[0]);
+            }
+            run.push(s[1]);
+        }
+        if run.len() >= 2 {
+            out.push(run);
+        }
+    }
+    out
+}
+
+/// Draw a resolved feature. `edges`, for a polygon from a vector tile, is its outline with
+/// the segments along the tile's border left out: those are where the tile cut the polygon,
+/// not its edge, and outlining them would draw the tile grid.
+fn draw_resolved(ctx: &mut DrawContext, r: &Resolved, geom: GeomType, dots: &[Vec<(f64, f64)>], edges: Option<&[Vec<(f64, f64)>]>) {
     match r {
         Resolved::Fill { color, outline } => {
             if let Some(c) = color {
                 ctx.fill_dots(dots, *c);
             }
             if let Some(c) = outline {
-                for ring in dots {
+                for ring in edges.unwrap_or(dots) {
                     ctx.line_dots(ring, *c);
                 }
             }
         }
         Resolved::Line { color, width, dash } => {
-            for part in dots {
+            for part in edges.unwrap_or(dots) {
                 ctx.line_px(part, *color, *width, dash.as_deref());
             }
         }
@@ -2458,12 +2623,16 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
                             }
                             for it in tile.layer_items(i, l, cam.zoom, bg, env).iter() {
                                 let f = &tile.features[it.feature as usize];
-                                let dots: Vec<Vec<(f64, f64)>> = f
-                                    .parts
-                                    .iter()
-                                    .map(|part| part.iter().map(|p| vp.dot((*tx as f64 + p[0] as f64) / n, (*ty as f64 + p[1] as f64) / n)).collect())
-                                    .collect();
-                                draw_resolved(ctx, &it.paint, f.geom, &dots);
+                                let to_dots = |parts: &[Vec<[f32; 2]>]| -> Vec<Vec<(f64, f64)>> {
+                                    parts
+                                        .iter()
+                                        .map(|part| part.iter().map(|p| vp.dot((*tx as f64 + p[0] as f64) / n, (*ty as f64 + p[1] as f64) / n)).collect())
+                                        .collect()
+                                };
+                                let dots = to_dots(&f.parts);
+                                let outlined = matches!(it.paint, Resolved::Line { .. } | Resolved::Fill { outline: Some(_), .. });
+                                let edges = (f.geom == GeomType::Polygon && outlined).then(|| to_dots(&inside_tile(&f.parts)));
+                                draw_resolved(ctx, &it.paint, f.geom, &dots, edges.as_deref());
                             }
                         }
                     }
@@ -2478,7 +2647,7 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
                             let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
                             let Some(r) = resolve(l, &c, cam.zoom, bg) else { continue };
                             let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
-                            draw_resolved(ctx, &r, f.geom, &dots);
+                            draw_resolved(ctx, &r, f.geom, &dots, None);
                         }
                     }
                     Some(MapSource::Raster(r)) if map.raster_mode == RasterMode::Cells => {
@@ -2530,6 +2699,72 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stitching_gives_tiles_their_neighbors_edges() {
+        let mut map = raster_map();
+        map.stitch = true;
+        // Zoom 1: four tiles, each its own color.
+        let colors = [((1, 0, 0), (200, 0, 0)), ((1, 1, 0), (0, 200, 0)), ((1, 0, 1), (0, 0, 200)), ((1, 1, 1), (200, 200, 0))];
+        for (id, (r, g, b)) in colors {
+            let mut t = solid_tile(r, g, b);
+            t.rgba = image::RgbaImage::from_pixel(512, 512, image::Rgba([r, g, b, 255]));
+            map.insert_loaded("img", id, Ok(Loaded(LoadedTile::Raster(Some(t))))).unwrap();
+        }
+        while map.stitch_some(std::time::Duration::from_secs(1)) {}
+        let tile = |id| match map.source("img") {
+            Some(MapSource::Raster(r)) => r.tiles.get(&id).unwrap(),
+            _ => panic!("no source"),
+        };
+        let t = tile((1, 0, 0));
+        assert_eq!((t.bleed, t.size(), t.full_size()), (64, (512, 512), (576, 576)));
+        let px = |x, y| t.rgba.get_pixel(x, y).0;
+        assert_eq!(px(10, 10), [200, 0, 0, 255], "its own pixels");
+        assert_eq!(px(520, 10), [0, 200, 0, 255], "right: the tile to its right");
+        assert_eq!(px(10, 520), [0, 0, 200, 255], "below: the tile under it");
+        assert_eq!(px(520, 520), [200, 200, 0, 255], "the corner: the diagonal one");
+        // The bottom row: the world ends below, so only the right strip has pixels; and the
+        // right column wraps around to the left one.
+        let t = tile((1, 1, 1));
+        assert_eq!(t.rgba.get_pixel(520, 10).0, [0, 0, 200, 255]);
+        assert_eq!(t.rgba.get_pixel(10, 520).0[3], 0);
+        assert!(!map.stitch_some(std::time::Duration::from_secs(1)), "nothing left");
+    }
+
+    #[test]
+    fn shifted_placements_follow_the_text() {
+        let tile = Arc::new(RasterTile { bleed: 0, id: 7, png: Vec::new(), rgba: image::RgbaImage::new(512, 512) });
+        let area = Rect::new(0, 0, 80, 24);
+        let cell = (10.0, 20.0);
+        // A block 5 cells in showing half the tile on 20x10 cells (256 px on 200x200 px).
+        let b = crate::raster::Block { tile: tile.clone(), cells: Rect::new(5, 3, 20, 10), src: (100, 0, 256, 256) };
+        assert_eq!(super::shifted(&b, area, (0.0, 0.0), cell), None, "no shift: placed as it is");
+        // Shifted 3 px left and 5 up: the same cells, the window 3.84 and 6.4 tile px along,
+        // as wide as before where the tile has it. Every piece moves the same way.
+        assert_eq!(super::shifted(&b, area, (3.0, 5.0), cell), Some((5, 3, (104, 6, 256, 256), 0, 0)));
+        let edge = crate::raster::Block { tile: tile.clone(), cells: Rect::new(0, 0, 20, 10), src: (100, 0, 256, 256) };
+        assert_eq!(super::shifted(&edge, area, (3.0, 5.0), cell), Some((0, 0, (104, 6, 256, 256), 0, 0)), "the map's edge: the same");
+        // At the tile's own right edge: narrower.
+        let end = crate::raster::Block { tile, cells: Rect::new(0, 0, 20, 10), src: (256, 0, 256, 256) };
+        assert_eq!(super::shifted(&end, area, (3.0, 0.0), cell).map(|p| p.2), Some((260, 0, 252, 256)));
+        // A tile drawn with bleed (here 64 px past its edges): no narrowing, no stretch.
+        let bled = Arc::new(RasterTile { bleed: 64, id: 8, png: Vec::new(), rgba: image::RgbaImage::new(576, 576) });
+        assert_eq!(bled.size(), (512, 512), "the tile's own size leaves the bleed out");
+        let end = crate::raster::Block { tile: bled, cells: Rect::new(0, 0, 20, 10), src: (256, 256, 256, 256) };
+        assert_eq!(super::shifted(&end, area, (3.0, 5.0), cell).map(|p| p.2), Some((260, 262, 256, 256)));
+    }
+
+    #[test]
+    fn outlines_leave_out_the_tile_border() {
+        // Water reaching past the tile's right edge into its margin: the coast is the left
+        // side only; the right edge and the margin are where the tile cut it.
+        let ring = vec![[0.5, -0.1], [0.4, 0.5], [0.5, 1.1], [1.1, 1.1], [1.1, -0.1], [0.5, -0.1]];
+        let runs = super::inside_tile(&[ring]);
+        assert_eq!(runs, vec![vec![[0.5, -0.1], [0.4, 0.5], [0.5, 1.1]]], "{runs:?}");
+        // A lake inside the tile keeps its whole outline.
+        let lake = vec![[0.2, 0.2], [0.3, 0.2], [0.3, 0.3], [0.2, 0.2]];
+        assert_eq!(super::inside_tile(std::slice::from_ref(&lake)), vec![lake]);
+    }
+
     use super::*;
     use crate::layer::DrawContext;
     use serde_json::json;
@@ -2659,7 +2894,7 @@ mod tests {
 
     fn solid_tile(r: u8, g: u8, b: u8) -> RasterTile {
         let rgba = image::RgbaImage::from_pixel(256, 256, image::Rgba([r, g, b, 255]));
-        RasterTile { id: 4242 + r as u32, png: vec![1, 2, 3], rgba }
+        RasterTile { bleed: 0, id: 4242 + r as u32, png: vec![1, 2, 3], rgba }
     }
 
     #[test]
@@ -2679,11 +2914,14 @@ mod tests {
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset);
         let mut k = KittyState::default();
         let first = map.kitty_commands(&cam, area, &mut k);
-        assert!(first.starts_with(crate::kitty::CLEAR_PLACEMENTS) && first.contains("a=t,f=100") && first.contains("z=-1000"));
+        assert!(first.contains("a=t,f=100") && first.contains("z=-1000"));
+        assert!(!first.contains("d=a"), "never everything: other images on screen are the caller's");
         let second = map.kitty_commands(&cam, area, &mut k);
-        assert!(!second.contains("a=t,") && second.contains("a=p,"));
+        assert!(!second.contains("a=t,") && second.contains("a=p,") && !second.contains("a=d,"), "placed again in place");
         map.set_visibility("img", false).unwrap();
-        assert!(!map.kitty_commands(&cam, area, &mut k).contains("a=p,"), "hidden layers aren't placed");
+        let hidden = map.kitty_commands(&cam, area, &mut k);
+        assert!(!hidden.contains("a=p,") && hidden.contains("a=d,d=i,"), "hidden layers' placements are taken down: {hidden:?}");
+        assert!(map.kitty_commands(&cam, area, &mut k).is_empty(), "and then nothing more");
     }
 
     #[test]

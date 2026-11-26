@@ -182,7 +182,7 @@ to go to that time (at or past now goes back to live); the wheel zooms it about 
 pointer, shift+wheel (or a sideways swipe) pans it. With `--alerts`, the selected alert's
 period is shaded too.
 
-The status line shows the scan's time (☂ 22:40 UTC · 20 min ago; ▶ playing, ⏸ paused). It
+The status line shows the scan's time in this computer's time zone (☂ 17:40 EST · 20 min ago; ▶ playing, ⏸ paused; `--utc` for UTC). It
 looks for new scans every 5 minutes. RainViewer serves detail to zoom 7; closer in, the
 radar is the zoom 7 image enlarged.
 
@@ -209,7 +209,9 @@ mapterm --alerts --radar --at here -z 6
 ```
 
 The National Weather Service's warnings, watches and advisories (api.weather.gov, public
-domain, no key) as areas outlined and faintly filled by severity: purple extreme, red
+domain, no key) as areas outlined and faintly filled by severity (where the terminal shows
+images, image tiles drawn by mapterm with smooth outlines, moved like imagery; braille
+elsewhere): purple extreme, red
 severe, orange moderate, yellow minor. Click one for its text: what it is, until when, who
 issued it, the area, the headline, description and what to do. The status line counts the
 alerts in force (⚠ 431).
