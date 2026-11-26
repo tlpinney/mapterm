@@ -55,12 +55,14 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        # macOS is built by build-macos below.
+        # macOS is built by build-macos below. Linux builds on Ubuntu 22.04: a binary needs
+        # the glibc of the machine that built it, and 22.04's (2.35) runs on Ubuntu 22.04,
+        # Debian 12, RHEL 10 and newer. ubuntu-latest's would shut out most installed systems.
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -86,6 +88,11 @@ jobs:
           cp fonts/OFL.txt "$name/JetBrainsMono-OFL.txt"
           tar czf "$name.tar.gz" "$name"
           "$name/mapterm" --help | head -1
+          # The newest glibc it needs: what the release notes and install script promise.
+          need="$(objdump -T "$name/mapterm" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -uV | tail -1)"
+          echo "needs $need"
+          [ "$need" = GLIBC_2.35 ] || [ "$(printf '%s\n' "$need" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35 ] \
+            || { echo "::error::the binary needs $need, newer than the 2.35 the docs promise"; exit 1; }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.target }}

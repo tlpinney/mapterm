@@ -46,6 +46,16 @@ target="${MAPTERM_INSTALL_TARGET:-}"
       aarch64 | arm64) target="aarch64-unknown-linux-gnu" ;;
       *) die "no release build for Linux on $(uname -m); build it with: cargo install mapterm" ;;
     esac
+    # The Linux builds need glibc 2.35 or newer (Ubuntu 22.04, Debian 12, RHEL 10 and later);
+    # musl systems such as Alpine can't run them.
+    libc="$(ldd --version 2>&1 | head -1 || true)"
+    case "$libc" in
+      *musl*) die "the Linux builds need glibc; this system uses musl (Alpine?). Build it with: cargo install mapterm" ;;
+    esac
+    glibc="$(printf '%s' "$libc" | grep -oE '[0-9]+\.[0-9]+$' || true)"
+    if [ -n "$glibc" ] && [ "$(printf '%s\n' "$glibc" 2.35 | sort -t. -k1,1n -k2,2n | head -1)" != 2.35 ]; then
+      die "the Linux builds need glibc 2.35 or newer; this system has $glibc. Build it with: cargo install mapterm"
+    fi
     ;;
   *) die "no release build for $(uname -s); build it with: cargo install mapterm" ;;
 esac
