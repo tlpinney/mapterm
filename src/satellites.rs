@@ -392,21 +392,18 @@ pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
     crate::StyleLayer::symbol(id, source).glyph(json!(["get", "glyph"])).text(json!(["get", "label"])).color("#c9d1d9").paint("icon-color", color)
 }
 
-/// The names alone, beside where the dots are (for when [`render_dots`] draws the
-/// satellites themselves): text to the right of each point, none for Starlink.
-pub fn label_layer(id: &str, source: &str) -> crate::StyleLayer {
-    crate::StyleLayer::symbol(id, source).text(json!(["get", "label"])).color("#c9d1d9").layout("text-anchor", "left").layout("text-offset", json!([0.8, 0]))
-}
-
 /// The satellites at Unix time `t` as dots in an RGBA image (not premultiplied), `w` x `h`
 /// pixels, for a map drawn by `vp` in cells of `cell_px` pixels (the image may be smaller
 /// than the cells and scaled up by the terminal): placed to the pixel, so they move smoothly
-/// where a cell-sized glyph would hop. Starlink small, the ISS large.
-pub fn render_dots(sats: &[Sat], t: f64, vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64)) -> Vec<u8> {
+/// where a cell-sized glyph would hop. Starlink small, the ISS large. With `labels`, their
+/// names too (not Starlink's), in [`crate::imagetext`]'s font beside each dot, the ISS
+/// first and any that would overlap one already placed left out.
+pub fn render_dots(sats: &[Sat], t: f64, vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64), labels: bool) -> Vec<u8> {
     use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
     let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
     let (sx, sy) = (cell_px.0 / 2.0, cell_px.1 / 4.0);
     let size = (cell_px.0 / 4.0).max(1.0) as f32;
+    let mut named: Vec<(f32, f32, f32, &str)> = Vec::new();
     for s in sats {
         let Some(f) = s.at(t) else { continue };
         let (x, y) = vp.dot_ll(f.lon, f.lat);
@@ -425,6 +422,25 @@ pub fn render_dots(sats: &[Sat], t: f64, vp: &crate::Viewport, w: u32, h: u32, c
         paint.set_color_rgba8(cr, cg, cb, 235);
         paint.anti_alias = true;
         pm.fill_path(&dot, &paint, FillRule::Winding, Transform::identity(), None);
+        if labels && !s.is_starlink() {
+            named.push((x, y, r, s.name.as_str()));
+        }
+    }
+    if labels {
+        // The ISS first, then the rest as they come; a label over one already placed is left
+        // out (as the map's own labels are).
+        named.sort_by_key(|n| !n.3.starts_with("ISS"));
+        let mut glyphs = crate::imagetext::Glyphs::new((cell_px.1 * 0.62) as f32);
+        let mut placed: Vec<crate::imagetext::Rect> = Vec::new();
+        for (x, y, r, name) in named {
+            let at = (x + r + cell_px.0 as f32 * 0.4, y);
+            let b = glyphs.bounds(name, at.0, at.1);
+            if b.0 > w as f32 || placed.iter().any(|p| crate::imagetext::overlaps(*p, b)) {
+                continue;
+            }
+            glyphs.draw(&mut pm, name, at.0, at.1, (0xc9, 0xd1, 0xd9));
+            placed.push(b);
+        }
     }
     pm.pixels()
         .iter()
@@ -553,9 +569,24 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         let f = iss[0].at(iss[0].epoch).unwrap();
         let vp = crate::Viewport::new(&crate::Camera::new(f.lon, f.lat, 3.0), ratatui::layout::Rect::new(0, 0, 40, 20));
         // 40 x 20 cells of 8 x 16 pixels: 320 x 320, the satellite in the middle.
-        let rgba = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0));
+        let rgba = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false);
         let px = |x: usize, y: usize| rgba[(y * 320 + x) * 4 + 3];
         assert!(px(160, 160) > 0 && px(5, 5) == 0);
+    }
+
+    #[test]
+    fn names_go_beside_their_dots() {
+        let iss = parse_csv(CSV);
+        let f = iss[0].at(iss[0].epoch).unwrap();
+        let vp = crate::Viewport::new(&crate::Camera::new(f.lon, f.lat, 3.0), ratatui::layout::Rect::new(0, 0, 40, 20));
+        let plain = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false);
+        let named = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), true);
+        // The name lights pixels to the right of the dot, not to its left.
+        let lit =
+            |img: &[u8], x0: usize, x1: usize| (x0..x1).flat_map(|x| (150..170).map(move |y| (x, y))).filter(|&(x, y)| img[(y * 320 + x) * 4 + 3] > 0).count();
+        assert_eq!(lit(&plain, 175, 300), 0);
+        assert!(lit(&named, 175, 300) > 50);
+        assert_eq!(lit(&named, 20, 140), 0);
     }
 
     #[test]

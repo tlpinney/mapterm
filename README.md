@@ -140,3 +140,8 @@ MIT. Map data © OpenStreetMap contributors.
 Release archives include `THIRD_PARTY_LICENSES.txt`, the license terms and copyright
 notices of the crates built into the binary. To make it from a checkout:
 `cargo about generate about.hbs -o THIRD_PARTY_LICENSES.txt` (cargo-about 0.9.2).
+
+Labels drawn as images (satellite names) use the bundled
+[JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) font, © The JetBrains Mono
+Project Authors, under the SIL Open Font License 1.1 (`fonts/OFL.txt`, and
+`JetBrainsMono-OFL.txt` in release archives); `MAPTERM_FONT` picks another.

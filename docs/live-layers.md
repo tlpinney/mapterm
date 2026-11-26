@@ -103,6 +103,10 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
 - Each satellite is ◇ (the ISS ◆), colored by orbit: low, medium, geostationary. Starlink
   satellites are a small · without names, since there are thousands; select one to see
   its name.
+- Where the terminal shows kitty graphics, satellites are dots in an image placed to the
+  pixel, redrawn five times a second, so they glide instead of hopping a cell at a time;
+  their names are drawn with them in JetBrains Mono (bundled; `MAPTERM_FONT=/path/to/font`
+  for another), and the text markers come back while you pan.
 - **Click** one (or **Tab** through them when there are no aircraft or ships) for its
   altitude, speed, period and inclination, and its ground track for the next orbit on the
   map. With `--at here` the panel shows where it is in your sky when it's up, and its next

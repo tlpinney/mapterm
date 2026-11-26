@@ -19,7 +19,9 @@ All notable changes to mapterm are listed here. The format follows
   `timeseries::render_lines`). There, satellites themselves are anti-aliased dots in an
   image placed to the pixel and redrawn five times a second, so they glide instead of
   hopping a cell at a time (`satellites::render_dots`); names stay text beside them, and the
-  cell glyphs return while the map moves.
+  cell glyphs return while the map moves. Their names are drawn into that image too, in the
+  bundled JetBrains Mono (Ghostty's built-in font; SIL OFL 1.1, `fonts/OFL.txt`) or
+  `MAPTERM_FONT`, so they glide with their dots (`mapterm::imagetext`, with `fontdue`).
 
 - When the status line doesn't fit, the credits get their own line above it (up to three,
   wrapped) instead of being cut off; the data's licenses ask for them to show.

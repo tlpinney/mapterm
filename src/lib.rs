@@ -82,6 +82,7 @@ pub mod geocode;
 pub mod geojson;
 pub mod geoparquet;
 pub mod icons;
+pub mod imagetext;
 pub mod index;
 pub mod interact;
 pub mod kitty;
