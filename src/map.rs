@@ -1243,6 +1243,33 @@ impl Map {
         self.prefetch = ids;
     }
 
+    /// The tiles raster source `id` would draw this view with.
+    pub fn raster_view_tiles(&self, id: &str, cam: &Camera, area: Rect) -> Vec<TileId> {
+        let Some(MapSource::Raster(r)) = self.source(id) else { return Vec::new() };
+        crate::raster::tiles_for(cam, area, self.raster_zoom(&r.src, cam))
+    }
+
+    /// Raster source `source`'s tile `id`, if it's loaded.
+    pub fn raster_tile(&self, source: &str, id: TileId) -> Option<Arc<RasterTile>> {
+        match self.source(source)? {
+            MapSource::Raster(r) => r.tiles.get(&id),
+            _ => None,
+        }
+    }
+
+    /// Put a tile into raster source `source` (one made here rather than loaded, such as a
+    /// blend of two frames), or with `clear`, empty it first.
+    pub fn put_raster_tile(&mut self, source: &str, id: Option<(TileId, RasterTile)>, clear: bool) {
+        if let Some((_, MapSource::Raster(r))) = self.sources.iter_mut().find(|(s, _)| s == source) {
+            if clear {
+                r.tiles.clear();
+            }
+            if let Some((id, t)) = id {
+                r.tiles.insert(id, Some(t));
+            }
+        }
+    }
+
     /// Whether raster source `id` has every tile this view needs (loaded, or known empty).
     pub fn raster_ready(&self, id: &str, cam: &Camera, area: Rect) -> bool {
         let Some(MapSource::Raster(r)) = self.source(id) else { return false };

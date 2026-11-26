@@ -165,7 +165,7 @@ last two hours in 10-minute scans:
 
 | Key | Does |
 | --- | --- |
-| `space` | play the two hours in a loop (about six seconds), again to pause |
+| `space` | play the two hours in a loop (about six seconds), each scan fading into the next; again to pause |
 | `,` `.` | step back or forward one scan; `.` past the latest goes back to now |
 | `R` | hide or show the radar |
 
@@ -184,7 +184,9 @@ credit "Weather data by RainViewer" with a link, which mapterm shows while the r
 time; playing, it loops over the scans. The radar is a time layer
 (`mapterm::timelayer::TimeRaster`): a transparent image layer per scan, the one for the
 clock's time shown, the next loaded ahead, and the one before kept up until a new one's
-tiles are in, so it never flashes blank. Aircraft, ships and satellites stay live whatever
+tiles are in, so it never flashes blank. Playing, each scan fades into the next through two
+blends made from both (kitty can't draw an image half transparent, so a blend is a new
+image); the last doesn't fade into the first. Aircraft, ships and satellites stay live whatever
 the clock says.
 
 ## Legends

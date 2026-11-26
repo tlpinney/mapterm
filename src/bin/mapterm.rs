@@ -2317,7 +2317,7 @@ async fn main() -> Result<()> {
                 } else {
                     1
                 };
-                r.update(&mut map, clock_t, ahead, &draw_cam, map_area);
+                r.update(&mut map, clock_t, ahead, clock.is_playing(), &draw_cam, map_area);
             }
             // Highlight the selected feature and the clicked spot.
             let mut overlays = Vec::new();

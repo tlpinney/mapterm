@@ -755,6 +755,32 @@ impl RasterTile {
     }
 }
 
+/// `a` blended toward `b` by `f` (0 is `a`, 1 is `b`), for fading one frame of a time layer
+/// into the next: colors weighted by their alpha, so rain fades in and out rather than
+/// darkening. A missing (1x1) side counts as clear. Encoded as PNG, quickly.
+pub fn blend(a: &RasterTile, b: &RasterTile, f: f64) -> Result<RasterTile> {
+    let (w, h) = if a.size().0 > 1 { a.size() } else { b.size() };
+    let clear = image::Rgba([0, 0, 0, 0]);
+    let px = |t: &RasterTile, x, y| if t.size() == (w, h) { *t.rgba.get_pixel(x, y) } else { clear };
+    let f = f.clamp(0.0, 1.0);
+    let mut out = image::RgbaImage::new(w, h);
+    for (x, y, o) in out.enumerate_pixels_mut() {
+        let (p, q) = (px(a, x, y), px(b, x, y));
+        let (pa, qa) = (p[3] as f64 / 255.0 * (1.0 - f), q[3] as f64 / 255.0 * f);
+        let alpha = pa + qa;
+        if alpha <= 0.0 {
+            continue;
+        }
+        let c = |k: usize| ((p[k] as f64 * pa + q[k] as f64 * qa) / alpha).round() as u8;
+        *o = image::Rgba([c(0), c(1), c(2), (alpha * 255.0).round() as u8]);
+    }
+    let mut png = Vec::new();
+    use image::ImageEncoder;
+    image::codecs::png::PngEncoder::new_with_quality(&mut png, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::NoFilter)
+        .write_image(out.as_raw(), w, h, image::ExtendedColorType::Rgba8)?;
+    Ok(RasterTile { id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png, rgba: out })
+}
+
 /// Whether PNG `bytes` can be transparent: RGBA or gray with alpha, or a palette with a
 /// transparency chunk. False for anything else (JPEG, opaque PNG).
 pub fn png_has_alpha(bytes: &[u8]) -> bool {
@@ -828,6 +854,19 @@ impl RasterStore {
     /// Whether the tile is loaded (or known to be missing).
     pub fn contains(&self, id: &TileId) -> bool {
         self.tiles.contains_key(id)
+    }
+
+    /// The tile at `id`, if loaded (no stand-in).
+    pub fn get(&self, id: &TileId) -> Option<Arc<RasterTile>> {
+        self.tiles.get(id).cloned()
+    }
+
+    /// Drop every tile (their terminal images are freed on the next frame).
+    pub fn clear(&mut self) {
+        self.evicted.extend(self.tiles.values().map(|t| t.id));
+        self.tiles.clear();
+        self.order.clear();
+        self.bytes = 0;
     }
 
     /// Store a tile (`None`: none there, stored so it isn't fetched again).
@@ -1000,6 +1039,21 @@ impl Widget for RasterCells<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn blends_by_alpha() {
+        let tile = |c: [u8; 4]| RasterTile { id: 0, png: Vec::new(), rgba: image::RgbaImage::from_pixel(2, 2, image::Rgba(c)) };
+        let rain = tile([0, 100, 200, 255]);
+        let clear = tile([0, 0, 0, 0]);
+        let half = blend(&rain, &clear, 0.5).unwrap();
+        // Rain fading out keeps its color and loses opacity (not darkened toward black).
+        assert_eq!(*half.rgba.get_pixel(0, 0), image::Rgba([0, 100, 200, 128]));
+        let mixed = blend(&rain, &tile([200, 100, 0, 255]), 0.25).unwrap();
+        assert_eq!(*mixed.rgba.get_pixel(1, 1), image::Rgba([50, 100, 150, 255]));
+        assert!(png_has_alpha(&half.png), "a real PNG, for the terminal");
+        let missing = RasterTile { id: 0, png: Vec::new(), rgba: image::RgbaImage::new(1, 1) };
+        assert_eq!(blend(&missing, &rain, 1.0).unwrap().size(), (2, 2), "a missing tile counts as clear");
+    }
 
     #[test]
     fn png_transparency() {

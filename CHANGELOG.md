@@ -10,7 +10,9 @@ All notable changes to mapterm are listed here. The format follows
 
 - Weather radar: `--radar` draws RainViewer's precipitation radar over the map (no key),
   the last two hours in 10-minute scans: `space` plays them in a loop or pauses, `,` and
-  `.` step, `R` hides it; the status line shows the scan's time. 512-pixel tiles, the scan
+  `.` step, `R` hides it; the status line shows the scan's time. Playing, each scan fades
+  into the next (`raster::blend`, made from both, since kitty can't draw an image half
+  transparent). 512-pixel tiles, the scan
   on screen only unless playing, at most 60 tile requests a minute (RainViewer allows 100),
   and its credit "Weather data by RainViewer" (`mapterm::rainviewer`).
 - Time on the map: `mapterm::clock` (a `Clock` that's live or plays over a range, looping
