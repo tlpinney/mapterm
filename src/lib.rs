@@ -70,6 +70,7 @@
 
 pub mod adsb;
 pub mod ais;
+pub mod areas;
 pub mod cache;
 pub mod clock;
 pub mod cluster;
@@ -97,6 +98,7 @@ pub mod mbtiles;
 pub mod msbuildings;
 pub mod mvt;
 pub mod nws;
+pub mod outages;
 pub mod pbf;
 pub mod pick;
 pub mod pixels;

@@ -6,6 +6,28 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Power outages in Pennsylvania: `--outages` shades counties, and from zoom 9
+  municipalities, by the share of customers without power, from the state's outage map (PEMA
+  and PennDOT, no key). Click an area for customers out and served, the county's total and
+  when the figures were gathered; the status line has the statewide total, and a legend the
+  areas in each band. Figures every 10 minutes with their ETag; outlines once, kept 30 days.
+- `mapterm --cache` lists, and `--cache-clear` empties, the live layers' caches by name:
+  `radio` (SatNOGS), `zones` (NWS alert zones), `radar` (RainViewer scans) and `outages`.
+
+### Changed
+
+- The alert areas' tile renderer is now `mapterm::areas` (`AreaTiles`, `Shape`), shared by
+  alerts and outages; `nws::AlertTiles` is an alias, given `nws::shapes(...)`.
+
+### Fixed
+
+- `--cache` counted any folder it didn't know as `old`, so `--cache-clear old` would have
+  removed the SatNOGS and NWS caches, and folders other programs keep there. `old` is now
+  only what earlier versions wrote: folders named by a source's hash, and the old
+  `geoparquet/` folder.
+
 ## [0.5.0] - 2026-11-26
 
 Live layers and weather: every active satellite (by orbit, country or mission, with radio
