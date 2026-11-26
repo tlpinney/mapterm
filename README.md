@@ -116,6 +116,8 @@ They follow the MapLibre GL / Mapbox GL defaults:
 - [Live layers](docs/live-layers.md): your location, aircraft (`--adsb`), ships
   (`--ais`), satellites (`--sats`)
 - [Use it in your own app](docs/library.md): the library API
+- [Network and proxies](docs/network.md): `--proxy` (SOCKS5 or HTTP) for everything
+  mapterm fetches
 - [Experimental](docs/experimental.md): pixel mode and smooth scrolling
 
 ## Use it in your own app

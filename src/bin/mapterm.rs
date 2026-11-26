@@ -101,6 +101,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --adsb-radius NM
                 the largest circle --adsb asks the feed for (default 60 nm); below zoom 7
                 it asks for nothing, and after errors it waits 30 s to 5 min
+  --proxy URL   send everything mapterm fetches through a proxy: socks5h://HOST:PORT
+                (SOCKS5, host names looked up by the proxy), socks5://, or http://;
+                user:pass@ in the URL when it asks. Also MAPTERM_PROXY. Local addresses
+                go direct
   --location-cmd CMD
                 a command that prints your location as LAT LON [ACCURACY_M], for
                 `--at here` and `g` (else MAPTERM_LOCATION_CMD; on macOS, CoreLocationCLI
@@ -370,6 +374,7 @@ fn args() -> Result<Args> {
                 }
                 a.sats.get_or_insert_with(|| vec!["active".to_string()]);
             }
+            "--proxy" => mapterm::proxy::set(&it.next().context("--proxy URL (socks5h://127.0.0.1:1080)")?)?,
             "--ais-key-cmd" => a.ais_key_cmd = Some(it.next().context("--ais-key-cmd CMD")?),
             "--adsb-key-cmd" => a.adsb_key_cmd = Some(it.next().context("--adsb-key-cmd CMD")?),
             "--adsb-radius" => {
