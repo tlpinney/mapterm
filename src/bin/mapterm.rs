@@ -78,7 +78,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 GROUPS is CelesTrak's, comma-separated (default active: every active
                 satellite, ~17,000 with Starlink's ~11,000 unlabelled; or a smaller group:
                 visual, stations, starlink, resource, amateur, weather, gnss, ...).
-                p finds one by name or operator
+                p finds one by name or operator. The panel lists its radio transmitters
+                (frequency, mode) from the SatNOGS DB, kept a day; p radio, fm, lora...
+                filters to the satellites with one active.
                 Elements are cached for 2 hours, as CelesTrak asks
   --sats-color orbit|country|mission
                 color satellites by orbit class (default: LEO, MEO, GEO, GSO, HEO), by
@@ -594,6 +596,8 @@ enum Target {
     Missions(Vec<mapterm::satellites::Mission>),
     /// A satellite operator (Planet, Vantor...).
     Operator(&'static str),
+    /// Satellites with an active downlink: any (""), or in this mode.
+    Radio(String),
     Sat(u64),
     Ship(u32),
     Plane(String),
@@ -671,6 +675,42 @@ fn find(
             if let Some(sc) = mapterm::fuzzy::score(query, op) {
                 let name = op.split(" (").next().unwrap_or(op);
                 v.push((sc + 42, Hit { target: Target::Operator(op), name: name.to_string(), detail: format!("operator · {n} satellites") }));
+            }
+        }
+        // Radio, from the SatNOGS DB: any active downlink, or one mode ("fm", "lora").
+        let mut modes: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut any = 0;
+        for s in sats.iter().chain(hidden) {
+            let mut seen: Vec<&str> = Vec::new();
+            for t in s.radio.iter().filter(|t| t.active && t.downlink_low.is_some()) {
+                if let Some(m) = t.mode.as_deref()
+                    && !seen.contains(&m)
+                {
+                    seen.push(m);
+                    *modes.entry(m).or_insert(0) += 1;
+                }
+            }
+            any += usize::from(s.radio.iter().any(|t| t.active && t.downlink_low.is_some()));
+        }
+        if any > 0
+            && let Some(sc) = mapterm::fuzzy::score(query, "radio transmitters frequencies downlink satnogs")
+        {
+            v.push((
+                sc + 38,
+                Hit { target: Target::Radio(String::new()), name: "with radio (an active downlink)".into(), detail: format!("SatNOGS · {any} satellites") },
+            ));
+        }
+        let q = query.trim().to_lowercase();
+        let q = q.strip_prefix("radio").unwrap_or(&q).trim();
+        if q.len() >= 2 {
+            for (m, n) in &modes {
+                if m.to_lowercase().starts_with(q) {
+                    let exact = if m.eq_ignore_ascii_case(q) { 20 } else { 0 };
+                    v.push((
+                        150 + exact + (*n as f64).log10() as i32,
+                        Hit { target: Target::Radio(m.to_string()), name: format!("radio: {m}"), detail: format!("SatNOGS · {n} satellites") },
+                    ));
+                }
             }
         }
     }
@@ -798,12 +838,14 @@ struct SatFilter {
     countries: Vec<String>,
     missions: Vec<mapterm::satellites::Mission>,
     operator: Option<&'static str>,
+    /// An active downlink: any (""), or in this mode.
+    radio: Option<String>,
 }
 
 impl SatFilter {
     /// Whether it leaves any out.
     fn on(&self) -> bool {
-        !self.countries.is_empty() || !self.missions.is_empty() || self.operator.is_some()
+        !self.countries.is_empty() || !self.missions.is_empty() || self.operator.is_some() || self.radio.is_some()
     }
 
     /// Whether `s` is shown.
@@ -811,6 +853,10 @@ impl SatFilter {
         (self.countries.is_empty() || s.catalog.as_ref().is_some_and(|c| self.countries.contains(&c.owner)))
             && (self.missions.is_empty() || self.missions.contains(&s.mission()))
             && self.operator.is_none_or(|op| s.operator() == Some(op))
+            && self
+                .radio
+                .as_deref()
+                .is_none_or(|m| s.radio.iter().any(|t| t.active && t.downlink_low.is_some() && (m.is_empty() || t.mode.as_deref() == Some(m))))
     }
 
     /// What it shows, for the status line: " · China · imaging", or nothing.
@@ -828,6 +874,11 @@ impl SatFilter {
         }
         if let Some(op) = self.operator {
             out += &format!(" · {}", op.split(" (").next().unwrap_or(op));
+        }
+        match self.radio.as_deref() {
+            None => {}
+            Some("") => out += " · radio",
+            Some(m) => out += &format!(" · radio {m}"),
         }
         out
     }
@@ -1051,6 +1102,54 @@ fn draw_sat(
             }
             Some(None) => l.push(Line::from(vec![key("next pass"), Span::styled("none over 10° in 24 h", dim)])),
             None => {}
+        }
+    }
+    if !s.radio.is_empty() {
+        l.push(Line::default());
+        l.push(Line::from(vec![key("radio"), Span::styled("SatNOGS DB", dim)]));
+        let active: Vec<&mapterm::satnogs::Transmitter> = s.radio.iter().filter(|t| t.active).collect();
+        let inactive = s.radio.len() - active.len();
+        // As many as fit above the footer, three at least.
+        let room = (inner.height as usize).saturating_sub(l.len() + 3).max(3);
+        let width = inner.width as usize;
+        for t in active.iter().take(room) {
+            let (arrow, freq) = match (t.downlink(), t.uplink()) {
+                (Some(d), _) => ("↓", d),
+                (None, Some(u)) => ("↑", u),
+                (None, None) => (" ", "?".to_string()),
+            };
+            let mode = t.mode.clone().unwrap_or_default();
+            let head = format!(" {arrow} {freq:<9} {mode:<5} ");
+            let mut what = t.description.clone();
+            if t.downlink().is_some()
+                && let Some(up) = t.uplink()
+            {
+                what = format!("{what} · up {up}");
+            }
+            let left = width.saturating_sub(head.chars().count() + usize::from(t.frequency_violation) * 2);
+            if what.chars().count() > left {
+                what = what.chars().take(left.saturating_sub(1)).collect::<String>() + "…";
+            }
+            let mut spans =
+                vec![Span::raw(format!(" {arrow} {freq:<9} ")), Span::styled(format!("{mode:<5} "), TStyle::new().fg(Color::Cyan)), Span::styled(what, dim)];
+            if t.frequency_violation {
+                spans.push(Span::styled(" ⚠", TStyle::new().fg(Color::Yellow)));
+            }
+            l.push(Line::from(spans));
+        }
+        let more = active.len().saturating_sub(room);
+        let mut rest = Vec::new();
+        if active.is_empty() {
+            rest.push("none active".to_string());
+        }
+        if more > 0 {
+            rest.push(format!("{more} more"));
+        }
+        if inactive > 0 {
+            rest.push(format!("{inactive} inactive"));
+        }
+        if !rest.is_empty() {
+            l.push(Line::from(Span::styled(format!("   {}", rest.join(" · ")), dim)));
         }
     }
     l.push(Line::default());
@@ -1955,8 +2054,11 @@ async fn main() -> Result<()> {
     // What they're for, from CelesTrak's purpose groups: after the satellites are up (the
     // first time a day it's some twenty small requests).
     let (mtx, mut mrx) = mpsc::unbounded_channel::<(std::collections::HashMap<u64, mapterm::satellites::Mission>, Vec<String>)>();
+    // Their radios, from the SatNOGS DB, after that.
+    type Radio = std::collections::HashMap<u64, Vec<mapterm::satnogs::Transmitter>>;
+    let (rtx, mut rrx) = mpsc::unbounded_channel::<std::result::Result<(Radio, f64, Option<String>), String>>();
     if let Some(groups) = a.sats.clone() {
-        let (otx, mtx) = (otx.clone(), mtx.clone());
+        let (otx, mtx, rtx) = (otx.clone(), mtx.clone(), rtx.clone());
         tokio::spawn(async move {
             loop {
                 let (mut all, mut oldest, mut notes) = (Vec::new(), 0.0f64, Vec::new());
@@ -1988,6 +2090,9 @@ async fn main() -> Result<()> {
                 if mtx.send(mapterm::satellites::load_missions().await).is_err() {
                     return;
                 }
+                if rtx.send(mapterm::satnogs::load().await.map_err(|e| format!("{e:#}"))).is_err() {
+                    return;
+                }
                 tokio::time::sleep(Duration::from_secs(2 * 3600 + 60)).await;
             }
         });
@@ -2009,6 +2114,7 @@ async fn main() -> Result<()> {
     // `p`: the fzf-style finder over everything live (satellites, aircraft, ships).
     let mut finder: Option<Finder> = None;
     // Satellites of other owners, set aside while a country filter is on.
+    let mut radio: std::collections::HashMap<u64, Vec<mapterm::satnogs::Transmitter>> = std::collections::HashMap::new();
     let mut sat_filter = SatFilter { countries: a.sats_country.clone(), ..SatFilter::default() };
     let mut sats_hidden: Vec<mapterm::satellites::Sat> = Vec::new();
     let mut sat_dots_drawn = Instant::now();
@@ -2824,6 +2930,23 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Some(r) = rrx.recv() => {
+                    match r {
+                        Ok((by, age, why)) => {
+                            dlog(|| format!("sats: radio for {} satellites from SatNOGS DB, {:.0} h old; {why:?}", by.len(), age / 3600.0));
+                            radio = by;
+                            for s in sats.iter_mut().chain(sats_hidden.iter_mut()) {
+                                s.radio = radio.get(&s.norad).cloned().unwrap_or_default();
+                            }
+                            if sat_filter.radio.is_some() {
+                                filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                            }
+                            map.set_attribution(SATS, "CelesTrak · SatNOGS DB (CC BY-SA 4.0)")?;
+                        }
+                        // No radio section; the rest works as before.
+                        Err(e) => dlog(|| format!("sats: no radio from SatNOGS DB: {e}")),
+                    }
+                }
                 Some((missions, notes)) = mrx.recv() => {
                     dlog(|| format!("sats: {} missions from groups; {notes:?}", missions.len()));
                     for s in sats.iter_mut().chain(sats_hidden.iter_mut()) {
@@ -2845,6 +2968,7 @@ async fn main() -> Result<()> {
                         sats = loaded;
                         for s in &mut sats {
                             s.group_mission = known.get(&s.norad).copied();
+                            s.radio = radio.get(&s.norad).cloned().unwrap_or_default();
                         }
                         sats_hidden.clear();
                         sats_age = age;
@@ -3010,6 +3134,17 @@ async fn main() -> Result<()> {
                                                     finder = None;
                                                     continue;
                                                 }
+                                                if let Target::Radio(m) = &target {
+                                                    sat_filter.radio = Some(m.clone());
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                                    if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
+                                                        selected_sat = None;
+                                                    }
+                                                    note = Some((Instant::now(), format!("{} satellites:{}", sats.len(), sat_filter.describe())));
+                                                    finder = None;
+                                                    continue;
+                                                }
                                                 if let Target::Operator(op) = &target {
                                                     sat_filter.operator = Some(op);
                                                     filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
@@ -3049,11 +3184,11 @@ async fn main() -> Result<()> {
                                                     Target::Sat(n) => sats.iter().find(|s| s.norad == *n).and_then(|s| s.at(now)).map(|f| (f.lon, f.lat)),
                                                     Target::Ship(m) => fleet.get(*m, now - AIS_DELAY).map(|(_, p)| (p.lon, p.lat)),
                                                     Target::Plane(h) => aircraft.get(h, now - adsb_delay).map(|(_, p, _)| (p.lon, p.lat)),
-                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) => None,
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) | Target::Radio(_) => None,
                                                 };
                                                 (selected, selected_ship, selected_sat) = (None, None, None);
                                                 match target {
-                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) => {}
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) | Target::Radio(_) => {}
                                                     Target::Sat(n) => selected_sat = Some(n),
                                                     Target::Ship(m) => selected_ship = Some(m),
                                                     Target::Plane(h) => selected = Some(h),

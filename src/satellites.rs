@@ -42,6 +42,9 @@ pub struct Sat {
     /// What it's for, from CelesTrak's purpose groups (see [`load_missions`]) once they're
     /// in; [`Sat::mission`] also knows some by name.
     pub group_mission: Option<Mission>,
+    /// Its radio transmitters, from the SatNOGS DB (see [`crate::satnogs::load`]) once
+    /// they're in: active ones first.
+    pub radio: Vec<crate::satnogs::Transmitter>,
     constants: sgp4::Constants,
     /// The elements' epoch, Unix seconds.
     epoch: f64,
@@ -132,6 +135,7 @@ impl Sat {
             eccentricity: elements.eccentricity,
             catalog: None,
             group_mission: None,
+            radio: Vec::new(),
             constants,
             epoch,
         })
@@ -368,13 +372,13 @@ fn age(p: &std::path::Path) -> Option<Duration> {
     SystemTime::now().duration_since(std::fs::metadata(p).ok()?.modified().ok()?).ok()
 }
 
-/// A CelesTrak file by the rules (see the module docs): the cached copy `name` while it's
-/// younger than `fresh`, else a download of `url` (gzip asked for) kept only when `usable`
-/// says it is, and after any error the old copy, with a marker that keeps every run from
-/// asking again for 2 hours. Returns the text, its age in seconds, and why the old copy was
-/// used, if it was.
-async fn fetch_cached(name: &str, url: &str, fresh: Duration, usable: fn(&str) -> bool) -> Result<(String, f64, Option<String>)> {
-    let path = cache_file(name);
+/// A file from `who` (CelesTrak, SatNOGS DB) by CelesTrak's rules (see the module docs),
+/// which suit any free service: the cached copy at `path` while it's younger than `fresh`,
+/// else a download of `url` (gzip asked for) kept only when `usable` says it is, and after
+/// any error the old copy, with a marker that keeps every run from asking again for 2
+/// hours. Returns the text, its age in seconds, and why the old copy was used, if it was.
+pub(crate) async fn fetch_cached(who: &str, path: PathBuf, url: &str, fresh: Duration, usable: fn(&str) -> bool) -> Result<(String, f64, Option<String>)> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let marker = path.with_extension("wait");
     let cached = || -> Option<(String, f64)> {
         let text = std::fs::read_to_string(&path).ok()?;
@@ -393,7 +397,7 @@ async fn fetch_cached(name: &str, url: &str, fresh: Duration, usable: fn(&str) -
     }
     if age(&marker).is_some_and(|a| a < FRESH) {
         let why = std::fs::read_to_string(&marker).unwrap_or_default();
-        return stale(format!("not asking CelesTrak again yet ({})", why.trim()));
+        return stale(format!("not asking {who} again yet ({})", why.trim()));
     }
     let leave = |why: &str| {
         let _ = std::fs::create_dir_all(marker.parent().unwrap_or(&marker));
@@ -403,7 +407,7 @@ async fn fetch_cached(name: &str, url: &str, fresh: Duration, usable: fn(&str) -
         Ok(r) => r,
         Err(e) => {
             leave("the download failed");
-            return stale(format!("CelesTrak: {e}"));
+            return stale(format!("{who}: {e}"));
         }
     };
     let status = resp.status();
@@ -411,22 +415,29 @@ async fn fetch_cached(name: &str, url: &str, fresh: Duration, usable: fn(&str) -
         // Retrying doesn't help (403: already downloaded this update; 5xx: wait), and
         // errors count toward CelesTrak's firewall.
         leave(&format!("HTTP {status}"));
-        return stale(format!("CelesTrak answered HTTP {status}"));
+        return stale(format!("{who} answered HTTP {status}"));
     }
-    let body = resp.bytes().await.context("CelesTrak")?;
+    let body = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            leave("the download broke off");
+            return stale(format!("{who}: {e}"));
+        }
+    };
     if body.len() > 64 << 20 {
-        bail!("CelesTrak: answer too large");
+        bail!("{who}: answer too large");
     }
     let text = if body.starts_with(&[0x1f, 0x8b]) {
         let mut s = String::new();
-        std::io::Read::read_to_string(&mut std::io::Read::take(flate2::read::GzDecoder::new(&body[..]), 256 << 20), &mut s).context("CelesTrak: bad gzip")?;
+        std::io::Read::read_to_string(&mut std::io::Read::take(flate2::read::GzDecoder::new(&body[..]), 256 << 20), &mut s)
+            .with_context(|| format!("{who}: bad gzip"))?;
         s
     } else {
         String::from_utf8_lossy(&body).into_owned()
     };
     if !usable(&text) {
         leave("nothing usable in the answer");
-        return stale(format!("CelesTrak sent nothing usable for {name}"));
+        return stale(format!("{who} sent nothing usable for {name}"));
     }
     std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
     let tmp = path.with_extension("part");
@@ -450,7 +461,7 @@ fn check_group(group: &str) -> Result<()> {
 pub async fn load(group: &str) -> Result<Loaded> {
     check_group(group)?;
     let url = format!("https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=csv");
-    let (text, age, note) = fetch_cached(&format!("{group}.csv"), &url, FRESH, |t| !parse_csv(t).is_empty()).await?;
+    let (text, age, note) = fetch_cached("CelesTrak", cache_file(&format!("{group}.csv")), &url, FRESH, |t| !parse_csv(t).is_empty()).await?;
     Ok(Loaded { sats: parse_csv(&text), age, note })
 }
 
@@ -469,7 +480,8 @@ pub struct CatalogEntry {
 pub async fn load_catalog(group: &str) -> Result<HashMap<u64, CatalogEntry>> {
     check_group(group)?;
     let url = format!("https://celestrak.org/satcat/records.php?GROUP={group}&FORMAT=CSV");
-    let (text, _, _) = fetch_cached(&format!("{group}-satcat.csv"), &url, Duration::from_secs(24 * 3600), |t| !parse_catalog(t).is_empty()).await?;
+    let (text, _, _) =
+        fetch_cached("CelesTrak", cache_file(&format!("{group}-satcat.csv")), &url, Duration::from_secs(24 * 3600), |t| !parse_catalog(t).is_empty()).await?;
     Ok(parse_catalog(&text))
 }
 

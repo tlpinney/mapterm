@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Satellite radio from the SatNOGS DB (CC BY-SA 4.0, credited with CelesTrak): the
+  satellite panel lists active transmitters (downlink MHz, mode, description, uplink for
+  transceivers and transponders, ⚠ for SatNOGS's frequency-violation flag), and the finder
+  filters to satellites with an active downlink (`radio`) or in one mode (`fm`, `lora`).
+  One ~4 MB request a day, cached, with the old copy and a 2-hour pause after errors
+  (`mapterm::satnogs`, `Sat::radio`). The CelesTrak cache helper now serves both.
 - A proxy for everything mapterm fetches: `--proxy URL` or `MAPTERM_PROXY`, with
   `socks5h://` (the proxy looks up host names), `socks5://` or `http://`, and an
   optional user name and password in the URL (never printed). It covers the HTTP clients
