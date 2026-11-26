@@ -240,6 +240,8 @@ impl TileRequest {
 /// itself, freeing the least recently used images first.
 pub struct KittyState {
     sent: HashMap<u32, (usize, u64)>,
+    /// The placements made last frame (image, placement), to take down those not made again.
+    placed: HashSet<(u32, u32)>,
     frame: u64,
     /// Most decoded image bytes to keep in the terminal (default 48 MiB, under herdr's 64 MiB;
     /// `MAPTERM_KITTY_BUDGET_MB` overrides it in the viewer).
@@ -251,7 +253,7 @@ pub struct KittyState {
 
 impl Default for KittyState {
     fn default() -> Self {
-        Self { sent: HashMap::new(), frame: 0, budget: 48 << 20, shm: false }
+        Self { sent: HashMap::new(), placed: HashSet::new(), frame: 0, budget: 48 << 20, shm: false }
     }
 }
 
@@ -1495,7 +1497,7 @@ impl Map {
             let rz = self.raster_zoom(&r.src, cam);
             pieces.extend(crate::raster::layout_max(&r.tiles, cam, area, rz, (32, 16)).into_iter().map(|b| (i, b)));
         }
-        if pieces.is_empty() && state.sent.is_empty() {
+        if pieces.is_empty() && state.sent.is_empty() && state.placed.is_empty() {
             return cmds;
         }
         // Stay under the budget before sending anything new: free the least recently used
@@ -1522,7 +1524,14 @@ impl Map {
                 total -= b;
             }
         }
-        cmds.push_str(kitty::CLEAR_PLACEMENTS);
+        // Take down last frame's placements that this one doesn't make again (one made again
+        // is moved in place). Only these: other images (satellite dots, trails) are the
+        // caller's and stay.
+        let now: HashSet<(u32, u32)> = pieces.iter().enumerate().map(|(p, (_, b))| (b.tile.id, p as u32 + 1)).collect();
+        for &(id, p) in state.placed.difference(&now) {
+            cmds.push_str(&kitty::unplace_one(id, p));
+        }
+        state.placed = now;
         // Higher layers stack above lower ones, all under the text.
         for (placement, (i, b)) in pieces.iter().enumerate() {
             let (w, h) = b.tile.size();
@@ -2726,11 +2735,14 @@ mod tests {
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset);
         let mut k = KittyState::default();
         let first = map.kitty_commands(&cam, area, &mut k);
-        assert!(first.starts_with(crate::kitty::CLEAR_PLACEMENTS) && first.contains("a=t,f=100") && first.contains("z=-1000"));
+        assert!(first.contains("a=t,f=100") && first.contains("z=-1000"));
+        assert!(!first.contains("d=a"), "never everything: other images on screen are the caller's");
         let second = map.kitty_commands(&cam, area, &mut k);
-        assert!(!second.contains("a=t,") && second.contains("a=p,"));
+        assert!(!second.contains("a=t,") && second.contains("a=p,") && !second.contains("a=d,"), "placed again in place");
         map.set_visibility("img", false).unwrap();
-        assert!(!map.kitty_commands(&cam, area, &mut k).contains("a=p,"), "hidden layers aren't placed");
+        let hidden = map.kitty_commands(&cam, area, &mut k);
+        assert!(!hidden.contains("a=p,") && hidden.contains("a=d,d=i,"), "hidden layers' placements are taken down: {hidden:?}");
+        assert!(map.kitty_commands(&cam, area, &mut k).is_empty(), "and then nothing more");
     }
 
     #[test]

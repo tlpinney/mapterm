@@ -157,6 +157,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- With imagery or radar on, satellite dots and aircraft and ship trails no longer vanish or
+  flicker: each frame the image layers cleared every placement on the screen, theirs too.
+  Now they take down only their own placements that aren't made again
+  (`kitty::unplace_one`); one made again is moved in place.
 - Outlines of polygons from vector tiles no longer draw the tile grid: the segments where a
   tile cut a polygon (its border and the margin past it) are left out, as MapLibre leaves
   them out by clipping each tile. Seen as straight lines across the sea in
