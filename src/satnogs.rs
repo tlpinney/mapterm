@@ -46,7 +46,45 @@ pub struct Transmitter {
     pub frequency_violation: bool,
 }
 
+/// What a transmitter carries, roughly: what you'd listen for, or send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Use {
+    /// Voice: FM, SSB or AM that's a repeater, transponder or labelled voice.
+    Voice,
+    /// Data: digital modes, and FM packet (APRS) or telemetry.
+    Data,
+}
+
+impl Use {
+    /// "voice" or "data".
+    pub fn label(self) -> &'static str {
+        match self {
+            Use::Voice => "voice",
+            Use::Data => "data",
+        }
+    }
+}
+
 impl Transmitter {
+    /// Whether it carries voice or data, as far as its mode and description say: None for
+    /// CW, images (SSTV, APT, HRPT, LRPT) and unknowns. FM on its own isn't enough for voice
+    /// (most FM downlinks are telemetry): it needs an uplink, or a description that says so.
+    pub fn usage(&self) -> Option<Use> {
+        let mode = self.mode.as_deref().unwrap_or_default().to_ascii_uppercase();
+        let what = self.description.to_ascii_lowercase();
+        let says = |words: &[&str]| words.iter().any(|w| what.contains(w));
+        let analog = matches!(mode.as_str(), "FM" | "FMN" | "USB" | "LSB" | "SSB" | "AM");
+        let digital =
+            ["FSK", "MSK", "PSK", "LORA", "QAM", "DVB", "OFDM", "FT8", "WSJT", "DUV", "SSDV", "DSTAR", "DMR", "C4FM"].iter().any(|m| mode.contains(m));
+        if digital || (analog && says(&["aprs", "packet", "digi", "telemetry", "tlm", "data", "bbs"])) {
+            return Some(Use::Data);
+        }
+        if analog && (self.uplink_low.is_some() || says(&["voice", "repeater", "rptr", "transponder", "crew", "phone"])) {
+            return Some(Use::Voice);
+        }
+        None
+    }
+
     /// The frequency to tune to, MHz text: `145.800`, `137.6257`, `145.860-145.900`.
     pub fn downlink(&self) -> Option<String> {
         Some(band(self.downlink_low?, self.downlink_high))
@@ -154,6 +192,29 @@ mod tests {
         assert_eq!(by[&33591][0].service, "Meteorological");
         let t = &by[&43017][0];
         assert_eq!((t.downlink().as_deref(), t.uplink().as_deref(), t.invert), (Some("145.860-145.880"), Some("435.280-435.300"), true));
+    }
+
+    #[test]
+    fn voice_or_data() {
+        let t = |mode: &str, desc: &str, up: bool| Transmitter {
+            mode: Some(mode.into()),
+            description: desc.into(),
+            downlink_low: Some(436_795_000),
+            uplink_low: up.then_some(145_850_000),
+            ..Transmitter::default()
+        };
+        assert_eq!(t("FM", "Mode V/U FM", true).usage(), Some(Use::Voice), "an FM repeater");
+        assert_eq!(t("FM", "V/U FM Voice (PL 88.5Hz)", false).usage(), Some(Use::Voice));
+        assert_eq!(t("USB", "Linear transponder", true).usage(), Some(Use::Voice));
+        assert_eq!(t("FM", "Telemetry", false).usage(), Some(Use::Data), "FM telemetry is data");
+        assert_eq!(t("FM", "Mode S - Transmitter 1", false).usage(), None, "FM alone isn't voice");
+        assert_eq!(t("AFSK", "Mode V APRS", true).usage(), Some(Use::Data));
+        assert_eq!(t("FM", "Mode V/V APRS", true).usage(), Some(Use::Data), "packet over FM");
+        assert_eq!(t("GMSK USP", "Telemetry", false).usage(), Some(Use::Data));
+        assert_eq!(t("LoRa", "LoRa beacon", false).usage(), Some(Use::Data));
+        assert_eq!(t("CW", "CW beacon", false).usage(), None);
+        assert_eq!(t("SSTV", "Mode V SSTV", false).usage(), None);
+        assert_eq!(t("APT", "APT Downlink", false).usage(), None);
     }
 
     #[test]

@@ -12,8 +12,9 @@ All notable changes to mapterm are listed here. The format follows
   satellite panel lists active transmitters (downlink MHz, mode, description, uplink for
   transceivers and transponders, ⚠ for SatNOGS's frequency-violation flag), and the finder
   filters to satellites with an active downlink (`radio`), in one mode (`fm`, `lora`), or
-  with an active uplink as well (`uplink`: repeaters and transponders), combining with the
-  other filters.
+  with an active uplink as well (`uplink`: repeaters and transponders), or carrying `voice`
+  or `data` (from each transmitter's mode and description: `Transmitter::usage`), combining
+  with the other filters; the radio filters hold for one and the same transmitter.
   One ~4 MB request a day, cached, with the old copy and a 2-hour pause after errors
   (`mapterm::satnogs`, `Sat::radio`). The CelesTrak cache helper now serves both.
 - A proxy for everything mapterm fetches: `--proxy URL` or `MAPTERM_PROXY`, with
