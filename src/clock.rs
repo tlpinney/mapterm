@@ -32,7 +32,8 @@ pub struct Clock {
     pub stop: f64,
     /// What happens at the end.
     pub range: Range,
-    /// How many seconds of map time pass per second of real time while playing.
+    /// How many seconds of map time pass per second of real time while playing; negative
+    /// plays backward.
     pub multiplier: f64,
     current: f64,
     playing: bool,
@@ -76,11 +77,15 @@ impl Clock {
         self.live = false;
     }
 
-    /// Carry on playing over the range it had.
+    /// Carry on playing over the range it had (from the other end when it stopped at one).
     pub fn resume(&mut self) {
         if self.stop > self.start {
-            if self.current >= self.stop && self.range != Range::Unbounded {
-                self.current = self.start;
+            if self.range != Range::Unbounded {
+                if self.multiplier >= 0.0 && self.current >= self.stop {
+                    self.current = self.start;
+                } else if self.multiplier < 0.0 && self.current <= self.start {
+                    self.current = self.stop;
+                }
             }
             (self.playing, self.live) = (true, false);
         }
@@ -98,19 +103,32 @@ impl Clock {
         (self.current, self.playing, self.live) = (now, false, true);
     }
 
+    /// Play backward if it was playing forward, and forward if backward (Cesium's reverse
+    /// button), keeping the speed; playing either way afterwards.
+    pub fn reverse(&mut self) {
+        self.multiplier = -self.multiplier;
+        self.resume();
+    }
+
+    /// Play at `speed` (map seconds per real second, the sign kept: backward stays backward).
+    pub fn set_speed(&mut self, speed: f64) {
+        self.multiplier = speed.abs() * if self.multiplier < 0.0 { -1.0 } else { 1.0 };
+    }
+
     /// Move on: to `now` when live; by `elapsed` real seconds times the multiplier when
-    /// playing, then wrapped, held or let run at the end. Returns the time it now says.
+    /// playing, then wrapped, held or let run at either end. Returns the time it now says.
     pub fn tick(&mut self, now: f64, elapsed: f64) -> f64 {
         if self.live {
             self.current = now;
         } else if self.playing {
             self.current += elapsed.max(0.0) * self.multiplier;
             let span = self.stop - self.start;
-            if self.current >= self.stop {
+            let past = if self.multiplier >= 0.0 { self.current >= self.stop } else { self.current <= self.start };
+            if past {
                 match self.range {
                     Range::Loop if span > 0.0 => self.current = self.start + (self.current - self.start).rem_euclid(span),
                     Range::Loop | Range::Clamped => {
-                        self.current = self.stop;
+                        self.current = if self.multiplier >= 0.0 { self.stop } else { self.start };
                         self.playing = false;
                     }
                     Range::Unbounded => {}
@@ -246,6 +264,27 @@ mod tests {
         let mut c = Clock::live(0.0);
         c.play(0.0, 100.0, Range::Unbounded, 10.0);
         assert_eq!(c.tick(0.0, 20.0), 200.0);
+    }
+
+    #[test]
+    fn plays_backward_and_changes_speed() {
+        let mut c = Clock::live(0.0);
+        c.play(0.0, 100.0, Range::Loop, 10.0);
+        c.tick(0.0, 3.0);
+        c.reverse();
+        assert!(c.is_playing() && c.multiplier < 0.0);
+        assert_eq!(c.tick(0.0, 1.0), 20.0, "30 back by 10");
+        assert_eq!(c.tick(0.0, 3.0), 90.0, "past the start: wraps to the end");
+        c.set_speed(40.0);
+        assert_eq!(c.multiplier, -40.0, "still backward");
+        let mut c = Clock::live(0.0);
+        c.play(0.0, 100.0, Range::Clamped, -50.0);
+        assert_eq!(c.time(), 0.0);
+        c.resume();
+        assert_eq!(c.time(), 100.0, "backward from the start: from the end");
+        c.tick(0.0, 3.0);
+        assert_eq!(c.time(), 0.0);
+        assert!(!c.is_playing(), "clamped: stops at the start");
     }
 
     #[test]
