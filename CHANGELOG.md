@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Weather balloons: `--sondes` follows the radiosondes amateur receivers track on SondeHub
+  (no key; CC BY-SA 2.0): ▲ climbing and ▼ falling, colored by altitude, with their
+  flights as trails, and a panel on click or Tab (altitude, climb, drift, temperature,
+  humidity, frequency, receiving station, predicted landing with its path on the map). It
+  asks the API once per area and follows each nearby balloon's MQTT topic, as SondeHub
+  asks (`mapterm::sondehub`, with a minimal MQTT 3.1.1 client over `mapterm::ws`).
 - Radar tiles are kept on disk, in one database (`rainviewer.sqlite`), by scan: a scan never
   changes, so it's never asked for twice; scans over three hours old are removed. NWS zone
   outlines saved at full detail are rewritten simplified (the cache went from 42 to 13 MB
