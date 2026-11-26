@@ -222,6 +222,8 @@ impl TileRequest {
                 None => LoadedTile::Vector(Vec::new()),
             },
             Fetch::Raster(src) => match src.tile(z, x, y).await? {
+                // An opaque tile from a source that's always transparent is its error image.
+                Some(b) if src.require_alpha && !crate::raster::png_has_alpha(&b) => LoadedTile::Raster(None),
                 Some(b) => LoadedTile::Raster(Some(tokio::task::spawn_blocking(move || crate::raster::decode(&b)).await??)),
                 None => LoadedTile::Raster(None),
             },

@@ -58,6 +58,9 @@ pub struct RasterSource {
     /// radar. The map's land, water and background stay painted under it, and in cell mode
     /// only its visible parts color a cell. Off by default.
     pub overlay: bool,
+    /// Tiles must have transparency to count: an opaque one is the service's error image
+    /// (RainViewer sends one instead of an error) and is treated as empty. Off by default.
+    pub require_alpha: bool,
 }
 
 /// A named raster provider: `--raster vantor` instead of a URL.
@@ -407,6 +410,7 @@ impl RasterSource {
             name: template.split('/').nth(2).unwrap_or(template).to_string(),
             attribution: known_attribution(template).unwrap_or_default().to_string(),
             overlay: false,
+            require_alpha: false,
         })
     }
 
@@ -473,6 +477,7 @@ impl RasterSource {
             name,
             attribution,
             overlay: false,
+            require_alpha: false,
         })
     }
 
@@ -503,6 +508,7 @@ impl RasterSource {
             name,
             attribution,
             overlay: false,
+            require_alpha: false,
         })
     }
 
@@ -749,6 +755,19 @@ impl RasterTile {
     }
 }
 
+/// Whether PNG `bytes` can be transparent: RGBA or gray with alpha, or a palette with a
+/// transparency chunk. False for anything else (JPEG, opaque PNG).
+pub fn png_has_alpha(bytes: &[u8]) -> bool {
+    if bytes.len() < 33 || &bytes[..8] != b"\x89PNG\r\n\x1a\n" {
+        return false;
+    }
+    match bytes[25] {
+        4 | 6 => true,
+        3 => bytes.windows(4).any(|w| w == b"tRNS"),
+        _ => false,
+    }
+}
+
 /// The widest or tallest raster tile mapterm decodes, in pixels.
 pub const MAX_TILE_PX: u32 = 4096;
 /// The most memory one raster tile may take while decoding (a 4096 px RGBA tile is 64 MiB).
@@ -981,6 +1000,18 @@ impl Widget for RasterCells<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn png_transparency() {
+        let png = |img: image::DynamicImage| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+            out.into_inner()
+        };
+        assert!(png_has_alpha(&png(image::DynamicImage::ImageRgba8(image::RgbaImage::new(4, 4)))));
+        assert!(!png_has_alpha(&png(image::DynamicImage::ImageRgb8(image::RgbImage::new(4, 4)))), "RainViewer's error image is opaque");
+        assert!(!png_has_alpha(b"\xff\xd8\xff not a png"));
+    }
 
     #[test]
     fn average_covers_only_its_rectangle() {

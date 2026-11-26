@@ -94,6 +94,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 aisstream.io: AISSTREAM_API_KEY or --ais-key-cmd). Arrows along the
                 course colored by kind (cargo, tanker, passenger, fishing, pleasure, tug);
                 streamed for the area in view from zoom 7; click or Tab for details
+  --radar       weather radar over the map: rain and snow worldwide from RainViewer (no
+                key), the last two hours in 10-minute scans. space plays the two hours
+                in a loop (again to pause), , and . step a scan (. past the last goes
+                back to now), R hides or shows it. Detail stops at zoom 7
   --ais-key-cmd CMD
                 print the aisstream.io API key with a command (else AISSTREAM_API_KEY)
   --adsb-key-cmd CMD
@@ -192,6 +196,8 @@ struct Args {
     sats: Option<Vec<String>>,
     /// --ais: live ships from aisstream.io.
     ais: bool,
+    /// --radar: weather radar from RainViewer.
+    radar: bool,
     /// --ais-key-cmd: prints the aisstream.io API key.
     ais_key_cmd: Option<String>,
     /// --adsb-key-cmd: prints the adsb.lol API key.
@@ -242,6 +248,7 @@ fn args() -> Result<Args> {
         adsb_radius: ADSB_RADIUS,
         adsb_key_cmd: None,
         ais: false,
+        radar: false,
         sats: None,
         sats_country: Vec::new(),
         sats_color: SatColor::Orbit,
@@ -346,6 +353,7 @@ fn args() -> Result<Args> {
                 a.adsb = Some(feed.unwrap_or_default());
             }
             "--ais" => a.ais = true,
+            "--radar" => a.radar = true,
             "--sats" | "--satellites" => {
                 // The groups are optional: take the next argument only if it's a list of
                 // group names (not a file, URL or option).
@@ -1985,7 +1993,7 @@ async fn main() -> Result<()> {
 
     // Raster drawing: real images with kitty graphics, else cell background colors.
     let has_raster = map.sources().any(|(_, s)| matches!(s, MapSource::Raster(_)));
-    let kitty = has_raster && mapterm::kitty::supported();
+    let kitty = (has_raster || a.radar) && mapterm::kitty::supported();
     // Experimental pixel mode: fills and lines as an image, labels as text (MAPTERM_PIXELS=1).
     let pixels_on = std::env::var("MAPTERM_PIXELS").is_ok_and(|v| !v.is_empty() && v != "0") && mapterm::kitty::supported();
     // Tile images placed last frame, to take down the ones that left the view.
@@ -2193,6 +2201,27 @@ async fn main() -> Result<()> {
         });
     }
     drop(otx);
+    // --radar: the map's clock, the radar frames that follow it, and RainViewer's scan list
+    // (asked for every 5 minutes; a new scan comes every 10). Its tiles stay under 60
+    // requests a minute (RainViewer allows 100 per address).
+    let mut clock = mapterm::clock::Clock::live(unix_now());
+    let mut clock_at = Instant::now();
+    let mut radar = a.radar.then(|| mapterm::timelayer::TimeRaster::new("radar", 0.8));
+    let mut radar_bucket = Bucket::new(60);
+    let mut radar_generated = 0i64;
+    let (rvtx, mut rvrx) = mpsc::unbounded_channel::<Result<mapterm::rainviewer::Scans>>();
+    if a.radar {
+        tokio::spawn(async move {
+            loop {
+                let r = mapterm::rainviewer::frames().await;
+                let wait = if r.is_ok() { 300 } else { 600 };
+                if rvtx.send(r).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+        });
+    }
     let mut sats_drawn = Instant::now();
     let mut selected_sat: Option<u64> = None;
     let mut sat_pass: Option<(u64, Instant, Option<mapterm::satellites::Pass>)> = None;
@@ -2275,6 +2304,21 @@ async fn main() -> Result<()> {
             let (draw_cam, ox, oy) = if smooth_on && shift_mode { smooth::snap(&cam) } else { (cam, 0, 0) };
             let box_rect = ctl.box_rect();
             last_cam = draw_cam;
+            // The clock moves on, and the radar shows its time.
+            let clock_t = clock.tick(unix_now(), clock_at.elapsed().as_secs_f64());
+            clock_at = Instant::now();
+            if let Some(r) = radar.as_mut() {
+                // Playing: every scan ahead, as the request budget allows; paused, the next
+                // one (for stepping); live, none.
+                let ahead = if clock.is_playing() {
+                    r.frames().len()
+                } else if clock.is_live() {
+                    0
+                } else {
+                    1
+                };
+                r.update(&mut map, clock_t, ahead, &draw_cam, map_area);
+            }
             // Highlight the selected feature and the clicked spot.
             let mut overlays = Vec::new();
             if let Some(p) = picks.get(sel) {
@@ -2534,6 +2578,23 @@ async fn main() -> Result<()> {
                         },
                     };
                     spans.push(Span::styled(text, st));
+                }
+                if let Some(r) = radar.as_ref().filter(|r| !r.is_off()) {
+                    match r.shown_time() {
+                        Some(t) => {
+                            let ago = ((unix_now() - t) / 60.0).max(0.0).round();
+                            let state = if clock.is_playing() {
+                                "▶ "
+                            } else if clock.is_live() {
+                                ""
+                            } else {
+                                "⏸ "
+                            };
+                            let st = if clock.is_live() { dim } else { TStyle::new().fg(Color::Rgb(127, 178, 255)) };
+                            spans.push(Span::styled(format!("☂ {state}{} UTC · {ago:.0} min ago ", hhmm(t)), st));
+                        }
+                        None => spans.push(Span::styled("☂ … ", dim)),
+                    }
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
                 // Credits of the sources being drawn, as the style or tiles give them.
@@ -2854,6 +2915,10 @@ async fn main() -> Result<()> {
                 if req.source == RASTER && throttled_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
                     continue;
                 }
+                if radar.as_ref().is_some_and(|r| r.owns(&req.source)) && !radar_bucket.take() {
+                    held_back = true;
+                    continue;
+                }
                 if req.source == RASTER
                     && let Some(b) = limiter.as_mut()
                     && !b.take()
@@ -2998,7 +3063,7 @@ async fn main() -> Result<()> {
             }
 
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
-            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() {
+            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() {
                 Duration::from_millis(16)
             } else if sat_dots {
                 // Satellite dots redraw up to 15 times a second (see sat_every).
@@ -3045,6 +3110,27 @@ async fn main() -> Result<()> {
                             } else {
                                 errors += 1;
                             }
+                        }
+                    }
+                }
+                Some(r) = rvrx.recv() => {
+                    match r {
+                        Ok(scans) if scans.generated != radar_generated || radar_generated == 0 => {
+                            radar_generated = scans.generated;
+                            let frames: Vec<(f64, std::sync::Arc<mapterm::raster::RasterSource>)> = scans
+                                .past
+                                .iter()
+                                .filter_map(|s| Some((s.time as f64, mapterm::rainviewer::frame_source(s).ok()?)))
+                                .collect();
+                            dlog(|| format!("radar: {} scans, the latest {}", frames.len(), scans.past.last().map_or(0, |s| s.time)));
+                            if let Some(r) = radar.as_mut() {
+                                r.set_frames(&mut map, frames, mapterm::rainviewer::SCAN_SECS, None)?;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            dlog(|| format!("radar: {e:#}"));
+                            note = Some((Instant::now(), format!("radar: {e:#}")));
                         }
                     }
                 }
@@ -3395,6 +3481,40 @@ async fn main() -> Result<()> {
                                         (sat_coloring, sat_legend) = recolor(&sats, sat_color);
                                         let by = ["orbit", "country", "mission"][sat_color as usize];
                                         note = Some((Instant::now(), format!("satellites colored by {by}")));
+                                    }
+                                    KeyCode::Char(' ') if radar.as_ref().is_some_and(|r| !r.frames().is_empty()) => {
+                                        let span = radar.as_ref().and_then(|r| r.span());
+                                        if clock.is_playing() {
+                                            clock.pause();
+                                            note = Some((Instant::now(), "radar paused · space plays · . to now".into()));
+                                        } else if let Some((start, stop)) = span {
+                                            // Two hours in about six seconds.
+                                            clock.play(start, stop, mapterm::clock::Range::Loop, (stop - start) / 6.0);
+                                            note = Some((Instant::now(), "radar playing the last two hours · space pauses".into()));
+                                        }
+                                    }
+                                    KeyCode::Char(c @ (',' | '.')) if radar.as_ref().is_some_and(|r| !r.frames().is_empty()) => {
+                                        let r = radar.as_ref().expect("checked");
+                                        // From the clock's frame, not the one on screen, which waits
+                                        // for its tiles: quick presses each count.
+                                        let last = r.frames().all().last().map(|f| f.start);
+                                        let at = if clock.is_live() { last.unwrap_or(clock.time()) } else { clock.time() };
+                                        let at = r.frames().at_or_before(at).map_or(at, |i| r.frames().all()[i].start);
+                                        if c == '.' && (clock.is_live() || Some(at) == last) {
+                                            clock.go_live(unix_now());
+                                            note = Some((Instant::now(), "radar: now".into()));
+                                        } else if let Some(t) = r.frames().step(at, if c == '.' { 1 } else { -1 }) {
+                                            clock.seek(t);
+                                        }
+                                    }
+                                    KeyCode::Char('R') if radar.is_some() => {
+                                        let r = radar.as_mut().expect("checked");
+                                        let off = !r.is_off();
+                                        r.set_off(&mut map, off);
+                                        if off {
+                                            clock.go_live(unix_now());
+                                        }
+                                        note = Some((Instant::now(), if off { "radar off · R shows it" } else { "radar on" }.into()));
                                     }
                                     KeyCode::Char('L') => {
                                         show_legend = !show_legend;

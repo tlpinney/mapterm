@@ -152,6 +152,41 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
   `iceye`, `umbra`, `spire`, `airbus`... Filters combine (Chinese imaging satellites:
   choose China, then imaging); "Show all satellites" clears them.
 
+## Weather radar
+
+```
+mapterm --radar --at here -z 6
+```
+
+Rain and snow worldwide from [RainViewer](https://www.rainviewer.com) (no key), drawn over
+the map: where the terminal shows images, the radar's own colors over the land and water,
+under the roads and labels; elsewhere, cell colors where it rains. RainViewer keeps the
+last two hours in 10-minute scans:
+
+| Key | Does |
+| --- | --- |
+| `space` | play the two hours in a loop (about six seconds), again to pause |
+| `,` `.` | step back or forward one scan; `.` past the latest goes back to now |
+| `R` | hide or show the radar |
+
+The status line shows the scan's time (☂ 22:40 UTC · 20 min ago; ▶ playing, ⏸ paused). It
+looks for new scans every 5 minutes. RainViewer serves detail to zoom 7; closer in, the
+radar is the zoom 7 image enlarged.
+
+**Being a good client.** RainViewer's free API is for personal, educational and small
+community projects, allows 100 requests a minute per address and asks clients to cache.
+mapterm asks for the scan list every 5 minutes, uses 512-pixel tiles (a quarter of the
+requests), loads only the scan on screen unless playing (then the rest, a few at a time),
+keeps them in memory, and holds itself to 60 tile requests a minute. Its terms ask for the
+credit "Weather data by RainViewer" with a link, which mapterm shows while the radar is on.
+
+**How it works.** The map has a clock (`mapterm::clock`, after Cesium's): live, it's real
+time; playing, it loops over the scans. The radar is a time layer
+(`mapterm::timelayer::TimeRaster`): a transparent image layer per scan, the one for the
+clock's time shown, the next loaded ahead, and the one before kept up until a new one's
+tiles are in, so it never flashes blank. Aircraft, ships and satellites stay live whatever
+the clock says.
+
 ## Legends
 
 Whatever is colored gets a legend in the map's lower left, with how many of each:

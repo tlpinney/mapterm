@@ -8,6 +8,20 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Weather radar: `--radar` draws RainViewer's precipitation radar over the map (no key),
+  the last two hours in 10-minute scans: `space` plays them in a loop or pauses, `,` and
+  `.` step, `R` hides it; the status line shows the scan's time. 512-pixel tiles, the scan
+  on screen only unless playing, at most 60 tile requests a minute (RainViewer allows 100),
+  and its credit "Weather data by RainViewer" (`mapterm::rainviewer`).
+- Time on the map: `mapterm::clock` (a `Clock` that's live or plays over a range, looping
+  or not, and `Intervals` of time with data, after Cesium's), and
+  `mapterm::timelayer::TimeRaster`, image frames that follow it: the frame for the clock's
+  time shown, the next loaded ahead (`Map::set_prefetch`), the last kept up until the new
+  one's tiles are in (`Map::raster_ready`).
+- Overlay image layers (`RasterSource::overlay`): drawn over the map instead of as its
+  imagery, so its land, water and background stay; in cell mode only cells the overlay
+  covers take its color. `RasterSource::require_alpha` treats opaque tiles as a service's
+  error image.
 - Satellite radio from the SatNOGS DB (CC BY-SA 4.0, credited with CelesTrak): the
   satellite panel lists active transmitters (downlink MHz, mode, description, uplink for
   transceivers and transponders, ⚠ for SatNOGS's frequency-violation flag), and the finder
