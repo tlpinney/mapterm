@@ -90,6 +90,24 @@ from `AISSTREAM_API_KEY` or a command (`--ais-key-cmd 'pass show aisstream/api-k
 aisstream.io is free and in beta; it can take several seconds (sometimes tens of
 seconds) to accept a connection.
 
+## Weather balloons
+
+`--sondes` draws the radiosondes that weather services launch twice a day, as tracked by
+amateur radio receivers feeding [SondeHub](https://sondehub.org). No key is needed; the
+data is [CC BY-SA 2.0](https://creativecommons.org/licenses/by-sa/2.0/), credited on the
+status line.
+
+- Each balloon is ▲ while climbing and ▼ after it bursts (around 30 km up), colored by
+  altitude, with its serial; its trail is the flight so far.
+- **Click** one (or **Tab** through them when there are no aircraft or ships) for its
+  altitude, climb or fall rate, drift, temperature, humidity, battery, the frequency it
+  transmits on (to hear it yourself), the station that heard it, and SondeHub's landing
+  prediction: the predicted path and a ✕ where it should land, with the time.
+- SondeHub asks clients not to poll its API, so mapterm asks it once for the balloons
+  around the view (again only when the view moves far away, at most once a minute) and
+  then follows each one's live MQTT topic over a WebSocket, plus the slow feed of newly
+  heard balloons, kept when they're near. It never takes the global feed.
+
 ## Satellites
 
 `--sats` shows satellites, placed from [CelesTrak](https://celestrak.org)'s orbital

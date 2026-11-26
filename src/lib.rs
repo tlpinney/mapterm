@@ -110,6 +110,7 @@ pub mod satellites;
 pub mod satnogs;
 pub mod shp;
 pub mod smooth;
+pub mod sondehub;
 pub mod source;
 pub mod spec;
 pub mod store;

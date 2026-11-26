@@ -107,6 +107,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 radar's time
   --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
                 this computer's time zone
+  --sondes      live weather balloons (radiosondes) from SondeHub, tracked by amateur
+                radio receivers (no key): ▲ climbing, ▼ falling, colored by altitude, with
+                their flight as a trail; click or Tab for readings, frequency and the
+                predicted landing
   --ais-key-cmd CMD
                 print the aisstream.io API key with a command (else AISSTREAM_API_KEY)
   --adsb-key-cmd CMD
@@ -207,6 +211,8 @@ struct Args {
     ais: bool,
     /// --radar: weather radar from RainViewer.
     radar: bool,
+    /// --sondes: live weather balloons from SondeHub.
+    sondes: bool,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
     /// --utc: show times in UTC rather than the computer's time zone.
@@ -262,6 +268,7 @@ fn args() -> Result<Args> {
         adsb_key_cmd: None,
         ais: false,
         radar: false,
+        sondes: false,
         alerts: false,
         utc: false,
         sats: None,
@@ -368,6 +375,7 @@ fn args() -> Result<Args> {
                 a.adsb = Some(feed.unwrap_or_default());
             }
             "--ais" => a.ais = true,
+            "--sondes" | "--balloons" => a.sondes = true,
             "--radar" => a.radar = true,
             "--alerts" => a.alerts = true,
             "--utc" => a.utc = true,
@@ -602,6 +610,13 @@ type TrailSet<'a> = (bool, Vec<(&'a mapterm::timeseries::SampledPosition, (u8, u
 const TRAIL_IMAGE: u32 = 4_000_000_002;
 /// The --ais source and layer, and its trail image.
 const SHIPS: &str = "ships";
+/// The --sondes source and layer, and its trail image.
+const BALLOONS: &str = "balloons";
+const BALLOON_TRAIL_IMAGE: u32 = 4_000_000_004;
+/// --sondes draws balloons this many seconds in the past (they report about once a second).
+const SONDE_DELAY: f64 = 5.0;
+/// Seconds of trail behind each balloon: the flight so far.
+const SONDE_TRAIL: f64 = 4.0 * 3600.0;
 const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
 /// The kitty image of paths: the selected satellite's ground track (over the trails).
 const PATH_IMAGE: u32 = 4_000_000_005;
@@ -1474,6 +1489,86 @@ fn draw_alert(f: &mut ratatui::Frame, area: Rect, al: &mapterm::nws::Alert) {
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
 }
 
+/// The --sondes panel for the selected balloon: its readings, and where it's predicted to land.
+fn draw_balloon(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    (b, at): (&mapterm::sondehub::Balloon, mapterm::timeseries::Sample),
+    pred: Option<&mapterm::sondehub::Prediction>,
+    now: f64,
+    follow: bool,
+    me: Option<&mapterm::locate::Fix>,
+) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" weather balloon ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let t = &b.latest;
+    let key = |k: &str| Span::styled(format!(" {k:<13}"), dim);
+    let mut l = vec![Line::from(vec![
+        Span::styled(format!(" {} {}", b.glyph(), t.serial), TStyle::new().fg(Color::Rgb(127, 178, 255)).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  {}", [t.manufacturer.as_deref(), t.kind.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" ")), dim),
+    ])];
+    l.push(Line::default());
+    if let Some(alt) = at.alt {
+        l.push(Line::from(vec![key("altitude"), Span::raw(format!("{:.0} m", alt)), Span::styled(format!("  {:.0} ft", alt / 0.3048), dim)]));
+    }
+    if let Some(v) = t.vel_v {
+        let what = if v > 0.5 {
+            "climbing"
+        } else if v < -0.5 {
+            "falling"
+        } else {
+            "level"
+        };
+        l.push(Line::from(vec![key("vertical"), Span::raw(format!("{:+.1} m/s", v)), Span::styled(format!("  {what}"), dim)]));
+    }
+    if let Some(h) = t.vel_h {
+        let dir = t.heading.map(|d| format!(" toward {:03.0}°", d.rem_euclid(360.0))).unwrap_or_default();
+        l.push(Line::from(vec![key("drift"), Span::raw(format!("{:.0} km/h{dir}", h * 3.6))]));
+    }
+    if let Some(c) = t.temp {
+        l.push(Line::from(vec![key("temperature"), Span::raw(format!("{c:.1} °C"))]));
+    }
+    if let Some(h) = t.humidity {
+        l.push(Line::from(vec![key("humidity"), Span::raw(format!("{h:.0} %"))]));
+    }
+    if let Some(fq) = t.frequency {
+        l.push(Line::from(vec![key("frequency"), Span::raw(format!("{fq:.3} MHz"))]));
+    }
+    if let Some(v) = t.batt {
+        l.push(Line::from(vec![key("battery"), Span::raw(format!("{v:.1} V"))]));
+    }
+    if let Some(u) = &t.uploader {
+        l.push(Line::from(vec![key("heard by"), Span::raw(u.clone())]));
+    }
+    l.push(Line::from(vec![key("position"), Span::raw(format!("{:.4}, {:.4}", at.lat, at.lon))]));
+    l.push(Line::from(vec![key("last report"), Span::raw(format!("{:.0} s ago", (now - t.t).max(0.0)))]));
+    l.push(Line::default());
+    match pred {
+        Some(p) => {
+            if let (false, Some(burst)) = (p.descending, p.burst_alt) {
+                l.push(Line::from(vec![key("bursts at"), Span::raw(format!("about {burst:.0} m"))]));
+            }
+            if let Some((lt, lon, lat)) = p.landing() {
+                l.push(Line::from(vec![key("lands"), Span::raw(hhmm(lt)), Span::styled(format!("  in {:.0} min", ((lt - now) / 60.0).max(0.0)), dim)]));
+                l.push(Line::from(vec![key("landing at"), Span::raw(format!("{lat:.4}, {lon:.4}"))]));
+                if let Some(me) = me {
+                    let km = mapterm::adsb::distance_nm((me.lon, me.lat), (lon, lat)) * 1.852;
+                    l.push(Line::from(vec![key("from you"), Span::raw(format!("{km:.1} km"))]));
+                }
+            }
+        }
+        None => l.push(Line::from(Span::styled(" (landing prediction loading…)", dim))),
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(format!(" f {} · esc close", if follow { "stop following" } else { "follow" }), dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
 fn draw_ship(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -1775,7 +1870,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
     for id in ids {
         // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
         // it is the clearest view of them.
-        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || ALERT_LAYERS.contains(&id.as_str()) {
+        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
         }
         let Some(l) = map.layer(&id) else { continue };
@@ -1892,7 +1987,7 @@ async fn main() -> Result<()> {
         // satellites alone, the aviation style; unless --light.
         if (a.radar || a.alerts) && a.source.is_none() && !a.light {
             map = Map::weather(src, schema)?;
-        } else if (a.adsb.is_some() || a.ais || a.sats.is_some()) && a.source.is_none() && !a.light {
+        } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes) && a.source.is_none() && !a.light {
             map = Map::aviation(src, schema)?;
         } else {
             map = Map::terminal(src, schema, !a.light)?;
@@ -1912,7 +2007,7 @@ async fn main() -> Result<()> {
     let default_dark = a.style.is_none() && a.source.is_none() && !a.light;
     if (a.radar || a.alerts) && default_dark {
         styles.push(WEATHER.to_string());
-    } else if (a.adsb.is_some() || a.ais || a.sats.is_some()) && default_dark {
+    } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes) && default_dark {
         styles.push(AVIATION.to_string());
     }
     for s in [BUILTIN, AVIATION, WEATHER].into_iter().chain(stylejson::OPENFREEMAP_STYLES) {
@@ -2092,6 +2187,14 @@ async fn main() -> Result<()> {
         map.set_attribution(SHIPS, "aisstream.io")?;
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS).map(str::to_string);
         map.add_layers(vec![mapterm::ais::layer(SHIPS, SHIPS)], above.as_deref())?;
+    }
+    // Live weather balloons (--sondes), between the ships and the aircraft.
+    if a.sondes {
+        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
+        map.add_source(BALLOONS, MapSource::geojson(&empty)?)?;
+        map.set_attribution(BALLOONS, "SondeHub (CC BY-SA 2.0)")?;
+        let above = map.layer_ids().into_iter().find(|id| *id == TRAILS || *id == AIRCRAFT).map(str::to_string);
+        map.add_layers(vec![mapterm::sondehub::layer(BALLOONS, BALLOONS)], above.as_deref())?;
     }
     // Satellites (--sats), over everything else that moves.
     if a.sats.is_some() {
@@ -2275,7 +2378,7 @@ async fn main() -> Result<()> {
     // inline. It asks the terminal, so it runs in raw mode, before the input thread starts.
     // --adsb trails as an image under the text where the terminal shows images: braille lines
     // re-snap to their dot grid as they grow, which shimmers.
-    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some()) && mapterm::kitty::supported();
+    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.sondes) && mapterm::kitty::supported();
     if trails_kitty {
         let _ = map.set_visibility(TRAILS, false);
     }
@@ -2587,7 +2690,22 @@ async fn main() -> Result<()> {
     // (aircraft, ships) are up.
     let mut trails_moved = Instant::now();
     let mut trails_drawn = Instant::now() - Duration::from_secs(10);
-    let mut trails_shown = (false, false, false);
+    let mut trails_shown = (false, false, false, false);
+    // --sondes: the balloons, the stream's task with the circle it follows and the balloon
+    // whose prediction it follows, and the selected balloon.
+    let mut balloons = mapterm::sondehub::Balloons::default();
+    let (sonde_area_tx, sonde_area_rx) = tokio::sync::watch::channel::<Option<mapterm::sondehub::Area>>(None);
+    let (sonde_sel_tx, sonde_sel_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+    let (btx, mut brx) = mpsc::unbounded_channel::<mapterm::sondehub::Event>();
+    if a.sondes {
+        tokio::spawn(mapterm::sondehub::stream(sonde_area_rx, sonde_sel_rx, btx));
+    } else {
+        drop((sonde_area_rx, sonde_sel_rx, btx));
+    }
+    let mut sonde_area: Option<(Instant, mapterm::sondehub::Area)> = None;
+    let mut sonde_state = String::new();
+    let mut balloons_drawn = Instant::now();
+    let mut selected_balloon: Option<String> = None;
     // `g`: the location helper runs on a blocking task; its answer flies the map there.
     let (ltx, mut lrx) = mpsc::unbounded_channel::<Result<mapterm::locate::Fix>>();
     let mut locating = false;
@@ -2615,6 +2733,7 @@ async fn main() -> Result<()> {
                 .as_deref()
                 .and_then(|h| aircraft.get(h, unix_now() - adsb_delay).map(|x| x.1))
                 .or_else(|| selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY).map(|x| x.1)))
+                .or_else(|| selected_balloon.as_deref().and_then(|s| balloons.get(s, unix_now() - SONDE_DELAY).map(|x| x.1)))
                 .or_else(|| {
                     let f = sats.iter().find(|s| Some(s.norad) == selected_sat)?.at(unix_now())?;
                     Some(mapterm::timeseries::Sample { t: unix_now(), lon: f.lon, lat: f.lat, alt: None })
@@ -2725,6 +2844,19 @@ async fn main() -> Result<()> {
                     });
                 }
             }
+            // The selected balloon, the same way, and where it's predicted to go and land.
+            if let Some((b, at)) = selected_balloon.as_deref().and_then(|s| balloons.get(s, unix_now() - SONDE_DELAY)) {
+                if let Some(p) = balloons.prediction(&b.latest.serial)
+                    && let Some((t, lon, lat)) = p.landing()
+                {
+                    let dim = Color::Rgb(127, 178, 255);
+                    overlays.push(Overlay::Line { pts: p.path.iter().map(|&(_, lon, lat, _)| (lon, lat)).collect(), color: dim });
+                    let when = format!("lands {}", hhmm(t));
+                    overlays.push(Overlay::Marker { lon, lat, glyph: "✕".into(), style: TStyle::new().fg(dim), label: Some((when, TStyle::new().fg(dim))), priority: 100 });
+                }
+                let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255)).add_modifier(ratatui::style::Modifier::BOLD);
+                overlays.push(Overlay::Marker { lon: at.lon, lat: at.lat, glyph: b.glyph().into(), style: st, label: Some((b.latest.serial.clone(), st)), priority: 101 });
+            }
             // The selected ship, the same way.
             if let Some((s, at)) = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY)) {
                 let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255)).add_modifier(ratatui::style::Modifier::BOLD);
@@ -2812,10 +2944,11 @@ async fn main() -> Result<()> {
                 let results = matches!(search, Search::Results { .. }) || finder.is_some();
                 let plane = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay));
                 let ship = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY));
+                let balloon = selected_balloon.as_deref().and_then(|s| balloons.get(s, unix_now() - SONDE_DELAY));
                 let sat = sats.iter().find(|s| Some(s.norad) == selected_sat).and_then(|s| Some((s, s.at(unix_now())?)));
                 let alert = selected_alert.as_ref().and_then(|id| alerts.iter().find(|a| &a.id == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() {
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || balloon.is_some() {
                         52.min(main.width / 2)
                     } else {
                         0
@@ -2863,6 +2996,10 @@ async fn main() -> Result<()> {
                     _ if let Some(s) = sat => {
                         let pass = sat_pass.as_ref().filter(|p| p.0 == s.0.norad).map(|p| p.2);
                         draw_sat(f, panel, s, sats_age, pass, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if let Some(b) = balloon => {
+                        draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), unix_now(), follow, me.as_ref());
                         Vec::new()
                     }
                     _ if let Some(s) = ship => {
@@ -2963,6 +3100,10 @@ async fn main() -> Result<()> {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let of = sat_filter.describe();
                     spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
+                }
+                if a.sondes {
+                    let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
+                    spans.push(Span::styled(format!("▲ {} sondes{} ", balloons.len(), sonde_state), st));
                 }
                 if ais_key.is_some() {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
@@ -3113,7 +3254,7 @@ async fn main() -> Result<()> {
                     if trails_cam != Some(view) {
                         trails_cam = Some(view);
                         trails_moved = Instant::now();
-                        for (id, shown) in [(TRAIL_IMAGE, &mut trails_shown.0), (SHIP_TRAIL_IMAGE, &mut trails_shown.1), (PATH_IMAGE, &mut trails_shown.2)] {
+                        for (id, shown) in [(TRAIL_IMAGE, &mut trails_shown.0), (SHIP_TRAIL_IMAGE, &mut trails_shown.1), (PATH_IMAGE, &mut trails_shown.2), (BALLOON_TRAIL_IMAGE, &mut trails_shown.3)] {
                             if std::mem::take(shown) {
                                 out.write_all(mapterm::kitty::free(id).as_bytes())?;
                             }
@@ -3127,7 +3268,7 @@ async fn main() -> Result<()> {
                         .map(|s| s.track(unix_now(), s.period_min()).into_iter().map(|p| (p, (127, 178, 255))).collect())
                         .unwrap_or_default();
                     let hidden =
-                        (adsb_feed.is_some() && !trails_shown.0) || (ais_key.is_some() && !trails_shown.1) || (!path_lines.is_empty() && !trails_shown.2);
+                        (adsb_feed.is_some() && !trails_shown.0) || (ais_key.is_some() && !trails_shown.1) || (!path_lines.is_empty() && !trails_shown.2) || (a.sondes && !trails_shown.3);
                     if settled && ((trails_dirty && trails_drawn.elapsed() >= Duration::from_secs(1)) || (hidden && trails_dirty)) {
                         trails_dirty = false;
                         trails_drawn = Instant::now();
@@ -3135,7 +3276,8 @@ async fn main() -> Result<()> {
                         let (w, h) = ((map_area.width as f64 * cpx.0).round() as u32, (map_area.height as f64 * cpx.1).round() as u32);
                         let vp = Viewport::new(&cam, map_area);
                         let now = unix_now();
-                        let sets: [TrailSet; 2] = [
+                        let sets: [TrailSet; 3] = [
+                            (a.sondes, balloons.trail_paths().collect(), now - SONDE_DELAY, SONDE_TRAIL, BALLOON_TRAIL_IMAGE, -12, &mut trails_shown.3),
                             (
                                 adsb_feed.is_some(),
                                 mapterm::adsb::trail_paths(&aircraft).collect(),
@@ -3370,6 +3512,36 @@ async fn main() -> Result<()> {
                 spawn_load(req, tx.clone());
             }
 
+            // --sondes: follow a circle around the view (1.5 times the view, 100 to 800 km), a
+            // new one once the view leaves it, asking SondeHub's API at most once a minute.
+            if a.sondes && map_area.width > 0 && !ctl.animating() {
+                let (lon, lat, view_nm) = view_circle(&cam, map_area);
+                let view_m = view_nm * 1852.0;
+                let inside = sonde_area.is_some_and(|(_, (alat, alon, r))| mapterm::adsb::distance_nm((lon, lat), (alon, alat)) * 1852.0 + view_m <= r);
+                if !inside && sonde_area.is_none_or(|(at, _)| at.elapsed() >= Duration::from_secs(60)) {
+                    let area = (lat, lon, (view_m * 1.5).clamp(100_000.0, 800_000.0));
+                    dlog(|| format!("sondes: area {area:?}"));
+                    sonde_area = Some((Instant::now(), area));
+                    let _ = sonde_area_tx.send(Some(area));
+                }
+                sonde_sel_tx.send_if_modified(|v| {
+                    let changed = *v != selected_balloon;
+                    if changed {
+                        v.clone_from(&selected_balloon);
+                    }
+                    changed
+                });
+            }
+            if a.sondes && !balloons.is_empty() && balloons_drawn.elapsed() >= Duration::from_millis(250) {
+                balloons_drawn = Instant::now();
+                balloons.prune(unix_now());
+                if selected_balloon.as_deref().is_some_and(|s| balloons.get(s, unix_now()).is_none()) {
+                    selected_balloon = None;
+                    follow = false;
+                }
+                map.set_data(BALLOONS, &balloons.points(unix_now() - SONDE_DELAY))?;
+                trails_dirty = true;
+            }
             // Go easy on the free feed: nothing when zoomed out past ADSB_MIN_ZOOM, a circle of
             // at most --adsb-radius, and a growing pause after errors.
             let adsb_waiting = aircraft_retry.is_some_and(|t| Instant::now() < t);
@@ -3505,7 +3677,7 @@ async fn main() -> Result<()> {
             } else if sat_dots {
                 // Satellite dots redraw up to 15 times a second (see sat_every).
                 (sat_every / 2).max(Duration::from_millis(16))
-            } else if !aircraft.is_empty() || !fleet.is_empty() || !sats.is_empty() {
+            } else if !aircraft.is_empty() || !fleet.is_empty() || !sats.is_empty() || !balloons.is_empty() {
                 // Aircraft and ships keep moving.
                 Duration::from_millis(250)
             } else {
@@ -3639,6 +3811,28 @@ async fn main() -> Result<()> {
                         sats_age = age;
                         filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
                         (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                    }
+                }
+                Some(ev) = brx.recv() => {
+                    match ev {
+                        mapterm::sondehub::Event::Snapshot(list) => {
+                            dlog(|| format!("sondes: {} near", list.len()));
+                            let now = unix_now();
+                            for t in list {
+                                balloons.apply(t, now);
+                            }
+                        }
+                        mapterm::sondehub::Event::Update(t) => balloons.apply(t, unix_now()),
+                        mapterm::sondehub::Event::Prediction(p) => balloons.set_prediction(p),
+                        mapterm::sondehub::Event::Following(n) => {
+                            dlog(|| format!("sondes: following {n}"));
+                            sonde_state.clear();
+                        }
+                        mapterm::sondehub::Event::Retrying(e, wait) => {
+                            dlog(|| format!("sondes: {e}; again in {} s", wait.as_secs()));
+                            sonde_state = format!(" · reconnecting in {} s", wait.as_secs());
+                            note = Some((Instant::now(), format!("SondeHub: {e}")));
+                        }
                     }
                 }
                 Some(ev) = srx_ais.recv() => {
@@ -4021,14 +4215,15 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
                                         });
                                     }
-                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some()) && !inspect => {
+                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some() || selected_balloon.is_some()) && !inspect => {
                                         selected_alert = None;
+                                        selected_balloon = None;
                                         selected = None;
                                         selected_ship = None;
                                         selected_sat = None;
                                         follow = false;
                                     }
-                                    KeyCode::Char('f') if selected.is_some() || selected_ship.is_some() || selected_sat.is_some() => {
+                                    KeyCode::Char('f') if selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_balloon.is_some() => {
                                         follow = !follow;
                                         note = Some((Instant::now(), if follow { "following" } else { "not following" }.into()));
                                     }
@@ -4065,6 +4260,20 @@ async fn main() -> Result<()> {
                                     // --adsb: Tab / shift+Tab step through the aircraft from the
                                     // middle of the map outward.
                                     // --sats alone: Tab steps through the satellites the same way.
+                                    // --sondes alone: Tab steps through the balloons the same way.
+                                    KeyCode::Tab | KeyCode::BackTab if !inspect && aircraft.is_empty() && fleet.is_empty() && sats.is_empty() && !balloons.is_empty() => {
+                                        let order = balloons.by_distance(unix_now() - SONDE_DELAY, ctl.cam.lon, ctl.cam.lat);
+                                        let at = selected_balloon.as_ref().and_then(|s| order.iter().position(|x| x == s));
+                                        let next = match (at, k.code) {
+                                            (None, _) => 0,
+                                            (Some(i), KeyCode::BackTab) => (i + order.len() - 1) % order.len(),
+                                            (Some(i), _) => (i + 1) % order.len(),
+                                        };
+                                        if order.get(next) != selected_balloon.as_ref() {
+                                            follow = false;
+                                        }
+                                        selected_balloon = order.get(next).cloned();
+                                    }
                                     KeyCode::Tab | KeyCode::BackTab if !inspect && aircraft.is_empty() && fleet.is_empty() && !sats.is_empty() => {
                                         let order = mapterm::satellites::by_distance(&sats, unix_now(), ctl.cam.lon, ctl.cam.lat);
                                         let at = selected_sat.and_then(|n| order.iter().position(|x| *x == n));
@@ -4289,8 +4498,9 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts {
-                                        // A click on (or next to) an aircraft, else a ship, selects it.
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.sondes {
+                                        // A click on (or next to) an aircraft, else a balloon, else a
+                                        // ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
                                         let dot = vp.dot_ll(k.lon, k.lat);
                                         if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, dot, 6.0) {
@@ -4300,6 +4510,15 @@ async fn main() -> Result<()> {
                                             selected = Some(hex);
                                             selected_ship = None;
                                             selected_sat = None;
+                                            selected_balloon = None;
+                                        } else if let Some(serial) = balloons.nearest(unix_now() - SONDE_DELAY, &vp, dot, 6.0) {
+                                            if selected_balloon.as_deref() != Some(serial.as_str()) {
+                                                follow = false;
+                                            }
+                                            selected_balloon = Some(serial);
+                                            selected = None;
+                                            selected_ship = None;
+                                            selected_sat = None;
                                         } else if let Some((_, mmsi)) = fleet.nearest(unix_now() - AIS_DELAY, &vp, dot, 6.0) {
                                             if selected_ship != Some(mmsi) {
                                                 follow = false;
@@ -4307,6 +4526,7 @@ async fn main() -> Result<()> {
                                             selected_ship = Some(mmsi);
                                             selected_sat = None;
                                             selected = None;
+                                            selected_balloon = None;
                                         } else if let Some(norad) = mapterm::satellites::nearest(&sats, unix_now(), &vp, dot, 6.0) {
                                             if selected_sat != Some(norad) {
                                                 follow = false;
