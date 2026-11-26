@@ -734,6 +734,11 @@ impl RasterSource {
 
 static NEXT_IMAGE_ID: AtomicU32 = AtomicU32::new(1);
 
+/// A new image id for a tile made here (unique in this process).
+pub fn next_image_id() -> u32 {
+    NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// A decoded raster tile.
 pub struct RasterTile {
     /// Image id for terminal graphics protocols, unique in this process.

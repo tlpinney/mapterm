@@ -2556,6 +2556,8 @@ async fn main() -> Result<()> {
     let mut trails_dirty = false;
     // The key list (?), over the map.
     let mut show_help = false;
+    // Image tiles still waiting to be stitched (smooth scrolling): keep frames coming.
+    let mut stitching = false;
     let mut trails_cam: Option<(f64, f64, f64, Rect)> = None;
     // When the view last moved, when the trails were last drawn, and which trail images
     // (aircraft, ships) are up.
@@ -2611,6 +2613,10 @@ async fn main() -> Result<()> {
             let (draw_cam, ox, oy) = if smooth_on && shift_mode { smooth::snap(&cam) } else { (cam, 0, 0) };
             let box_rect = ctl.box_rect();
             last_cam = draw_cam;
+            // Smooth scrolling shifts image tiles by part of a cell: give fetched ones a strip
+            // of their neighbors to shift into, a few at a time (a few ms a frame).
+            map.stitch = smooth_on && shift_mode && kitty;
+            stitching = map.stitch_some(Duration::from_millis(6));
             // The clock moves on, and the radar shows its time.
             let clock_t = clock.tick(unix_now(), clock_at.elapsed().as_secs_f64());
             clock_at = Instant::now();
@@ -3469,7 +3475,7 @@ async fn main() -> Result<()> {
             }
 
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
-            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() {
+            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() || stitching {
                 Duration::from_millis(16)
             } else if sat_dots {
                 // Satellite dots redraw up to 15 times a second (see sat_every).

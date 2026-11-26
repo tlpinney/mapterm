@@ -618,6 +618,11 @@ pub struct Map {
     pub center: Option<(f64, f64, f64)>,
     /// When to ask again for tiles that failed to load.
     pub retry: RetryPolicy,
+    /// Give fetched image tiles bleed from their neighbors (see [`Map::stitch_some`]), for
+    /// smooth scrolling. Off by default.
+    pub stitch: bool,
+    /// Tiles waiting to be stitched: (source, tile).
+    stitch_queue: std::collections::VecDeque<(String, TileId)>,
     /// Raster sources to load for the view even while no shown layer uses them: the next
     /// frame of a time layer, so it's there when the clock gets to it.
     prefetch: Vec<String>,
@@ -1284,6 +1289,54 @@ impl Map {
         }
     }
 
+    /// Give queued image tiles bleed from their neighbors, for about `budget`: a strip of the
+    /// tiles to the right, below and diagonally attached past the tile's edges
+    /// ([`RasterTile::bleed`]), so smooth scrolling can shift a tile without stretching it.
+    /// A tile waits until its neighbors are all loaded (or it's at the world's edge). Returns
+    /// whether tiles are still waiting. Does nothing unless [`Map::stitch`] is on.
+    pub fn stitch_some(&mut self, budget: std::time::Duration) -> bool {
+        if !self.stitch {
+            self.stitch_queue.clear();
+            return false;
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed() < budget {
+            let Some((sid, (z, x, y))) = self.stitch_queue.pop_front() else { break };
+            let Some(MapSource::Raster(r)) = self.source(&sid) else { continue };
+            let Some(tile) = r.tiles.get(&(z, x, y)) else { continue };
+            let (w, h) = tile.full_size();
+            if tile.bleed > 0 || w < 16 {
+                continue;
+            }
+            let n = 1u32 << z;
+            let right = (z, (x + 1) % n, y);
+            let below = (y + 1 < n).then_some((z, x, y + 1));
+            let corner = (y + 1 < n).then_some((z, (x + 1) % n, y + 1));
+            // Wait for every neighbor there is (a missing one is stored as empty, so it counts).
+            if !r.tiles.contains(&right) || below.is_some_and(|b| !r.tiles.contains(&b)) || corner.is_some_and(|c| !r.tiles.contains(&c)) {
+                continue;
+            }
+            let b = (w / 8).max(48).min(w);
+            let mut img = image::RgbaImage::new(w + b, h + b);
+            image::imageops::replace(&mut img, &tile.rgba, 0, 0);
+            let mut copy = |from: Option<TileId>, sx: u32, sy: u32, cw: u32, ch: u32, dx: i64, dy: i64| {
+                if let Some(t) = from.and_then(|f| r.tiles.get(&f)).filter(|t| t.full_size().0 >= sx + cw && t.full_size().1 >= sy + ch) {
+                    let part = image::imageops::crop_imm(&t.rgba, sx, sy, cw, ch).to_image();
+                    image::imageops::replace(&mut img, &part, dx, dy);
+                }
+            };
+            copy(Some(right), 0, 0, b, h, w as i64, 0);
+            copy(below, 0, 0, w, b, 0, h as i64);
+            copy(corner, 0, 0, b, b, w as i64, h as i64);
+            let Ok(png) = crate::raster::encode_png(img.as_raw(), w + b, h + b) else { continue };
+            let stitched = RasterTile { bleed: b, id: crate::raster::next_image_id(), png, rgba: img };
+            if let Some((_, MapSource::Raster(r))) = self.sources.iter_mut().find(|(s, _)| *s == sid) {
+                r.tiles.insert((z, x, y), Some(stitched));
+            }
+        }
+        !self.stitch_queue.is_empty()
+    }
+
     /// Whether raster source `id` has every tile this view needs (loaded, or known empty).
     pub fn raster_ready(&self, id: &str, cam: &Camera, area: Rect) -> bool {
         let Some(MapSource::Raster(r)) = self.source(id) else { return false };
@@ -1441,7 +1494,21 @@ impl Map {
         match tile {
             LoadedTile::Vector(features) => self.insert_features(source, id, features)?,
             LoadedTile::Raster(t) => match self.sources.iter_mut().find(|(s, _)| s == source) {
-                Some((_, MapSource::Raster(r))) => r.tiles.insert(id, t),
+                Some((_, MapSource::Raster(r))) => {
+                    r.tiles.insert(id, t);
+                    // This tile, and the ones whose right, bottom or corner it borders, may now
+                    // have all their neighbors.
+                    if self.stitch && r.src.render.is_none() {
+                        let (z, x, y) = id;
+                        let n = 1u32 << z;
+                        let left = (x + n - 1) % n;
+                        for t in [(z, x, y), (z, left, y), (z, x, y.wrapping_sub(1)), (z, left, y.wrapping_sub(1))] {
+                            if t.2 < n {
+                                self.stitch_queue.push_back((source.to_string(), t));
+                            }
+                        }
+                    }
+                }
                 _ => bail!("no raster source \"{source}\""),
             },
         }
@@ -2632,6 +2699,37 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stitching_gives_tiles_their_neighbors_edges() {
+        let mut map = raster_map();
+        map.stitch = true;
+        // Zoom 1: four tiles, each its own color.
+        let colors = [((1, 0, 0), (200, 0, 0)), ((1, 1, 0), (0, 200, 0)), ((1, 0, 1), (0, 0, 200)), ((1, 1, 1), (200, 200, 0))];
+        for (id, (r, g, b)) in colors {
+            let mut t = solid_tile(r, g, b);
+            t.rgba = image::RgbaImage::from_pixel(512, 512, image::Rgba([r, g, b, 255]));
+            map.insert_loaded("img", id, Ok(Loaded(LoadedTile::Raster(Some(t))))).unwrap();
+        }
+        while map.stitch_some(std::time::Duration::from_secs(1)) {}
+        let tile = |id| match map.source("img") {
+            Some(MapSource::Raster(r)) => r.tiles.get(&id).unwrap(),
+            _ => panic!("no source"),
+        };
+        let t = tile((1, 0, 0));
+        assert_eq!((t.bleed, t.size(), t.full_size()), (64, (512, 512), (576, 576)));
+        let px = |x, y| t.rgba.get_pixel(x, y).0;
+        assert_eq!(px(10, 10), [200, 0, 0, 255], "its own pixels");
+        assert_eq!(px(520, 10), [0, 200, 0, 255], "right: the tile to its right");
+        assert_eq!(px(10, 520), [0, 0, 200, 255], "below: the tile under it");
+        assert_eq!(px(520, 520), [200, 200, 0, 255], "the corner: the diagonal one");
+        // The bottom row: the world ends below, so only the right strip has pixels; and the
+        // right column wraps around to the left one.
+        let t = tile((1, 1, 1));
+        assert_eq!(t.rgba.get_pixel(520, 10).0, [0, 0, 200, 255]);
+        assert_eq!(t.rgba.get_pixel(10, 520).0[3], 0);
+        assert!(!map.stitch_some(std::time::Duration::from_secs(1)), "nothing left");
+    }
+
     #[test]
     fn shifted_placements_follow_the_text() {
         let tile = Arc::new(RasterTile { bleed: 0, id: 7, png: Vec::new(), rgba: image::RgbaImage::new(512, 512) });

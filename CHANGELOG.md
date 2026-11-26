@@ -164,6 +164,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- Smooth scrolling: image tiles no longer stretch at their edges as they shift. Tiles drawn
+  here (alerts) carry bleed, pixels past their edges (`RasterTile::bleed`); fetched ones
+  (radar, imagery, any tile URL) get it stitched from their neighbors once those are in, a
+  few ms a frame and only while smooth scrolling is on (`Map::stitch`, `Map::stitch_some`).
 - Smooth scrolling (`MAPTERM_SMOOTH=shift`, Ghostty Smooth): images now move with the text
   instead of a cell at a time. Image tiles (radar, alerts, imagery) are placed with the same
   sub-cell shift the terminal gives the text (`KittyState::shift`, `kitty::place_offset`),
