@@ -80,6 +80,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 visual, stations, starlink, resource, amateur, weather, gnss, ...).
                 p finds one by name or operator
                 Elements are cached for 2 hours, as CelesTrak asks
+  --sats-color orbit|country
+                color satellites by orbit height (default) or by owner (the eight with
+                the most in a color each, the rest gray); o switches while it runs
   --sats-country CODE[,CODE]
                 only the satellites of these owners: SATCAT codes (US, PRC, CIS, JPN, UK,
                 ESA, ...) or names (china, russia, japan); also from the p finder
@@ -173,6 +176,8 @@ struct Args {
     mapbox_token_cmd: Option<String>,
     /// --adsb: the live aircraft feed (lol, fi or a URL template).
     adsb: Option<String>,
+    /// --sats-color country: color satellites by owner instead of orbit.
+    sats_by_country: bool,
     /// --sats-country: owner codes or names to show satellites of.
     sats_country: Vec<String>,
     /// --sats: CelesTrak groups to show.
@@ -231,6 +236,7 @@ fn args() -> Result<Args> {
         ais: false,
         sats: None,
         sats_country: Vec::new(),
+        sats_by_country: false,
         ais_key_cmd: None,
         at_here: false,
         location_cmd: None,
@@ -345,6 +351,13 @@ fn args() -> Result<Args> {
                     bail!("--sats: active already includes starlink (CelesTrak asks not to download both)");
                 }
                 a.sats = Some(groups);
+            }
+            "--sats-color" => {
+                a.sats_by_country = match it.next().context("--sats-color orbit|country")?.as_str() {
+                    "country" | "owner" => true,
+                    "orbit" => false,
+                    other => bail!("--sats-color is orbit or country, not {other:?}"),
+                };
             }
             "--sats-country" => {
                 let v = it.next().context("--sats-country CODE[,CODE] (PRC, US, JPN, or a name: china)")?;
@@ -667,6 +680,30 @@ fn find(
     }
     v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.name.cmp(&b.1.name)));
     v.into_iter().take(200).map(|(_, h)| h).collect()
+}
+
+/// The satellites' coloring (by owner or by orbit) and its legend.
+fn recolor(sats: &[mapterm::satellites::Sat], by_country: bool) -> (mapterm::satellites::Coloring, Option<mapterm::legend::Legend>) {
+    let c = if by_country { mapterm::satellites::Coloring::by_country(sats) } else { mapterm::satellites::Coloring::Orbit };
+    let l = (!sats.is_empty()).then(|| c.legend(sats));
+    (c, l)
+}
+
+/// Clear an image (`w` pixels wide, drawn over `area` in cells of `cell_px` pixels) where
+/// `holes` (cell rectangles, such as the legends) are, since images under the text would
+/// otherwise show through the boxes drawn there.
+fn punch(rgba: &mut [u8], w: u32, area: Rect, holes: &[Rect], cell_px: (f64, f64)) {
+    let h = (rgba.len() / 4) as u32 / w.max(1);
+    for r in holes {
+        let x0 = (((r.x.saturating_sub(area.x)) as f64 * cell_px.0).floor() as u32).min(w);
+        let y0 = (((r.y.saturating_sub(area.y)) as f64 * cell_px.1).floor() as u32).min(h);
+        let x1 = (((r.right().saturating_sub(area.x)) as f64 * cell_px.0).ceil() as u32).min(w);
+        let y1 = (((r.bottom().saturating_sub(area.y)) as f64 * cell_px.1).ceil() as u32).min(h);
+        for y in y0..y1 {
+            let row = (y * w) as usize * 4;
+            rgba[row + x0 as usize * 4..row + x1 as usize * 4].fill(0);
+        }
+    }
 }
 
 /// Keep `sats` to the owners in `country` (all when it's empty), the rest in `hidden`.
@@ -1823,6 +1860,13 @@ async fn main() -> Result<()> {
     // Where kitty graphics work, satellites are dots in an image placed to the pixel (smooth),
     // with their names as text: while the image is up, and when it was last drawn.
     let mut sat_dots = false;
+    // How satellites are colored (o switches), and what the colors mean; the legends' boxes
+    // (L shows or hides them), which the images under the text keep clear of.
+    let mut sats_by_country = a.sats_by_country;
+    let mut sat_coloring = mapterm::satellites::Coloring::Orbit;
+    let mut sat_legend: Option<mapterm::legend::Legend> = None;
+    let mut show_legend = true;
+    let mut legend_rects: Vec<Rect> = Vec::new();
     // `p`: the fzf-style finder over everything live (satellites, aircraft, ships).
     let mut finder: Option<Finder> = None;
     // Satellites of other owners, set aside while a country filter is on.
@@ -2006,6 +2050,28 @@ async fn main() -> Result<()> {
                 map_area = m;
                 panel_area = panel;
                 f.render_widget(map.view(&draw_cam), m);
+                // Legends for what's colored, stacked up from the map's lower left.
+                legend_rects.clear();
+                if show_legend {
+                    let mut legends: Vec<mapterm::legend::Legend> = Vec::new();
+                    legends.extend(sat_legend.clone().filter(|_| !sats.is_empty()));
+                    if adsb_feed.is_some() && !aircraft.is_empty() {
+                        legends.push(mapterm::adsb::legend(&aircraft));
+                    }
+                    if ais_key.is_some() && !fleet.is_empty() {
+                        legends.push(mapterm::ais::legend(&fleet));
+                    }
+                    let mut room = m;
+                    for l in &legends {
+                        let r = l.rect(room, mapterm::legend::Corner::BottomLeft);
+                        if r.height < 3 || r.width < 8 {
+                            break;
+                        }
+                        l.render_in(f.buffer_mut(), room, mapterm::legend::Corner::BottomLeft);
+                        legend_rects.push(r);
+                        room.height = room.height.saturating_sub(r.height);
+                    }
+                }
                 list_rows = match &search {
                     _ if let Some(fd) = finder.as_ref() => {
                         draw_finder(f, panel, fd);
@@ -2237,7 +2303,8 @@ async fn main() -> Result<()> {
                                 }
                                 continue;
                             }
-                            let rgba = mapterm::timeseries::render_trails(paths, t, secs, &vp, w, h, cpx);
+                            let mut rgba = mapterm::timeseries::render_trails(paths, t, secs, &vp, w, h, cpx);
+                            punch(&mut rgba, w, map_area, &legend_rects, cpx);
                             out.write_all(
                                 mapterm::kitty::show_rgba(id, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, z, shm).as_bytes(),
                             )?;
@@ -2248,7 +2315,8 @@ async fn main() -> Result<()> {
                                 out.write_all(mapterm::kitty::free(PATH_IMAGE).as_bytes())?;
                             }
                         } else {
-                            let rgba = mapterm::timeseries::render_lines(&path_lines, &vp, w, h, cpx);
+                            let mut rgba = mapterm::timeseries::render_lines(&path_lines, &vp, w, h, cpx);
+                            punch(&mut rgba, w, map_area, &legend_rects, cpx);
                             out.write_all(
                                 mapterm::kitty::show_rgba(PATH_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -9, shm).as_bytes(),
                             )?;
@@ -2268,7 +2336,9 @@ async fn main() -> Result<()> {
                         let scale = if named || selected_sat.is_some() { 1.0 } else { 0.5 };
                         let (w, h) = ((map_area.width as f64 * cpx.0 * scale).round() as u32, (map_area.height as f64 * cpx.1 * scale).round() as u32);
                         let vp = Viewport::new(&draw_cam, map_area);
-                        let rgba = mapterm::satellites::render_dots(&sats, unix_now(), &vp, w, h, (cpx.0 * scale, cpx.1 * scale), named, selected_sat);
+                        let mut rgba =
+                            mapterm::satellites::render_dots(&sats, unix_now(), &vp, w, h, (cpx.0 * scale, cpx.1 * scale), named, selected_sat, &sat_coloring);
+                        punch(&mut rgba, w, map_area, &legend_rects, (cpx.0 * scale, cpx.1 * scale));
                         out.write_all(
                             mapterm::kitty::show_rgba(SAT_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -8, shm).as_bytes(),
                         )?;
@@ -2495,7 +2565,7 @@ async fn main() -> Result<()> {
                 if selected_sat.is_some() || trails_shown.2 {
                     trails_dirty = true;
                 }
-                map.set_data(SATS, &mapterm::satellites::points(&sats, unix_now()))?;
+                map.set_data(SATS, &mapterm::satellites::points(&sats, unix_now(), &sat_coloring))?;
             }
             if let (Some(norad), Some(me)) = (selected_sat, me.as_ref())
                 && sat_pass.as_ref().is_none_or(|p| p.0 != norad || p.1.elapsed() >= Duration::from_secs(60))
@@ -2610,6 +2680,7 @@ async fn main() -> Result<()> {
                         sats_hidden.clear();
                         sats_age = age;
                         filter_sats(&mut sats, &mut sats_hidden, &sat_country);
+                        (sat_coloring, sat_legend) = recolor(&sats, sats_by_country);
                     }
                 }
                 Some(ev) = srx_ais.recv() => {
@@ -2762,6 +2833,7 @@ async fn main() -> Result<()> {
                                                 if let Target::Country(code) = &target {
                                                     sat_country = code.iter().cloned().collect();
                                                     filter_sats(&mut sats, &mut sats_hidden, &sat_country);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sats_by_country);
                                                     if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
                                                         selected_sat = None;
                                                     }
@@ -2776,6 +2848,7 @@ async fn main() -> Result<()> {
                                                 {
                                                     sat_country.clear();
                                                     filter_sats(&mut sats, &mut sats_hidden, &sat_country);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sats_by_country);
                                                 }
                                                 let at = match &target {
                                                     Target::Sat(n) => sats.iter().find(|s| s.norad == *n).and_then(|s| s.at(now)).map(|f| (f.lon, f.lat)),
@@ -2861,6 +2934,15 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
                                 match k.code {
+                                    KeyCode::Char('o') if !sats.is_empty() => {
+                                        sats_by_country = !sats_by_country;
+                                        (sat_coloring, sat_legend) = recolor(&sats, sats_by_country);
+                                        note = Some((Instant::now(), format!("satellites colored by {}", if sats_by_country { "country" } else { "orbit" })));
+                                    }
+                                    KeyCode::Char('L') => {
+                                        show_legend = !show_legend;
+                                        note = Some((Instant::now(), if show_legend { "legend on" } else { "legend off" }.into()));
+                                    }
                                     KeyCode::Char('p') if !sats.is_empty() || !aircraft.is_empty() || !fleet.is_empty() => {
                                         finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &sats_hidden, &sat_country, &aircraft, &fleet) });
                                     }

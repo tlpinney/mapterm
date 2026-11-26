@@ -111,6 +111,15 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
   `russia`, `india`, or a catalog code such as `PRC`, `CIS`, `ESA`) and choose it to show
   only its satellites; "All countries" shows them all again. `--sats-country PRC,JPN`
   starts that way.
+- **`o`** colors satellites by owner instead of orbit height (`--sats-color country` starts
+  that way): the eight countries with the most satellites get a color each, the rest gray.
+
+## Legends
+
+Whatever is colored gets a legend in the map's lower left, with how many of each:
+satellites by orbit or by country, aircraft by altitude, ships by kind. **`L`** hides or
+shows them. Images under the text (satellite dots, trails, tracks) keep clear of the
+legend boxes.
 - Each satellite is ◇ (the ISS ◆), colored by orbit: low, medium, geostationary. Starlink
   satellites are a small · without names, since there are thousands; select one to see
   its name.

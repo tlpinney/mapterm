@@ -361,6 +361,21 @@ impl Fleet {
     }
 }
 
+/// What the ship colors mean: the kinds among `fleet`, most first, with their counts.
+pub fn legend(fleet: &Fleet) -> crate::legend::Legend {
+    use ratatui::style::Color;
+    let mut n: HashMap<&'static str, usize> = HashMap::new();
+    for s in fleet.all() {
+        *n.entry(category(s.details.ship_type)).or_insert(0) += 1;
+    }
+    let mut v: Vec<(&str, usize)> = n.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    v.into_iter().fold(crate::legend::Legend::new("ships by kind"), |l, (cat, count)| {
+        let (r, g, b) = category_rgb(cat);
+        l.entry("●", Color::Rgb(r, g, b), cat, Some(count))
+    })
+}
+
 /// The style layer for ships from source `source`: arrows along the course (dots when
 /// still), colored by kind, with their names (labels that would collide are left out).
 pub fn layer(id: &str, source: &str) -> crate::StyleLayer {

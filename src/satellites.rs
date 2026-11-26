@@ -472,6 +472,112 @@ pub fn owner_aliases(code: &str) -> &'static str {
 
 include!("satellites_owners.rs");
 
+/// Colors for the countries with the most satellites, in order (then [`OTHER`]).
+pub const COUNTRY_COLORS: [(u8, u8, u8); 8] = [
+    (0x79, 0xc0, 0xff),
+    (0xff, 0x7b, 0x72),
+    (0xf2, 0xcc, 0x60),
+    (0x7e, 0xe7, 0x87),
+    (0xd2, 0xa8, 0xff),
+    (0xff, 0xa6, 0x57),
+    (0x56, 0xd4, 0xdd),
+    (0xff, 0x6b, 0xcb),
+];
+/// The color for every other country.
+pub const OTHER: (u8, u8, u8) = (0x8b, 0x94, 0x9e);
+
+/// How satellites are colored.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Coloring {
+    /// By orbit height: low, medium, geostationary ([`orbit_rgb`]).
+    #[default]
+    Orbit,
+    /// By owner: the biggest owners' colors, by SATCAT code; the rest [`OTHER`].
+    Country(Vec<(String, (u8, u8, u8))>),
+}
+
+/// The orbit class from orbits a day (cheaper than placing it): low under ~2,000 km,
+/// geostationary at one a day, medium between.
+fn orbit_class(mean_motion: f64) -> &'static str {
+    match mean_motion {
+        m if m > 11.25 => "low",
+        m if (0.9..1.1).contains(&m) => "geostationary",
+        _ => "medium",
+    }
+}
+
+impl Coloring {
+    /// Color by owner: the eight owners with the most of `sats`.
+    pub fn by_country(sats: &[Sat]) -> Coloring {
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for s in sats {
+            if let Some(c) = &s.catalog {
+                *counts.entry(c.owner.as_str()).or_insert(0) += 1;
+            }
+        }
+        let mut v: Vec<(&str, usize)> = counts.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        Coloring::Country(v.into_iter().zip(COUNTRY_COLORS).map(|((c, _), rgb)| (c.to_string(), rgb)).collect())
+    }
+
+    /// The color for `s`, at height `alt_km`.
+    pub fn rgb(&self, s: &Sat, alt_km: f64) -> (u8, u8, u8) {
+        match self {
+            Coloring::Orbit => orbit_rgb(alt_km),
+            Coloring::Country(top) => s.catalog.as_ref().and_then(|c| top.iter().find(|(code, _)| *code == c.owner)).map_or(OTHER, |(_, rgb)| *rgb),
+        }
+    }
+
+    /// What the colors mean, with how many of `sats` each covers.
+    pub fn legend(&self, sats: &[Sat]) -> crate::legend::Legend {
+        use ratatui::style::Color;
+        let rgb = |(r, g, b): (u8, u8, u8)| Color::Rgb(r, g, b);
+        match self {
+            Coloring::Orbit => {
+                let mut n: HashMap<&str, usize> = HashMap::new();
+                for s in sats {
+                    *n.entry(orbit_class(s.mean_motion)).or_insert(0) += 1;
+                }
+                let get = |k: &str| n.get(k).copied().unwrap_or(0);
+                crate::legend::Legend::new("satellites by orbit")
+                    .entry("●", rgb(orbit_rgb(500.0)), "low (under 2,000 km)", Some(get("low")))
+                    .entry("●", rgb(orbit_rgb(20000.0)), "medium", Some(get("medium")))
+                    .entry("●", rgb(orbit_rgb(36000.0)), "geostationary", Some(get("geostationary")))
+            }
+            Coloring::Country(top) => {
+                let mut n: HashMap<&str, usize> = HashMap::new();
+                for s in sats {
+                    *n.entry(s.catalog.as_ref().map_or("", |c| c.owner.as_str())).or_insert(0) += 1;
+                }
+                let mut l = crate::legend::Legend::new("satellites by country");
+                let mut shown = 0;
+                for (code, c) in top {
+                    let count = n.get(code.as_str()).copied().unwrap_or(0);
+                    shown += count;
+                    l = l.entry("●", rgb(*c), short_owner(code), Some(count));
+                }
+                let rest = sats.len() - shown;
+                if rest > 0 {
+                    l = l.entry("●", rgb(OTHER), "other", Some(rest));
+                }
+                l
+            }
+        }
+    }
+}
+
+/// A short name for an owner code (`PRC`: China, `CIS`: Russia), for legends and status
+/// lines.
+pub fn short_owner(code: &str) -> String {
+    match code {
+        "SKOR" | "NKOR" => owner_aliases(code).to_string(),
+        _ => match owner_aliases(code).split(' ').next().filter(|a| !a.is_empty()) {
+            Some(alias) => alias.to_string(),
+            None => owner_name(code).unwrap_or(code).to_string(),
+        },
+    }
+}
+
 /// The colour for a satellite's height: low orbit, medium, geostationary.
 pub fn orbit_rgb(alt_km: f64) -> (u8, u8, u8) {
     match alt_km {
@@ -483,7 +589,7 @@ pub fn orbit_rgb(alt_km: f64) -> (u8, u8, u8) {
 
 /// The satellites at Unix time `t` as GeoJSON points (`glyph`, `label`, `orbit`, and the
 /// basics for inspect).
-pub fn points(sats: &[Sat], t: f64) -> Json {
+pub fn points(sats: &[Sat], t: f64, coloring: &Coloring) -> Json {
     let features: Vec<Json> = sats
         .iter()
         .filter_map(|s| {
@@ -495,13 +601,14 @@ pub fn points(sats: &[Sat], t: f64) -> Json {
             } else {
                 "geostationary"
             };
+            let (r, g, b) = coloring.rgb(s, f.alt_km);
             Some(json!({
                 "type": "Feature",
                 "id": s.norad,
                 "geometry": {"type": "Point", "coordinates": [f.lon, f.lat]},
                 // Starlink's thousands go unnamed; the selected one still shows its name.
                 "properties": {"glyph": s.glyph(), "label": if s.is_starlink() { "" } else { s.name.as_str() }, "orbit": orbit,
-                               "name": s.name, "norad": s.norad, "altitude_km": f.alt_km.round()},
+                               "color": format!("#{r:02x}{g:02x}{b:02x}"), "name": s.name, "norad": s.norad, "altitude_km": f.alt_km.round()},
             }))
         })
         .collect();
@@ -511,9 +618,12 @@ pub fn points(sats: &[Sat], t: f64) -> Json {
 /// The style layer for satellites from source `source`: ◇ (◆ for the ISS, · for Starlink)
 /// colored by orbit height, with names (not Starlink's).
 pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
-    let hex = |(r, g, b): (u8, u8, u8)| format!("#{r:02x}{g:02x}{b:02x}");
-    let color = json!(["match", ["get", "orbit"], "low", hex(orbit_rgb(500.0)), "medium", hex(orbit_rgb(20000.0)), hex(orbit_rgb(36000.0))]);
-    crate::StyleLayer::symbol(id, source).glyph(json!(["get", "glyph"])).text(json!(["get", "label"])).color("#c9d1d9").paint("icon-color", color)
+    // Each point carries its color (see `points` and its `Coloring`).
+    crate::StyleLayer::symbol(id, source)
+        .glyph(json!(["get", "glyph"]))
+        .text(json!(["get", "label"]))
+        .color("#c9d1d9")
+        .paint("icon-color", json!(["get", "color"]))
 }
 
 /// The satellites at Unix time `t` as dots in an RGBA image (not premultiplied), `w` x `h`
@@ -524,7 +634,17 @@ pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
 /// first and any that would overlap one already placed left out. The `selected` satellite
 /// (Starlink too) gets a ring and its name, placed before any other.
 #[allow(clippy::too_many_arguments)]
-pub fn render_dots(sats: &[Sat], t: f64, vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64), labels: bool, selected: Option<u64>) -> Vec<u8> {
+pub fn render_dots(
+    sats: &[Sat],
+    t: f64,
+    vp: &crate::Viewport,
+    w: u32,
+    h: u32,
+    cell_px: (f64, f64),
+    labels: bool,
+    selected: Option<u64>,
+    coloring: &Coloring,
+) -> Vec<u8> {
     use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
     let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
     let (sx, sy) = (cell_px.0 / 2.0, cell_px.1 / 4.0);
@@ -544,7 +664,7 @@ pub fn render_dots(sats: &[Sat], t: f64, vp: &crate::Viewport, w: u32, h: u32, c
             _ => size,
         };
         let Some(dot) = PathBuilder::from_circle(x, y, r.max(0.8)) else { continue };
-        let (cr, cg, cb) = orbit_rgb(f.alt_km);
+        let (cr, cg, cb) = coloring.rgb(s, f.alt_km);
         let mut paint = Paint::default();
         paint.set_color_rgba8(cr, cg, cb, 235);
         paint.anti_alias = true;
@@ -702,7 +822,7 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         let s = &sats[0];
         assert!(s.is_starlink());
         assert_eq!(s.glyph(), "·");
-        let doc = points(&sats, s.epoch);
+        let doc = points(&sats, s.epoch, &Coloring::Orbit);
         assert_eq!(doc["features"][0]["properties"]["label"], "");
         assert_eq!(doc["features"][0]["properties"]["name"], "STARLINK-31415");
         assert_eq!(parse_csv(CSV)[0].glyph(), "◆");
@@ -714,7 +834,7 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         let f = iss[0].at(iss[0].epoch).unwrap();
         let vp = crate::Viewport::new(&crate::Camera::new(f.lon, f.lat, 3.0), ratatui::layout::Rect::new(0, 0, 40, 20));
         // 40 x 20 cells of 8 x 16 pixels: 320 x 320, the satellite in the middle.
-        let rgba = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false, None);
+        let rgba = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false, None, &Coloring::Orbit);
         let px = |x: usize, y: usize| rgba[(y * 320 + x) * 4 + 3];
         assert!(px(160, 160) > 0 && px(5, 5) == 0);
     }
@@ -724,8 +844,8 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         let iss = parse_csv(CSV);
         let f = iss[0].at(iss[0].epoch).unwrap();
         let vp = crate::Viewport::new(&crate::Camera::new(f.lon, f.lat, 3.0), ratatui::layout::Rect::new(0, 0, 40, 20));
-        let plain = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false, None);
-        let named = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), true, None);
+        let plain = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), false, None, &Coloring::Orbit);
+        let named = render_dots(&iss, iss[0].epoch, &vp, 320, 320, (8.0, 16.0), true, None, &Coloring::Orbit);
         // The name lights pixels to the right of the dot, not to its left.
         let lit =
             |img: &[u8], x0: usize, x1: usize| (x0..x1).flat_map(|x| (150..170).map(move |y| (x, y))).filter(|&(x, y)| img[(y * 320 + x) * 4 + 3] > 0).count();
@@ -742,8 +862,8 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         let vp = crate::Viewport::new(&crate::Camera::new(f.lon, f.lat, 3.0), ratatui::layout::Rect::new(0, 0, 40, 20));
         let lit = |img: &[u8]| img.chunks(4).filter(|p| p[3] > 0).count();
         // Unselected, Starlink is a small unnamed dot even with labels on.
-        let plain = render_dots(&sats, sats[0].epoch, &vp, 320, 320, (8.0, 16.0), true, None);
-        let chosen = render_dots(&sats, sats[0].epoch, &vp, 320, 320, (8.0, 16.0), false, Some(58001));
+        let plain = render_dots(&sats, sats[0].epoch, &vp, 320, 320, (8.0, 16.0), true, None, &Coloring::Orbit);
+        let chosen = render_dots(&sats, sats[0].epoch, &vp, 320, 320, (8.0, 16.0), false, Some(58001), &Coloring::Orbit);
         assert!(lit(&plain) < 40, "{}", lit(&plain));
         assert!(lit(&chosen) > lit(&plain) + 200, "ring and name: {} vs {}", lit(&chosen), lit(&plain));
     }
@@ -770,6 +890,25 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
             parse_catalog("OBJECT_NAME,OBJECT_ID,NORAD_CAT_ID,OBJECT_TYPE,OWNER,LAUNCH_DATE\nISS (ZARYA),1998-067A,25544,PAY,ISS,1998-11-20\nBAD ROW,,x,,,\n");
         assert_eq!(cat.get(&25544), Some(&CatalogEntry { owner: "ISS".into(), launched: Some("1998-11-20".into()) }));
         assert_eq!(cat.len(), 1);
+    }
+
+    #[test]
+    fn coloring_by_country() {
+        let mut sats = parse_csv(CSV);
+        sats.extend(parse_csv(&CSV.replace("\"ISS (ZARYA)\"", "CHINASAT 9B").replace(",25544,", ",49125,")));
+        sats.extend(parse_csv(&CSV.replace("\"ISS (ZARYA)\"", "BEIDOU 3").replace(",25544,", ",49126,")));
+        let own = |s: &mut Sat, o: &str| s.catalog = Some(CatalogEntry { owner: o.into(), launched: None });
+        own(&mut sats[0], "ISS");
+        own(&mut sats[1], "PRC");
+        own(&mut sats[2], "PRC");
+        let c = Coloring::by_country(&sats);
+        // The biggest owner gets the first color.
+        assert_eq!(c.rgb(&sats[1], 400.0), COUNTRY_COLORS[0]);
+        assert_eq!(c.rgb(&sats[0], 400.0), COUNTRY_COLORS[1]);
+        let l = c.legend(&sats);
+        assert_eq!(l.entries[0].label, "China");
+        assert_eq!(l.entries[0].count, Some(2));
+        assert_eq!(Coloring::Orbit.legend(&sats).entries[0].count, Some(3), "all three in low orbit");
     }
 
     #[test]

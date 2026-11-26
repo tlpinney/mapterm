@@ -88,6 +88,7 @@ pub mod index;
 pub mod interact;
 pub mod kitty;
 pub mod layer;
+pub mod legend;
 pub mod locate;
 pub mod map;
 pub mod mapbox;

@@ -27,6 +27,11 @@ All notable changes to mapterm are listed here. The format follows
   unlabelled. `p` opens an fzf-style finder over satellites, aircraft and ships (by name,
   number, callsign, MMSI or operator: `digitalglobe` finds WorldView and Legion), and the
   panel names a satellite's operator for well-known ones (`mapterm::fuzzy`).
+- Legends: `mapterm::legend::Legend`, a box in a corner of the map with what the colors mean
+  and how many of each. The viewer shows them for satellites (by orbit, or by country with
+  `o` / `--sats-color country`: the eight biggest owners in a color each), aircraft by
+  altitude and ships by kind; `L` hides them, and images under the text keep clear of them.
+  `examples/satellites_by_country.rs` draws every active satellite colored by owner.
 - Satellites by country: CelesTrak's satellite catalog (SATCAT, kept a day) gives every
   satellite's owner and launch date, shown in the panel. In the finder, typing a country
   (`china`, `japan`, `russia`, or a code such as `PRC`) offers it with its count, and Enter
