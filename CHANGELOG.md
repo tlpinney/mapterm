@@ -151,6 +151,11 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- `--alerts` used a lot of CPU and memory while zone outlines arrived (92% of a core and
+  760 MB on a first run): the layer was rebuilt from every outline every 2 seconds. Outlines
+  are now simplified as they arrive (`nws::simplify`, to about 300 m: finer than a cell
+  shows), and the layer is rebuilt only when the list or the set of alerts in force changes,
+  or at most every 10 seconds while outlines come in. About 150 MB and 15% now.
 - Credits on a narrow screen: they take as many lines above the status as they need (up to
   half the window), broken between credits rather than mid-word, so the last one is never
   cut off; before, the line count guessed character wrapping and stopped at three.

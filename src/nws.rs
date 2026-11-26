@@ -18,6 +18,10 @@ use serde_json::{Value, json};
 
 const ACTIVE: &str = "https://api.weather.gov/alerts/active?status=actual";
 const ZONES: &str = "https://api.weather.gov/zones/";
+/// How far (degrees) an outline may move when simplified: a few hundred meters, finer
+/// than a terminal cell shows below zoom 10. Zone outlines come with up to a thousand points
+/// along every inlet; simplified they're a fraction of that, to keep and to draw.
+pub const SIMPLIFY: f64 = 0.003;
 /// How long a zone outline is kept.
 const ZONE_FRESH: Duration = Duration::from_secs(90 * 24 * 3600);
 /// The credit shown while alerts are on.
@@ -127,7 +131,7 @@ pub fn parse(text: &str) -> Result<Vec<Alert>> {
                 from: s(p, "onset").or_else(|| s(p, "effective")).or_else(|| s(p, "sent")).and_then(|t| unix_time(&t)),
                 to: s(p, "ends").or_else(|| s(p, "expires")).and_then(|t| unix_time(&t)),
                 sender: s(p, "senderName").unwrap_or_default(),
-                geometry: f.get("geometry").filter(|g| g.is_object()).cloned(),
+                geometry: f.get("geometry").filter(|g| g.is_object()).map(|g| simplify(g, SIMPLIFY)).filter(|g| g.is_object()),
                 zones: p.get("affectedZones").and_then(Value::as_array).map(|z| z.iter().filter_map(|u| zone_id(u.as_str()?)).collect()).unwrap_or_default(),
             })
         })
@@ -173,6 +177,62 @@ pub fn unix_time(s: &str) -> Option<f64> {
     Some((days * 86400 + h * 3600 + mi * 60 - off) as f64 + sec)
 }
 
+/// `geometry` (a GeoJSON Polygon or MultiPolygon) with points closer than `tolerance`
+/// degrees to the line through their neighbors dropped (Douglas-Peucker on each ring); rings
+/// that shrink below a triangle go. Anything else is returned as it is.
+pub fn simplify(geometry: &Value, tolerance: f64) -> Value {
+    let ring = |r: &Value| -> Option<Value> {
+        let pts: Vec<(f64, f64)> = r.as_array()?.iter().filter_map(|p| Some((p.get(0)?.as_f64()?, p.get(1)?.as_f64()?))).collect();
+        let kept = douglas_peucker(&pts, tolerance);
+        (kept.len() >= 4).then(|| json!(kept.iter().map(|(x, y)| [*x, *y]).collect::<Vec<_>>()))
+    };
+    let polygon = |p: &Value| -> Option<Value> {
+        let rings: Vec<Value> = p.as_array()?.iter().filter_map(ring).collect();
+        (!rings.is_empty()).then_some(Value::Array(rings))
+    };
+    match geometry.get("type").and_then(Value::as_str) {
+        Some("Polygon") => match polygon(&geometry["coordinates"]) {
+            Some(c) => json!({"type": "Polygon", "coordinates": c}),
+            None => Value::Null,
+        },
+        Some("MultiPolygon") => {
+            let polys: Vec<Value> = geometry["coordinates"].as_array().map(|a| a.iter().filter_map(polygon).collect()).unwrap_or_default();
+            if polys.is_empty() { Value::Null } else { json!({"type": "MultiPolygon", "coordinates": polys}) }
+        }
+        _ => geometry.clone(),
+    }
+}
+
+fn douglas_peucker(pts: &[(f64, f64)], tol: f64) -> Vec<(f64, f64)> {
+    if pts.len() < 3 {
+        return pts.to_vec();
+    }
+    let mut keep = vec![false; pts.len()];
+    keep[0] = true;
+    keep[pts.len() - 1] = true;
+    let mut stack = vec![(0, pts.len() - 1)];
+    while let Some((a, b)) = stack.pop() {
+        let ((ax, ay), (bx, by)) = (pts[a], pts[b]);
+        let (dx, dy) = (bx - ax, by - ay);
+        let len = (dx * dx + dy * dy).sqrt();
+        let (mut far, mut at) = (0.0, 0);
+        for (i, &(px, py)) in pts.iter().enumerate().take(b).skip(a + 1) {
+            // Distance to the segment's line, or to its start when it has no length (a
+            // closed ring's first and last points are the same).
+            let d = if len > 0.0 { ((px - ax) * dy - (py - ay) * dx).abs() / len } else { ((px - ax).powi(2) + (py - ay).powi(2)).sqrt() };
+            if d > far {
+                (far, at) = (d, i);
+            }
+        }
+        if far > tol {
+            keep[at] = true;
+            stack.push((a, at));
+            stack.push((at, b));
+        }
+    }
+    pts.iter().zip(keep).filter(|(_, k)| *k).map(|(p, _)| *p).collect()
+}
+
 /// A zone URL's id, `forecast/VAZ092`: only api.weather.gov's zones, in plain letters and
 /// digits (it's put into a URL and a file name).
 pub fn zone_id(url: &str) -> Option<String> {
@@ -211,7 +271,8 @@ pub fn cached_zone(id: &str) -> Option<Value> {
     if age > ZONE_FRESH {
         return None;
     }
-    serde_json::from_slice(&std::fs::read(&p).ok()?).ok()
+    let g: Value = serde_json::from_slice(&std::fs::read(&p).ok()?).ok()?;
+    Some(simplify(&g, SIMPLIFY))
 }
 
 /// A zone's outline (GeoJSON geometry): from the disk cache, else one request, kept. A zone
@@ -229,6 +290,8 @@ pub async fn zone_outline(id: &str) -> Result<Value> {
         reqwest::StatusCode::NOT_FOUND => Value::Null,
         s => bail!("NWS zone {id}: HTTP {s}"),
     };
+    // Kept simplified: a fraction of the size, and all mapterm draws.
+    let g = simplify(&g, SIMPLIFY);
     let p = zone_file(id);
     let _ = std::fs::create_dir_all(p.parent().unwrap_or(&p));
     let _ = std::fs::write(&p, serde_json::to_vec(&g)?);
@@ -339,6 +402,23 @@ mod tests {
         // Outside it: nothing.
         let dot = crate::Viewport::new(&cam, area).dot_ll(-77.4, 38.9);
         assert!(map.query_features(&cam, area, dot).iter().all(|p| p.source.as_deref() != Some("alerts")));
+    }
+
+    #[test]
+    fn simplifies_outlines() {
+        // A square with a wiggle of points along one side, all within the tolerance.
+        let mut ring: Vec<[f64; 2]> = vec![[0.0, 0.0]];
+        for i in 1..100 {
+            ring.push([i as f64 / 100.0, if i % 2 == 0 { 0.0005 } else { -0.0005 }]);
+        }
+        ring.extend([[1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.0, 0.0]]);
+        let g = json!({"type": "Polygon", "coordinates": [ring]});
+        let s = simplify(&g, SIMPLIFY);
+        assert_eq!(s["coordinates"][0].as_array().unwrap().len(), 5, "the square's corners and its closing point: {s}");
+        // A sliver smaller than the tolerance goes altogether.
+        let tiny = json!({"type": "MultiPolygon", "coordinates": [[[[0.0, 0.0], [0.001, 0.0], [0.001, 0.001], [0.0, 0.0]]]]});
+        assert_eq!(simplify(&tiny, SIMPLIFY), Value::Null);
+        assert_eq!(simplify(&json!({"type": "Point", "coordinates": [1, 2]}), SIMPLIFY)["type"], "Point");
     }
 
     #[test]

@@ -2327,9 +2327,12 @@ async fn main() -> Result<()> {
     // (from the disk cache at once), the most severe alerts' first.
     let mut alerts: Vec<mapterm::nws::Alert> = Vec::new();
     let mut alert_zones: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
-    let mut alerts_dirty = false;
+    // What the alert layer was last built from: the list changed, outlines have arrived
+    // since, and which alerts were in force (a hash of their ids).
+    let mut alerts_list_new = false;
+    let mut alerts_zones_new = false;
     let mut alerts_drawn = Instant::now();
-    let mut alerts_window = f64::NAN;
+    let mut alerts_in_force: u64 = 0;
     let mut selected_alert: Option<String> = None;
     let (natx, mut narx) = mpsc::unbounded_channel::<Result<Vec<mapterm::nws::Alert>>>();
     let (nzreq, mut nzreq_rx) = mpsc::unbounded_channel::<Vec<String>>();
@@ -2487,13 +2490,19 @@ async fn main() -> Result<()> {
                 };
                 r.update(&mut map, clock_t, ahead, clock.is_playing(), &draw_cam, map_area);
             }
-            // Alerts in force at the clock's time: redrawn when outlines arrive (at most every
-            // 2 s) or when the clock crosses into another minute.
+            // The alerts in force at the clock's time. Rebuilding the layer means every area's
+            // outline again, so only when what's shown changes: a new list, another set in
+            // force, or (at most every 10 s) outlines that arrived meanwhile.
             if a.alerts {
-                let minute = (clock_t / 60.0).floor();
-                if (alerts_dirty && alerts_drawn.elapsed() >= Duration::from_secs(2)) || minute != alerts_window {
+                let in_force = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    alerts.iter().filter(|al| al.in_force(clock_t)).for_each(|al| al.id.hash(&mut h));
+                    h.finish()
+                };
+                if alerts_list_new || in_force != alerts_in_force || (alerts_zones_new && alerts_drawn.elapsed() >= Duration::from_secs(10)) {
                     map.set_data(ALERTS, &mapterm::nws::features(&alerts, &alert_zones, clock_t))?;
-                    (alerts_dirty, alerts_drawn, alerts_window) = (false, Instant::now(), minute);
+                    (alerts_list_new, alerts_zones_new, alerts_drawn, alerts_in_force) = (false, false, Instant::now(), in_force);
                 }
             }
             // Highlight the selected feature and the clicked spot.
@@ -3344,7 +3353,7 @@ async fn main() -> Result<()> {
                             dlog(|| format!("alerts: {} active", list.len()));
                             alerts = list;
                             let _ = nzreq.send(mapterm::nws::zones_needed(&alerts, &alert_zones));
-                            alerts_dirty = true;
+                            alerts_list_new = true;
                             if selected_alert.as_ref().is_some_and(|id| !alerts.iter().any(|a| &a.id == id)) {
                                 selected_alert = None;
                             }
@@ -3357,7 +3366,7 @@ async fn main() -> Result<()> {
                 }
                 Some((z, g)) = nzrx.recv() => {
                     alert_zones.insert(z, g);
-                    alerts_dirty = true;
+                    alerts_zones_new = true;
                 }
                 Some(r) = rvrx.recv() => {
                     match r {
