@@ -1445,6 +1445,8 @@ async fn main() -> Result<()> {
     let mut last_cam = cam;
     let mut map_area = Rect::default();
     let mut frame_ms = 0.0f64;
+    // Rows under the map for the status line, and the credits when they need their own.
+    let mut status_rows: u16 = 1;
     // Place search: the state, the chosen place (marked on the map), and the geocoder.
     let geocoder = mapterm::geocode::Geocoder::from_env()?;
     let mut search = Search::Off;
@@ -1632,7 +1634,7 @@ async fn main() -> Result<()> {
                 m.0 = overlays;
             }
             term.draw(|f| {
-                let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
+                let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(status_rows)]).areas(f.area());
                 let results = matches!(search, Search::Results { .. });
                 let plane = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay));
                 let ship = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY));
@@ -1755,7 +1757,6 @@ async fn main() -> Result<()> {
                     credits.insert(0, f.attribution.clone());
                 }
                 let credits = if credits.is_empty() { basemap_name.clone() } else { credits.join(" · ") };
-                spans.push(Span::styled(format!("· {credits} · q quit"), dim));
                 // While typing a search, the status line is the search box.
                 if let Search::Typing(q) = &search {
                     spans = vec![
@@ -1767,7 +1768,24 @@ async fn main() -> Result<()> {
                 } else if let Search::Waiting(q) = &search {
                     spans.insert(1, Span::styled(format!("searching {q}… "), TStyle::new().fg(Color::Yellow)));
                 }
-                f.render_widget(Paragraph::new(Line::from(spans)), s);
+                // One line when it all fits. Otherwise the credits (which the data's licenses
+                // ask for) get their own lines above the status, never cut off; the row count
+                // takes effect from the next frame.
+                let width = s.width.max(1) as usize;
+                let status_width: usize = spans.iter().map(Span::width).sum();
+                let credit = Span::styled(format!("{credits} "), dim);
+                let together = status_width + 2 + credit.width() + 8 <= width;
+                let credit_rows = if together { 0 } else { credit.width().div_ceil(width).clamp(1, 3) as u16 };
+                status_rows = 1 + credit_rows;
+                if together || s.height < 2 {
+                    spans.push(Span::styled(format!("· {credits} · q quit"), dim));
+                    f.render_widget(Paragraph::new(Line::from(spans)), Rect { y: s.bottom() - 1, height: 1, ..s });
+                } else {
+                    let [above, line] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(s);
+                    f.render_widget(Paragraph::new(Line::from(vec![Span::raw(" "), credit])).wrap(ratatui::widgets::Wrap { trim: false }), above);
+                    spans.push(Span::styled("· q quit", dim));
+                    f.render_widget(Paragraph::new(Line::from(spans)), line);
+                }
             })?;
             ctl.set_area(map_area);
             frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
