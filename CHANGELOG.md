@@ -8,6 +8,9 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- When the status line doesn't fit, the credits get their own line above it (up to three,
+  wrapped) instead of being cut off; the data's licenses ask for them to show.
+
 - Live ships: `--ais` streams ships from aisstream.io (free key: `AISSTREAM_API_KEY` or
   `--ais-key-cmd`) over a WebSocket for the area in view: arrows along the course colored
   by kind, names, 10-minute trails, and a panel on click or Tab (status, speed, course,
