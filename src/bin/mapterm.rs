@@ -1873,6 +1873,10 @@ async fn main() -> Result<()> {
     let mut sat_country: Vec<String> = a.sats_country.clone();
     let mut sats_hidden: Vec<mapterm::satellites::Sat> = Vec::new();
     let mut sat_dots_drawn = Instant::now();
+    // Satellite positions by SGP4 once a second, interpolated between; and how often to
+    // redraw the dots: often enough that the fastest move about a pixel a frame.
+    let mut ephemeris = mapterm::satellites::Ephemeris::default();
+    let mut sat_every = Duration::from_millis(200);
     let mut follow = false;
     // The trail image needs drawing again (new positions, or the view moved).
     let mut trails_dirty = false;
@@ -2329,15 +2333,30 @@ async fn main() -> Result<()> {
                     // resolution when there are names to draw (text needs it), else half,
                     // scaled up by the terminal (dots don't).
                     let want_dots = !sats.is_empty() && settled;
-                    if want_dots && sat_dots_drawn.elapsed() >= Duration::from_millis(200) {
+                    if want_dots && sat_dots_drawn.elapsed() >= sat_every {
                         sat_dots_drawn = Instant::now();
                         // Full resolution when there's text to draw: names, or the selected one's.
                         let named = sats.iter().any(|s| !s.is_starlink());
                         let scale = if named || selected_sat.is_some() { 1.0 } else { 0.5 };
                         let (w, h) = ((map_area.width as f64 * cpx.0 * scale).round() as u32, (map_area.height as f64 * cpx.1 * scale).round() as u32);
                         let vp = Viewport::new(&draw_cam, map_area);
-                        let mut rgba =
-                            mapterm::satellites::render_dots(&sats, unix_now(), &vp, w, h, (cpx.0 * scale, cpx.1 * scale), named, selected_sat, &sat_coloring);
+                        // Low orbit crosses the ground at about 7 km/s: redraw so it moves ~1 px a frame,
+                        // from 4 to 15 times a second (zoomed out it barely moves).
+                        let px_per_km = cpx.0 / vp.km_per_col(draw_cam.lat).max(1e-6);
+                        let fps = (7.0 * px_per_km).ceil().clamp(4.0, 15.0);
+                        sat_every = Duration::from_secs_f64(1.0 / fps);
+                        let at = ephemeris.positions(&sats, unix_now());
+                        let mut rgba = mapterm::satellites::render_dots_at(
+                            &sats,
+                            &at,
+                            &vp,
+                            w,
+                            h,
+                            (cpx.0 * scale, cpx.1 * scale),
+                            named,
+                            selected_sat,
+                            &sat_coloring,
+                        );
                         punch(&mut rgba, w, map_area, &legend_rects, (cpx.0 * scale, cpx.1 * scale));
                         out.write_all(
                             mapterm::kitty::show_rgba(SAT_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -8, shm).as_bytes(),
@@ -2623,8 +2642,8 @@ async fn main() -> Result<()> {
             let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() {
                 Duration::from_millis(16)
             } else if sat_dots {
-                // Satellite dots redraw five times a second.
-                Duration::from_millis(100)
+                // Satellite dots redraw up to 15 times a second (see sat_every).
+                (sat_every / 2).max(Duration::from_millis(16))
             } else if !aircraft.is_empty() || !fleet.is_empty() || !sats.is_empty() {
                 // Aircraft and ships keep moving.
                 Duration::from_millis(250)

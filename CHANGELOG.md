@@ -22,7 +22,10 @@ All notable changes to mapterm are listed here. The format follows
   cell glyphs return while the map moves. Their names are drawn into that image too, in the
   bundled JetBrains Mono (Ghostty's built-in font; SIL OFL 1.1, `fonts/OFL.txt`) or
   `MAPTERM_FONT`, so they glide with their dots (`mapterm::imagetext`: outlines from `skrifa`,
-  drawn once per glyph with tiny-skia and copied into place).
+  drawn once per glyph with tiny-skia and copied into place). The dots redraw often enough that the fastest move
+  about a pixel a frame (4 to 15 times a second, by zoom), from positions worked out by SGP4
+  once a second and interpolated between (`satellites::Ephemeris`, accurate to tens of
+  metres); 9 ms a frame for all 16,904, about 13% of a core at 15 a second.
   The selected satellite (Starlink too) gets a ring and its name in that image. `--sats`
   alone is `active`: every active satellite CelesTrak publishes (~17,000), Starlink's
   unlabelled. `p` opens an fzf-style finder over satellites, aircraft and ships (by name,

@@ -168,13 +168,7 @@ pub fn render_trails<'a>(
             pm.stroke_path(&line, &paint, &stroke, Transform::identity(), None);
         }
     }
-    pm.pixels()
-        .iter()
-        .flat_map(|p| {
-            let c = p.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect()
+    to_rgba(pm)
 }
 
 /// A path to draw: lon/lat points and an RGB color.
@@ -201,13 +195,24 @@ pub fn render_lines(lines: &[Line], vp: &crate::Viewport, w: u32, h: u32, cell_p
         paint.anti_alias = true;
         pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
-    pm.pixels()
-        .iter()
-        .flat_map(|p| {
-            let c = p.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect()
+    to_rgba(pm)
+}
+
+/// A tiny-skia image as plain (not premultiplied) RGBA, as kitty takes it: transparent
+/// pixels are already zero and opaque ones already right, so only edges are worked out (an
+/// image that's mostly empty converts in a millisecond or two, not ten).
+pub fn to_rgba(pm: tiny_skia::Pixmap) -> Vec<u8> {
+    let mut data = pm.take();
+    for px in data.as_chunks_mut::<4>().0 {
+        let a = px[3];
+        if a == 0 || a == 255 {
+            continue;
+        }
+        for c in &mut px[..3] {
+            *c = ((*c as u16 * 255 + a as u16 / 2) / a as u16).min(255) as u8;
+        }
+    }
+    data
 }
 
 /// The point `meters` from (`lon`, `lat`) along `bearing` (degrees from north), on a sphere

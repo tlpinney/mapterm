@@ -628,6 +628,53 @@ pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
         .paint("icon-color", json!(["get", "color"]))
 }
 
+/// Where many satellites are, worked out with SGP4 at whole seconds and interpolated in
+/// between: over a second an orbit is a straight line to within metres, so a viewer can
+/// redraw many times a second for the cost of SGP4 once a second.
+#[derive(Default)]
+pub struct Ephemeris {
+    /// Which list the positions are for: its length and first satellite.
+    key: (usize, u64),
+    t0: f64,
+    a: Vec<Option<(f64, f64, f64)>>,
+    b: Vec<Option<(f64, f64, f64)>>,
+}
+
+impl Ephemeris {
+    fn all(sats: &[Sat], t: f64) -> Vec<Option<(f64, f64, f64)>> {
+        sats.iter().map(|s| s.at(t).map(|f| (f.lon, f.lat, f.alt_km))).collect()
+    }
+
+    /// Each satellite's longitude, latitude and height (km) at Unix time `t`, in `sats`'s
+    /// order.
+    pub fn positions(&mut self, sats: &[Sat], t: f64) -> Vec<Option<(f64, f64, f64)>> {
+        let key = (sats.len(), sats.first().map_or(0, |s| s.norad));
+        if key != self.key || t < self.t0 || t >= self.t0 + 2.0 {
+            self.key = key;
+            self.t0 = t.floor();
+            self.a = Ephemeris::all(sats, self.t0);
+            self.b = Ephemeris::all(sats, self.t0 + 1.0);
+        } else if t >= self.t0 + 1.0 {
+            self.t0 += 1.0;
+            self.a = std::mem::take(&mut self.b);
+            self.b = Ephemeris::all(sats, self.t0 + 1.0);
+        }
+        let f = t - self.t0;
+        self.a
+            .iter()
+            .zip(&self.b)
+            .map(|(a, b)| match (a, b) {
+                (Some(a), Some(b)) => {
+                    // The short way round, across the antimeridian too.
+                    let dlon = (b.0 - a.0 + 540.0).rem_euclid(360.0) - 180.0;
+                    Some(((a.0 + dlon * f + 540.0).rem_euclid(360.0) - 180.0, a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f))
+                }
+                (a, _) => *a,
+            })
+            .collect()
+    }
+}
+
 /// The satellites at Unix time `t` as dots in an RGBA image (not premultiplied), `w` x `h`
 /// pixels, for a map drawn by `vp` in cells of `cell_px` pixels (the image may be smaller
 /// than the cells and scaled up by the terminal): placed to the pixel, so they move smoothly
@@ -647,15 +694,33 @@ pub fn render_dots(
     selected: Option<u64>,
     coloring: &Coloring,
 ) -> Vec<u8> {
+    let at: Vec<Option<(f64, f64, f64)>> = sats.iter().map(|s| s.at(t).map(|f| (f.lon, f.lat, f.alt_km))).collect();
+    render_dots_at(sats, &at, vp, w, h, cell_px, labels, selected, coloring)
+}
+
+/// [`render_dots`] from positions already worked out (lon, lat, km; one per satellite, as
+/// [`Ephemeris`] gives them), so a viewer can redraw often without SGP4 each time.
+#[allow(clippy::too_many_arguments)]
+pub fn render_dots_at(
+    sats: &[Sat],
+    at: &[Option<(f64, f64, f64)>],
+    vp: &crate::Viewport,
+    w: u32,
+    h: u32,
+    cell_px: (f64, f64),
+    labels: bool,
+    selected: Option<u64>,
+    coloring: &Coloring,
+) -> Vec<u8> {
     use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
     let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
     let (sx, sy) = (cell_px.0 / 2.0, cell_px.1 / 4.0);
     let size = (cell_px.0 / 4.0).max(1.0) as f32;
     let mut named: Vec<(f32, f32, f32, &str)> = Vec::new();
     let mut chosen: Option<(f32, f32, f32, &str)> = None;
-    for s in sats {
-        let Some(f) = s.at(t) else { continue };
-        let (x, y) = vp.dot_ll(f.lon, f.lat);
+    for (s, p) in sats.iter().zip(at) {
+        let Some((lon, lat, alt_km)) = *p else { continue };
+        let (x, y) = vp.dot_ll(lon, lat);
         let (x, y) = ((x * sx) as f32, (y * sy) as f32);
         if x < -8.0 || y < -8.0 || x > w as f32 + 8.0 || y > h as f32 + 8.0 {
             continue;
@@ -666,7 +731,7 @@ pub fn render_dots(
             _ => size,
         };
         let Some(dot) = PathBuilder::from_circle(x, y, r.max(0.8)) else { continue };
-        let (cr, cg, cb) = coloring.rgb(s, f.alt_km);
+        let (cr, cg, cb) = coloring.rgb(s, alt_km);
         let mut paint = Paint::default();
         paint.set_color_rgba8(cr, cg, cb, 235);
         paint.anti_alias = true;
@@ -709,13 +774,7 @@ pub fn render_dots(
             placed.push(b);
         }
     }
-    pm.pixels()
-        .iter()
-        .flat_map(|p| {
-            let c = p.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect()
+    crate::timeseries::to_rgba(pm)
 }
 
 /// The satellite drawn nearest the braille dot `dot` at time `t`, within `within` dots.
@@ -917,6 +976,19 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         sats.push(sl);
         let l = Coloring::by_country(&sats).legend(&sats);
         assert!(l.entries.iter().any(|e| e.label == "Starlink (USA)" && e.count == Some(1)), "{:?}", l.entries);
+    }
+
+    #[test]
+    fn ephemeris_matches_sgp4_between_seconds() {
+        let iss = parse_csv(CSV);
+        let mut e = Ephemeris::default();
+        for dt in [0.0, 0.25, 0.5, 0.99, 1.4, 3.7] {
+            let t = iss[0].epoch + 100.0 + dt;
+            let (lon, lat, alt) = e.positions(&iss, t)[0].unwrap();
+            let f = iss[0].at(t).unwrap();
+            let apart_m = crate::adsb::distance_nm((lon, lat), (f.lon, f.lat)) * 1852.0;
+            assert!(apart_m < 50.0 && (alt - f.alt_km).abs() < 0.05, "{apart_m} m at +{dt} s");
+        }
     }
 
     #[test]
