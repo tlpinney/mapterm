@@ -35,11 +35,13 @@ parquet = { version = "60.2", default-features = false, features = ["arrow", "as
 ratatui = "0.30.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+rustls-native-certs = "0.8"
 serde_json = "1.0.154"
+sha1 = "0.11"
 shapefile = { version = "0.9.0", features = ["encoding_rs"] }
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
-tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "time"] }
-tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["connect", "rustls-tls-native-roots"] }
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs", "tls12"] }
 unicode-width = "0.2.2"
 
 [[bin]]

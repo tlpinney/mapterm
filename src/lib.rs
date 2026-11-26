@@ -107,6 +107,7 @@ pub mod store;
 pub mod stylejson;
 pub mod tilecache;
 pub mod timeseries;
+pub mod ws;
 
 pub use interact::{Click, Controller};
 pub use layer::{CustomLayer, DrawContext, Markers, PickContext};

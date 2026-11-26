@@ -389,8 +389,7 @@ pub enum Event {
 /// aisstream.io answers a bad key by dropping the connection right after the subscription,
 /// without a word: three of those in a row (within 10 s, before any message) stop it.
 pub async fn stream(key: String, mut area: tokio::sync::watch::Receiver<Option<BBox>>, tx: tokio::sync::mpsc::UnboundedSender<Event>) {
-    use futures::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
+    use crate::ws::Message;
     let mut pause = Duration::from_secs(5);
     let mut refused = 0;
     loop {
@@ -404,22 +403,22 @@ pub async fn stream(key: String, mut area: tokio::sync::watch::Receiver<Option<B
         let mut subscribed: Option<std::time::Instant> = None;
         let session = async {
             // The server can take several seconds to accept.
-            let (mut ws, _) =
-                tokio::time::timeout(Duration::from_secs(30), tokio_tungstenite::connect_async(STREAM)).await.context("connecting timed out")??;
+            // Compressed when the server agrees, as aisstream.io asks.
+            let opts = crate::ws::Options { protocol: None, deflate: true };
+            let mut ws = tokio::time::timeout(Duration::from_secs(30), crate::ws::connect(STREAM, opts)).await.context("connecting timed out")??;
             let [(s, w), (n, e)] = bbox;
             let sub = json!({"APIKey": key, "BoundingBoxes": [[[s, w], [n, e]]],
                              "FilterMessageTypes": ["PositionReport", "StandardClassBPositionReport", "ExtendedClassBPositionReport", "ShipStaticData"]});
-            ws.send(Message::Text(sub.to_string().into())).await?;
+            ws.send_text(&sub.to_string()).await?;
             subscribed = Some(std::time::Instant::now());
             let _ = tx.send(Event::Connected(bbox));
             loop {
                 tokio::select! {
                     msg = ws.next() => {
-                        let body = match msg.context("the stream closed")?? {
-                            Message::Binary(b) => b.to_vec(),
-                            Message::Text(t) => t.as_bytes().to_vec(),
-                            Message::Close(c) => bail!("the stream closed: {}", c.map(|c| c.reason.to_string()).unwrap_or_default()),
-                            _ => continue,
+                        let body = match msg?.context("the stream closed")? {
+                            Message::Binary(b) => b,
+                            Message::Text(t) => t.into_bytes(),
+                            Message::Close(c) => bail!("the stream closed: {}", c.map(|c| c.1).unwrap_or_default()),
                         };
                         heard = true;
                         match parse(&body) {
@@ -435,7 +434,7 @@ pub async fn stream(key: String, mut area: tokio::sync::watch::Receiver<Option<B
                             return Ok(false);
                         }
                         // A new box: reconnect with it.
-                        let _ = ws.close(None).await;
+                        let _ = ws.close().await;
                         return Ok(true);
                     }
                 }
