@@ -602,7 +602,7 @@ const PATH_IMAGE: u32 = 4_000_000_005;
 /// The kitty image of satellite dots and their names.
 const SAT_IMAGE: u32 = 4_000_000_006;
 /// The alert areas' style layers (braille, where the terminal doesn't show images).
-const ALERT_LAYERS: [&str; 2] = ["alerts-fill", "alerts-line"];
+const ALERT_LAYERS: [&str; 3] = ["alerts-fill", "alerts-line", "alerts-selected"];
 /// The alert areas as image tiles drawn here (where it does).
 const ALERT_TILES: &str = "alert-tiles";
 /// --ais draws ships this many seconds in the past (ships under way report every 2 to 10 s;
@@ -2462,6 +2462,8 @@ async fn main() -> Result<()> {
     // When the last outline arrived: from the disk cache they come all at once, so the areas
     // go up once they stop; from the NWS, one a second, so every 10 s.
     let mut alerts_zone_at = Instant::now();
+    // The alert highlighted when the layer was last built.
+    let mut alert_shown_selected: Option<String> = None;
     let mut alerts_drawn = Instant::now();
     let mut alerts_in_force: u64 = 0;
 
@@ -2636,9 +2638,10 @@ async fn main() -> Result<()> {
                     h.finish()
                 };
                 let outlines_due = alerts_zones_new && (alerts_drawn.elapsed() >= Duration::from_secs(10) || alerts_zone_at.elapsed() >= Duration::from_millis(1500));
-                if alerts_list_new || in_force != alerts_in_force || outlines_due {
-                    map.set_data(ALERTS, &mapterm::nws::features(&alerts, &alert_zones, clock_t))?;
-                    alert_tiles.set(&alerts, &alert_zones, clock_t);
+                if alerts_list_new || in_force != alerts_in_force || outlines_due || selected_alert != alert_shown_selected {
+                    map.set_data(ALERTS, &mapterm::nws::features(&alerts, &alert_zones, clock_t, selected_alert.as_deref()))?;
+                    alert_tiles.set(&alerts, &alert_zones, clock_t, selected_alert.as_deref());
+                    alert_shown_selected = selected_alert.clone();
                     // Drawn again from the new areas as the view asks for them.
                     map.put_raster_tile(ALERT_TILES, None, true);
                     (alerts_list_new, alerts_zones_new, alerts_drawn, alerts_in_force) = (false, false, Instant::now(), in_force);

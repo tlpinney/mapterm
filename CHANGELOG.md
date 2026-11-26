@@ -32,6 +32,8 @@ All notable changes to mapterm are listed here. The format follows
   greys only (water too, since light rain is blue), coastlines and state and country borders
   as lines over the radar, faint motorways, city names that read over rain
   (`stylejson::weather_style`, `Map::weather`); in the `m` cycle.
+- The selected alert's area is highlighted: a stronger fill and a bright outline, drawn over
+  the others (and a white braille outline where the terminal shows no images).
 - Alert areas as image tiles drawn here where the terminal shows images: smooth outlines
   and a translucent fill, panned and zoomed like imagery, above the radar and under the
   text (`nws::AlertTiles`, `RasterSource::render` for a layer whose tiles are drawn rather

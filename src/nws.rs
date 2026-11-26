@@ -328,11 +328,12 @@ pub fn zones_needed(alerts: &[Alert], have: &HashMap<String, Value>) -> Vec<Stri
 
 /// The alerts as GeoJSON for the map, least severe first (so the worst draws on top): each
 /// with its own outline or its zones' (those in `zones`), and properties `id`, `event`,
-/// `severity` and `color`. Only those in force at `t` (Unix seconds); alerts with no
-/// outline yet are left out.
-pub fn features(alerts: &[Alert], zones: &HashMap<String, Value>, t: f64) -> Value {
+/// `severity`, `color` and `selected` (the alert with id `selected`, drawn last). Only those
+/// in force at `t` (Unix seconds); alerts with no outline yet are left out.
+pub fn features(alerts: &[Alert], zones: &HashMap<String, Value>, t: f64, selected: Option<&str>) -> Value {
     let mut feats = Vec::new();
-    for a in alerts.iter().rev().filter(|a| a.in_force(t)) {
+    let order = alerts.iter().rev().filter(|a| Some(a.id.as_str()) != selected).chain(alerts.iter().filter(|a| Some(a.id.as_str()) == selected));
+    for a in order.filter(|a| a.in_force(t)) {
         let geometry = match &a.geometry {
             Some(g) => g.clone(),
             None => {
@@ -354,7 +355,8 @@ pub fn features(alerts: &[Alert], zones: &HashMap<String, Value>, t: f64) -> Val
         feats.push(json!({
             "type": "Feature",
             "geometry": geometry,
-            "properties": {"id": a.id, "event": a.event, "severity": a.severity.label(), "color": format!("#{r:02x}{g:02x}{b:02x}")},
+            "properties": {"id": a.id, "event": a.event, "severity": a.severity.label(), "color": format!("#{r:02x}{g:02x}{b:02x}"),
+                           "selected": Some(a.id.as_str()) == selected},
         }));
     }
     json!({"type": "FeatureCollection", "features": feats})
@@ -373,6 +375,8 @@ pub struct AlertTiles {
 /// Mercator), and their bounds.
 struct Area {
     rgb: (u8, u8, u8),
+    /// The selected alert: drawn last, brighter and bolder.
+    selected: bool,
     rings: Vec<Vec<(f64, f64)>>,
     bounds: (f64, f64, f64, f64),
 }
@@ -384,8 +388,9 @@ fn world(lon: f64, lat: f64) -> (f64, f64) {
 
 impl AlertTiles {
     /// Draw the alerts in force at `t`, with their own outlines or their zones' (those in
-    /// `zones`). The caller drops tiles already drawn ([`crate::Map::put_raster_tile`]).
-    pub fn set(&self, alerts: &[Alert], zones: &HashMap<String, Value>, t: f64) {
+    /// `zones`), the one with id `selected` highlighted. The caller drops tiles already drawn
+    /// ([`crate::Map::put_raster_tile`]).
+    pub fn set(&self, alerts: &[Alert], zones: &HashMap<String, Value>, t: f64, selected: Option<&str>) {
         let rings_of = |g: &Value, out: &mut Vec<Vec<(f64, f64)>>| {
             let ring = |r: &Value| -> Vec<(f64, f64)> {
                 r.as_array().into_iter().flatten().filter_map(|p| Some(world(p.get(0)?.as_f64()?, p.get(1)?.as_f64()?))).collect()
@@ -401,7 +406,8 @@ impl AlertTiles {
             }
         };
         let mut areas = Vec::new();
-        for a in alerts.iter().rev().filter(|a| a.in_force(t)) {
+        let order = alerts.iter().rev().filter(|a| Some(a.id.as_str()) != selected).chain(alerts.iter().filter(|a| Some(a.id.as_str()) == selected));
+        for a in order.filter(|a| a.in_force(t)) {
             let mut rings = Vec::new();
             match &a.geometry {
                 Some(g) => rings_of(g, &mut rings),
@@ -413,7 +419,7 @@ impl AlertTiles {
                 b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
             }
             if !rings.is_empty() {
-                areas.push(Area { rgb: a.severity.rgb(), rings, bounds: b });
+                areas.push(Area { rgb: a.severity.rgb(), selected: Some(a.id.as_str()) == selected, rings, bounds: b });
             }
         }
         *self.areas.write().unwrap_or_else(|e| e.into_inner()) = areas;
@@ -445,6 +451,16 @@ impl AlertTiles {
             let pm = pm.get_or_insert_with(|| Pixmap::new(size, size).expect("tile size"));
             let (r, g, b) = a.rgb;
             let mut paint = Paint { anti_alias: true, ..Paint::default() };
+            if a.selected {
+                // Highlighted: a stronger fill, its color's outline wide under a white one.
+                paint.set_color_rgba8(r, g, b, 90);
+                pm.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+                paint.set_color_rgba8(r, g, b, 255);
+                pm.stroke_path(&path, &paint, &Stroke { width: 6.0, ..stroke.clone() }, Transform::identity(), None);
+                paint.set_color_rgba8(255, 255, 255, 255);
+                pm.stroke_path(&path, &paint, &Stroke { width: 2.5, ..stroke.clone() }, Transform::identity(), None);
+                continue;
+            }
             paint.set_color_rgba8(r, g, b, 38);
             pm.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
             paint.set_color_rgba8(r, g, b, 230);
@@ -477,11 +493,14 @@ pub fn tile_source(tiles: std::sync::Arc<AlertTiles>) -> Result<std::sync::Arc<c
 }
 
 /// The map layers for alerts from GeoJSON source `source`: a faint fill and an outline in
-/// each alert's color.
+/// each alert's color, and a bright outline for the selected one.
 pub fn layers(source: &str) -> Result<Vec<crate::StyleLayer>> {
     let fill = json!({"id": format!("{source}-fill"), "type": "fill", "source": source, "paint": {"fill-color": ["get", "color"], "fill-opacity": 0.12}});
     let line = json!({"id": format!("{source}-line"), "type": "line", "source": source, "paint": {"line-color": ["get", "color"], "line-width": 1}});
-    [fill, line].iter().map(|j| Ok(crate::StyleLayer::from_json(j)?.0)).collect()
+    // The selected alert: a bright outline over the rest.
+    let selected = json!({"id": format!("{source}-selected"), "type": "line", "source": source, "filter": ["==", ["get", "selected"], true],
+                          "paint": {"line-color": "#ffffff", "line-width": 2}});
+    [fill, line, selected].iter().map(|j| Ok(crate::StyleLayer::from_json(j)?.0)).collect()
 }
 
 #[cfg(test)]
@@ -518,7 +537,7 @@ mod tests {
     fn a_click_on_an_area_finds_its_alert() {
         let a = parse(SAMPLE).unwrap();
         let mut map = crate::Map::new();
-        map.add_source("alerts", crate::MapSource::geojson(&features(&a, &HashMap::new(), 1_795_660_000.0)).unwrap()).unwrap();
+        map.add_source("alerts", crate::MapSource::geojson(&features(&a, &HashMap::new(), 1_795_660_000.0, None)).unwrap()).unwrap();
         map.add_layers(layers("alerts").unwrap(), None).unwrap();
         let (cam, area) = (crate::Camera::new(-76.5, 38.5, 7.0), ratatui::layout::Rect::new(0, 0, 80, 24));
         // Inside the flood warning's triangle.
@@ -556,7 +575,7 @@ mod tests {
     fn draws_tiles_of_the_areas() {
         let a = parse(SAMPLE).unwrap();
         let tiles = AlertTiles::default();
-        tiles.set(&a, &HashMap::new(), 1_795_660_000.0);
+        tiles.set(&a, &HashMap::new(), 1_795_660_000.0, None);
         // The flood warning's triangle (-77..-76, 38..39) at zoom 8: tile 73/98 holds this point.
         let (z, x, y) = (8u8, 73u32, 98u32);
         let n = 256.0;
@@ -569,12 +588,22 @@ mod tests {
             rgba[(py * 512 + px) * 4 + 3]
         };
         assert!((20..80).contains(&at(-76.3, 38.2)), "a faint fill inside");
+        // Selected: a stronger fill, and drawn even where it overlaps others.
+        tiles.set(&a, &HashMap::new(), 1_795_660_000.0, Some("urn:b"));
+        let hl = tiles.draw(z, x, y, 512).unwrap();
+        let (wx, wy) = world(-76.3, 38.2);
+        let i = ((((wy * n - y as f64) * 512.0) as usize) * 512 + ((wx * n - x as f64) * 512.0) as usize) * 4;
+        assert!(hl[i + 3] > 70, "highlighted fill: {}", hl[i + 3]);
+        let fc = features(&a, &HashMap::new(), 1_795_660_000.0, Some("urn:b"));
+        let last = fc["features"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!((last["properties"]["id"].as_str(), last["properties"]["selected"].as_bool()), (Some("urn:b"), Some(true)), "drawn last");
+        tiles.set(&a, &HashMap::new(), 1_795_660_000.0, None);
         assert_eq!(at(-76.9, 38.95), 0, "clear outside");
         assert!(tiles.draw(8, 10, 10, 512).is_none(), "a tile far away: none");
         let png = crate::raster::TileRender::render(&tiles, z, x, y, 512).unwrap();
         assert!(crate::raster::png_has_alpha(&png));
         // After the alerts end: no tiles.
-        tiles.set(&a, &HashMap::new(), 1_900_000_000.0);
+        tiles.set(&a, &HashMap::new(), 1_900_000_000.0, None);
         assert!(tiles.draw(z, x, y, 512).is_none());
         let src = tile_source(std::sync::Arc::new(AlertTiles::default())).unwrap();
         assert!(src.overlay && src.render.is_some() && !src.cache);
@@ -594,18 +623,18 @@ mod tests {
         let mut zones = HashMap::new();
         assert_eq!(zones_needed(&a, &zones), vec!["forecast/ANZ630", "forecast/ANZ631"], "the polygon alert needs none");
         // Before any zone is in: only the alert with its own outline.
-        assert_eq!(features(&a, &zones, 1_795_660_000.0)["features"].as_array().unwrap().len(), 1);
+        assert_eq!(features(&a, &zones, 1_795_660_000.0, None)["features"].as_array().unwrap().len(), 1);
         zones.insert("forecast/ANZ630".to_string(), json!({"type":"Polygon","coordinates":[[[-76,37],[-75,37],[-75,38],[-76,37]]]}));
         zones.insert("forecast/ANZ631".to_string(), Value::Null);
         assert!(zones_needed(&a, &zones).is_empty());
-        let fc = features(&a, &zones, 1_795_660_000.0);
+        let fc = features(&a, &zones, 1_795_660_000.0, None);
         let f = fc["features"].as_array().unwrap();
         assert_eq!(f.len(), 2);
         assert_eq!(f[0]["properties"]["event"], "Small Craft Advisory", "least severe first, under the worse");
         assert_eq!(f[0]["geometry"]["type"], "MultiPolygon");
         assert_eq!(f[1]["properties"]["color"], "#ff5555");
-        assert_eq!(layers("alerts").unwrap().len(), 2);
+        assert_eq!(layers("alerts").unwrap().len(), 3);
         // After both end: nothing in force.
-        assert!(features(&a, &zones, 1_900_000_000.0)["features"].as_array().unwrap().is_empty());
+        assert!(features(&a, &zones, 1_900_000_000.0, None)["features"].as_array().unwrap().is_empty());
     }
 }
