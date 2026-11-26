@@ -362,6 +362,10 @@ pub fn features(alerts: &[Alert], zones: &HashMap<String, Value>, t: f64, select
     json!({"type": "FeatureCollection", "features": feats})
 }
 
+/// Pixels alert tiles are drawn past their right and bottom edges, so smooth scrolling can
+/// move into them without stretching (more than a cell at any zoom a tile is shown at).
+pub const BLEED: u32 = 64;
+
 /// The alert areas as map tiles drawn here (where the terminal shows images): each area a
 /// translucent fill and a smooth outline in its severity's color, the least severe first so
 /// the worst is on top. Shown and moved like imagery, so panning and zooming stay images.
@@ -425,13 +429,15 @@ impl AlertTiles {
         *self.areas.write().unwrap_or_else(|e| e.into_inner()) = areas;
     }
 
-    /// Tile `z/x/y` as RGBA, `size` pixels square, or None when no area touches it.
+    /// Tile `z/x/y` as RGBA, `size` pixels square plus [`BLEED`] past its right and bottom
+    /// edges, or None when no area touches it.
     pub fn draw(&self, z: u8, x: u32, y: u32, size: u32) -> Option<Vec<u8>> {
         use tiny_skia::{FillRule, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
         let n = (1u64 << z) as f64;
         // The tile in world coordinates, with a little room for outlines just outside it.
         let pad = 4.0 / size as f64 / n;
-        let (x0, y0, x1, y1) = (x as f64 / n - pad, y as f64 / n - pad, (x + 1) as f64 / n + pad, (y + 1) as f64 / n + pad);
+        let far = (BLEED as f64 + 4.0) / size as f64 / n;
+        let (x0, y0, x1, y1) = (x as f64 / n - pad, y as f64 / n - pad, (x + 1) as f64 / n + far, (y + 1) as f64 / n + far);
         let areas = self.areas.read().unwrap_or_else(|e| e.into_inner());
         let mut pm: Option<Pixmap> = None;
         let stroke = Stroke { width: 2.0, line_join: LineJoin::Round, ..Stroke::default() };
@@ -448,7 +454,7 @@ impl AlertTiles {
                 pb.close();
             }
             let Some(path) = pb.finish() else { continue };
-            let pm = pm.get_or_insert_with(|| Pixmap::new(size, size).expect("tile size"));
+            let pm = pm.get_or_insert_with(|| Pixmap::new(size + BLEED, size + BLEED).expect("tile size"));
             let (r, g, b) = a.rgb;
             let mut paint = Paint { anti_alias: true, ..Paint::default() };
             if a.selected {
@@ -474,7 +480,7 @@ impl AlertTiles {
 
 impl crate::raster::TileRender for AlertTiles {
     fn render(&self, z: u8, x: u32, y: u32, size: u32) -> Option<Vec<u8>> {
-        crate::raster::encode_png(&self.draw(z, x, y, size)?, size, size).ok()
+        crate::raster::encode_png(&self.draw(z, x, y, size)?, size + BLEED, size + BLEED).ok()
     }
 }
 
@@ -487,6 +493,7 @@ pub fn tile_source(tiles: std::sync::Arc<AlertTiles>) -> Result<std::sync::Arc<c
     s.overlay = true;
     s.cache = false;
     s.render = Some(tiles);
+    s.bleed = BLEED;
     s.name = "alerts".into();
     s.attribution = CREDIT.into();
     Ok(std::sync::Arc::new(s))
@@ -585,14 +592,14 @@ mod tests {
         let at = |lon: f64, lat: f64| {
             let (wx, wy) = world(lon, lat);
             let (px, py) = (((wx * n - x as f64) * 512.0) as usize, ((wy * n - y as f64) * 512.0) as usize);
-            rgba[(py * 512 + px) * 4 + 3]
+            rgba[(py * (512 + BLEED as usize) + px) * 4 + 3]
         };
         assert!((20..80).contains(&at(-76.3, 38.2)), "a faint fill inside");
         // Selected: a stronger fill, and drawn even where it overlaps others.
         tiles.set(&a, &HashMap::new(), 1_795_660_000.0, Some("urn:b"));
         let hl = tiles.draw(z, x, y, 512).unwrap();
         let (wx, wy) = world(-76.3, 38.2);
-        let i = ((((wy * n - y as f64) * 512.0) as usize) * 512 + ((wx * n - x as f64) * 512.0) as usize) * 4;
+        let i = ((((wy * n - y as f64) * 512.0) as usize) * (512 + BLEED as usize) + ((wx * n - x as f64) * 512.0) as usize) * 4;
         assert!(hl[i + 3] > 70, "highlighted fill: {}", hl[i + 3]);
         let fc = features(&a, &HashMap::new(), 1_795_660_000.0, Some("urn:b"));
         let last = fc["features"].as_array().unwrap().last().unwrap().clone();

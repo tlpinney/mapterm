@@ -224,7 +224,12 @@ impl TileRequest {
             Fetch::Raster(src) => match src.tile(z, x, y).await? {
                 // An opaque tile from a source that's always transparent is its error image.
                 Some(b) if src.require_alpha && !crate::raster::png_has_alpha(&b) => LoadedTile::Raster(None),
-                Some(b) => LoadedTile::Raster(Some(tokio::task::spawn_blocking(move || crate::raster::decode(&b)).await??)),
+                Some(b) => {
+                    let bleed = src.bleed;
+                    let mut t = tokio::task::spawn_blocking(move || crate::raster::decode(&b)).await??;
+                    t.bleed = bleed;
+                    LoadedTile::Raster(Some(t))
+                }
                 None => LoadedTile::Raster(None),
             },
         }))
@@ -2251,7 +2256,8 @@ fn shifted(b: &crate::raster::Block, _area: Rect, shift: (f64, f64), cell_px: (f
     if shift.0 < 0.5 && shift.1 < 0.5 {
         return None;
     }
-    let (tw, th) = b.tile.size();
+    // The whole image: a tile with bleed has pixels past its edge to move into.
+    let (tw, th) = b.tile.full_size();
     let (mut sx, mut sy, mut sw, mut sh) = b.src;
     // Source pixels per screen pixel.
     let kx = sw as f64 / (b.cells.width as f64 * cell_px.0).max(1.0);
@@ -2628,7 +2634,7 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
 mod tests {
     #[test]
     fn shifted_placements_follow_the_text() {
-        let tile = Arc::new(RasterTile { id: 7, png: Vec::new(), rgba: image::RgbaImage::new(512, 512) });
+        let tile = Arc::new(RasterTile { bleed: 0, id: 7, png: Vec::new(), rgba: image::RgbaImage::new(512, 512) });
         let area = Rect::new(0, 0, 80, 24);
         let cell = (10.0, 20.0);
         // A block 5 cells in showing half the tile on 20x10 cells (256 px on 200x200 px).
@@ -2642,6 +2648,11 @@ mod tests {
         // At the tile's own right edge: narrower.
         let end = crate::raster::Block { tile, cells: Rect::new(0, 0, 20, 10), src: (256, 0, 256, 256) };
         assert_eq!(super::shifted(&end, area, (3.0, 0.0), cell).map(|p| p.2), Some((260, 0, 252, 256)));
+        // A tile drawn with bleed (here 64 px past its edges): no narrowing, no stretch.
+        let bled = Arc::new(RasterTile { bleed: 64, id: 8, png: Vec::new(), rgba: image::RgbaImage::new(576, 576) });
+        assert_eq!(bled.size(), (512, 512), "the tile's own size leaves the bleed out");
+        let end = crate::raster::Block { tile: bled, cells: Rect::new(0, 0, 20, 10), src: (256, 256, 256, 256) };
+        assert_eq!(super::shifted(&end, area, (3.0, 5.0), cell).map(|p| p.2), Some((260, 262, 256, 256)));
     }
 
     #[test]
@@ -2785,7 +2796,7 @@ mod tests {
 
     fn solid_tile(r: u8, g: u8, b: u8) -> RasterTile {
         let rgba = image::RgbaImage::from_pixel(256, 256, image::Rgba([r, g, b, 255]));
-        RasterTile { id: 4242 + r as u32, png: vec![1, 2, 3], rgba }
+        RasterTile { bleed: 0, id: 4242 + r as u32, png: vec![1, 2, 3], rgba }
     }
 
     #[test]

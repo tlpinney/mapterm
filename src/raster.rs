@@ -69,10 +69,13 @@ pub struct RasterSource {
     /// Draw tiles here instead of fetching them: a layer made from data (weather alert
     /// areas), shown and moved like imagery. See [`TileRender`].
     pub render: Option<Arc<dyn TileRender>>,
+    /// Pixels its tiles have past their right and bottom edges ([`RasterTile::bleed`]).
+    pub bleed: u32,
 }
 
 /// Draws a source's tiles (see [`RasterSource::render`]): PNG bytes for tile `z/x/y`, or
-/// None for an empty one. Called off the main thread.
+/// None for an empty one; with the source's [bleed](RasterSource::bleed), the image is that
+/// many pixels wider and taller. Called off the main thread.
 pub trait TileRender: Send + Sync {
     /// The tile's PNG, `size` pixels square.
     fn render(&self, z: u8, x: u32, y: u32, size: u32) -> Option<Vec<u8>>;
@@ -437,6 +440,7 @@ impl RasterSource {
             require_alpha: false,
             store: None,
             render: None,
+            bleed: 0,
         })
     }
 
@@ -506,6 +510,7 @@ impl RasterSource {
             require_alpha: false,
             store: None,
             render: None,
+            bleed: 0,
         })
     }
 
@@ -539,6 +544,7 @@ impl RasterSource {
             require_alpha: false,
             store: None,
             render: None,
+            bleed: 0,
         })
     }
 
@@ -736,11 +742,21 @@ pub struct RasterTile {
     pub png: Vec<u8>,
     /// Decoded pixels, for cell colors.
     pub rgba: image::RgbaImage,
+    /// Extra pixels past the tile's right and bottom edges, continuing into its neighbors
+    /// (tiles drawn here can have them): room for an image shifted by part of a cell in
+    /// smooth scrolling. Not part of the tile's [size](RasterTile::size).
+    pub bleed: u32,
 }
 
 impl RasterTile {
     /// Width and height in pixels.
     pub fn size(&self) -> (u32, u32) {
+        let (w, h) = self.rgba.dimensions();
+        (w.saturating_sub(self.bleed).max(1), h.saturating_sub(self.bleed).max(1))
+    }
+
+    /// Width and height of the whole image, bleed included.
+    pub fn full_size(&self) -> (u32, u32) {
         self.rgba.dimensions()
     }
 
@@ -829,7 +845,7 @@ pub fn blend(a: &RasterTile, b: &RasterTile, f: f64) -> Result<RasterTile> {
     use image::ImageEncoder;
     image::codecs::png::PngEncoder::new_with_quality(&mut png, image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::NoFilter)
         .write_image(out.as_raw(), w, h, image::ExtendedColorType::Rgba8)?;
-    Ok(RasterTile { id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png, rgba: out })
+    Ok(RasterTile { bleed: 0, id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png, rgba: out })
 }
 
 /// Whether PNG `bytes` can be transparent: RGBA or gray with alpha, or a palette with a
@@ -870,7 +886,7 @@ pub fn decode(bytes: &[u8]) -> Result<RasterTile> {
     };
     // Move the pixels instead of copying them (no copy at all for RGBA images).
     let rgba = img.into_rgba8();
-    Ok(RasterTile { id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png, rgba })
+    Ok(RasterTile { bleed: 0, id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png, rgba })
 }
 
 /// The most memory a [`RasterStore`] keeps by default (pixels and PNG bytes): 512 MiB holds
@@ -923,7 +939,8 @@ impl RasterStore {
     /// Store a tile (`None`: none there, stored so it isn't fetched again).
     pub fn insert(&mut self, id: TileId, t: Option<RasterTile>) {
         // A missing tile is remembered as a 1x1 transparent image so it isn't fetched again.
-        let t = t.unwrap_or_else(|| RasterTile { id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png: Vec::new(), rgba: image::RgbaImage::new(1, 1) });
+        let t =
+            t.unwrap_or_else(|| RasterTile { bleed: 0, id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png: Vec::new(), rgba: image::RgbaImage::new(1, 1) });
         self.bytes += tile_bytes(&t);
         if let Some(old) = self.tiles.insert(id, Arc::new(t)) {
             self.bytes -= tile_bytes(&old);
@@ -1125,7 +1142,7 @@ impl Widget for RasterCells<'_> {
 mod tests {
     #[test]
     fn cuts_blocks_around_a_hole() {
-        let tile = Arc::new(RasterTile { id: 1, png: Vec::new(), rgba: image::RgbaImage::new(512, 512) });
+        let tile = Arc::new(RasterTile { bleed: 0, id: 1, png: Vec::new(), rgba: image::RgbaImage::new(512, 512) });
         // A block of 20x10 cells showing the whole tile; a panel over its right 5 columns.
         let b = Block { tile, cells: Rect::new(10, 0, 20, 10), src: (0, 0, 512, 512) };
         let parts = cut(&b, Rect::new(25, 0, 30, 40));
@@ -1144,7 +1161,7 @@ mod tests {
 
     #[test]
     fn blends_by_alpha() {
-        let tile = |c: [u8; 4]| RasterTile { id: 0, png: Vec::new(), rgba: image::RgbaImage::from_pixel(2, 2, image::Rgba(c)) };
+        let tile = |c: [u8; 4]| RasterTile { bleed: 0, id: 0, png: Vec::new(), rgba: image::RgbaImage::from_pixel(2, 2, image::Rgba(c)) };
         let rain = tile([0, 100, 200, 255]);
         let clear = tile([0, 0, 0, 0]);
         let half = blend(&rain, &clear, 0.5).unwrap();
@@ -1153,7 +1170,7 @@ mod tests {
         let mixed = blend(&rain, &tile([200, 100, 0, 255]), 0.25).unwrap();
         assert_eq!(*mixed.rgba.get_pixel(1, 1), image::Rgba([50, 100, 150, 255]));
         assert!(png_has_alpha(&half.png), "a real PNG, for the terminal");
-        let missing = RasterTile { id: 0, png: Vec::new(), rgba: image::RgbaImage::new(1, 1) };
+        let missing = RasterTile { bleed: 0, id: 0, png: Vec::new(), rgba: image::RgbaImage::new(1, 1) };
         assert_eq!(blend(&missing, &rain, 1.0).unwrap().size(), (2, 2), "a missing tile counts as clear");
     }
 
@@ -1175,7 +1192,7 @@ mod tests {
         for (x, y, p) in rgba.enumerate_pixels_mut() {
             *p = if x < 2 && y < 2 { image::Rgba([200, 0, 0, 255]) } else { image::Rgba([0, 0, 200, 255]) };
         }
-        let t = RasterTile { id: 0, png: Vec::new(), rgba };
+        let t = RasterTile { bleed: 0, id: 0, png: Vec::new(), rgba };
         assert_eq!(t.average(0, 0, 2, 2), Color::Rgb(200, 0, 0));
         assert_eq!(t.average(1, 1, 1, 1), Color::Rgb(200, 0, 0));
         assert_eq!(t.average(4, 4, 2, 2), Color::Rgb(0, 0, 200));
@@ -1395,7 +1412,7 @@ mod tests {
         let area = Rect::new(0, 1, 150, 45);
         let rz = 14;
         for id in tiles_for(&cam, area, rz) {
-            store.insert(id, Some(RasterTile { id: 0, png: vec![1], rgba: image::RgbaImage::new(256, 256) }));
+            store.insert(id, Some(RasterTile { bleed: 0, id: 0, png: vec![1], rgba: image::RgbaImage::new(256, 256) }));
         }
         let blocks = layout_max(&store, &cam, area, rz, (32, 16));
         let mut covered = vec![0u8; area.width as usize * area.height as usize];
@@ -1423,7 +1440,7 @@ mod tests {
         let area = Rect::new(3, 2, 90, 30);
         let rz = 14;
         for id in tiles_for(&cam, area, rz) {
-            store.insert(id, Some(RasterTile { id: 0, png: vec![1], rgba: image::RgbaImage::new(256, 256) }));
+            store.insert(id, Some(RasterTile { bleed: 0, id: 0, png: vec![1], rgba: image::RgbaImage::new(256, 256) }));
         }
         let blocks = layout(&store, &cam, area, rz);
         let mut covered = vec![0u8; area.width as usize * area.height as usize];
@@ -1444,7 +1461,7 @@ mod pm_pipeline_tests {
 
     #[test]
     fn the_store_keeps_to_its_byte_budget() {
-        let tile = |px: u32| RasterTile { id: 0, png: vec![0; 1000], rgba: image::RgbaImage::new(px, px) };
+        let tile = |px: u32| RasterTile { bleed: 0, id: 0, png: vec![0; 1000], rgba: image::RgbaImage::new(px, px) };
         let mut store = RasterStore::default();
         store.set_budget(40 << 20);
         // 1024 px tiles are 4 MiB of pixels each: about ten fit in 40 MiB.
