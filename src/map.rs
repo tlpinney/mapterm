@@ -2209,20 +2209,54 @@ fn resolve(l: &StyleLayer, c: &Ctx, paint_zoom: f64, bg: Option<Rgba>) -> Option
 }
 
 /// Draw one resolved feature whose parts are already in dots.
-fn draw_resolved(ctx: &mut DrawContext, r: &Resolved, geom: GeomType, dots: &[Vec<(f64, f64)>]) {
+/// A tile polygon's rings as runs without the segments that lie along the tile's border (or
+/// in the margin past it): where the tile cut the polygon. Coordinates are in tile units,
+/// 0 to 1 across the tile.
+fn inside_tile(rings: &[Vec<[f32; 2]>]) -> Vec<Vec<[f32; 2]>> {
+    const E: f32 = 1e-4;
+    let on_border = |a: [f32; 2], b: [f32; 2]| {
+        (a[0] <= E && b[0] <= E) || (a[0] >= 1.0 - E && b[0] >= 1.0 - E) || (a[1] <= E && b[1] <= E) || (a[1] >= 1.0 - E && b[1] >= 1.0 - E)
+    };
+    let mut out = Vec::new();
+    for ring in rings {
+        let mut run: Vec<[f32; 2]> = Vec::new();
+        for s in ring.windows(2) {
+            if on_border(s[0], s[1]) {
+                if run.len() >= 2 {
+                    out.push(std::mem::take(&mut run));
+                }
+                run.clear();
+                continue;
+            }
+            if run.is_empty() {
+                run.push(s[0]);
+            }
+            run.push(s[1]);
+        }
+        if run.len() >= 2 {
+            out.push(run);
+        }
+    }
+    out
+}
+
+/// Draw a resolved feature. `edges`, for a polygon from a vector tile, is its outline with
+/// the segments along the tile's border left out: those are where the tile cut the polygon,
+/// not its edge, and outlining them would draw the tile grid.
+fn draw_resolved(ctx: &mut DrawContext, r: &Resolved, geom: GeomType, dots: &[Vec<(f64, f64)>], edges: Option<&[Vec<(f64, f64)>]>) {
     match r {
         Resolved::Fill { color, outline } => {
             if let Some(c) = color {
                 ctx.fill_dots(dots, *c);
             }
             if let Some(c) = outline {
-                for ring in dots {
+                for ring in edges.unwrap_or(dots) {
                     ctx.line_dots(ring, *c);
                 }
             }
         }
         Resolved::Line { color, width, dash } => {
-            for part in dots {
+            for part in edges.unwrap_or(dots) {
                 ctx.line_px(part, *color, *width, dash.as_deref());
             }
         }
@@ -2458,12 +2492,13 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
                             }
                             for it in tile.layer_items(i, l, cam.zoom, bg, env).iter() {
                                 let f = &tile.features[it.feature as usize];
-                                let dots: Vec<Vec<(f64, f64)>> = f
-                                    .parts
-                                    .iter()
-                                    .map(|part| part.iter().map(|p| vp.dot((*tx as f64 + p[0] as f64) / n, (*ty as f64 + p[1] as f64) / n)).collect())
-                                    .collect();
-                                draw_resolved(ctx, &it.paint, f.geom, &dots);
+                                let to_dots = |parts: &[Vec<[f32; 2]>]| -> Vec<Vec<(f64, f64)>> {
+                                    parts.iter().map(|part| part.iter().map(|p| vp.dot((*tx as f64 + p[0] as f64) / n, (*ty as f64 + p[1] as f64) / n)).collect()).collect()
+                                };
+                                let dots = to_dots(&f.parts);
+                                let outlined = matches!(it.paint, Resolved::Line { .. } | Resolved::Fill { outline: Some(_), .. });
+                                let edges = (f.geom == GeomType::Polygon && outlined).then(|| to_dots(&inside_tile(&f.parts)));
+                                draw_resolved(ctx, &it.paint, f.geom, &dots, edges.as_deref());
                             }
                         }
                     }
@@ -2478,7 +2513,7 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
                             let c = Ctx { zoom: cam.zoom.floor(), geom: f.geom, props: &f.props, state: env.of(&f.id, &f.props) };
                             let Some(r) = resolve(l, &c, cam.zoom, bg) else { continue };
                             let dots: Vec<Vec<(f64, f64)>> = f.parts.iter().map(|p| p.iter().map(|&(x, y)| vp.dot(x, y)).collect()).collect();
-                            draw_resolved(ctx, &r, f.geom, &dots);
+                            draw_resolved(ctx, &r, f.geom, &dots, None);
                         }
                     }
                     Some(MapSource::Raster(r)) if map.raster_mode == RasterMode::Cells => {
@@ -2530,6 +2565,18 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn outlines_leave_out_the_tile_border() {
+        // Water reaching past the tile's right edge into its margin: the coast is the left
+        // side only; the right edge and the margin are where the tile cut it.
+        let ring = vec![[0.5, -0.1], [0.4, 0.5], [0.5, 1.1], [1.1, 1.1], [1.1, -0.1], [0.5, -0.1]];
+        let runs = super::inside_tile(&[ring]);
+        assert_eq!(runs, vec![vec![[0.5, -0.1], [0.4, 0.5], [0.5, 1.1]]], "{runs:?}");
+        // A lake inside the tile keeps its whole outline.
+        let lake = vec![[0.2, 0.2], [0.3, 0.2], [0.3, 0.3], [0.2, 0.2]];
+        assert_eq!(super::inside_tile(std::slice::from_ref(&lake)), vec![lake]);
+    }
+
     use super::*;
     use crate::layer::DrawContext;
     use serde_json::json;

@@ -8,6 +8,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Radar tiles are kept on disk, in one database (`rainviewer.sqlite`), by scan: a scan never
+  changes, so it's never asked for twice; scans over three hours old are removed. NWS zone
+  outlines saved at full detail are rewritten simplified (the cache went from 42 to 13 MB
+  here). `RasterSource::store` takes any `TileStore`.
 - Weather radar: `--radar` draws RainViewer's precipitation radar over the map (no key),
   the last two hours in 10-minute scans: `space` plays them in a loop or pauses, `,` and
   `.` step, `R` hides it; the status line shows the scan's time. Playing, each scan fades
@@ -153,6 +157,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- Outlines of polygons from vector tiles no longer draw the tile grid: the segments where a
+  tile cut a polygon (its border and the margin past it) are left out, as MapLibre leaves
+  them out by clipping each tile. Seen as straight lines across the sea in
+  `mapterm-weather`, which outlines water for its coastline.
 - `--alerts` used a lot of CPU and memory while zone outlines arrived (92% of a core and
   760 MB on a first run): the layer was rebuilt from every outline every 2 seconds. Outlines
   are now simplified as they arrive (`nws::simplify`, to about 300 m: finer than a cell
