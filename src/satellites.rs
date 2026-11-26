@@ -39,6 +39,9 @@ pub struct Sat {
     pub eccentricity: f64,
     /// Who owns it, from the satellite catalog (see [`load_catalog`]) once that's in.
     pub catalog: Option<CatalogEntry>,
+    /// What it's for, from CelesTrak's purpose groups (see [`load_missions`]) once they're
+    /// in; [`Sat::mission`] also knows some by name.
+    pub group_mission: Option<Mission>,
     constants: sgp4::Constants,
     /// The elements' epoch, Unix seconds.
     epoch: f64,
@@ -128,6 +131,7 @@ impl Sat {
             inclination: elements.inclination,
             eccentricity: elements.eccentricity,
             catalog: None,
+            group_mission: None,
             constants,
             epoch,
         })
@@ -162,7 +166,7 @@ impl Sat {
     /// Who runs it, when the name says (the elements don't): a few well-known operators,
     /// with their former names so a search for either finds them.
     pub fn operator(&self) -> Option<&'static str> {
-        const OPERATORS: [(&[&str], &str); 12] = [
+        const OPERATORS: [(&[&str], &str); 24] = [
             (&["WORLDVIEW", "LEGION", "GEOEYE", "QUICKBIRD", "IKONOS"], "Vantor (Maxar, formerly DigitalGlobe)"),
             (&["FLOCK", "SKYSAT", "PELICAN", "TANAGER"], "Planet"),
             (&["SENTINEL"], "ESA (Copernicus)"),
@@ -175,6 +179,18 @@ impl Sat {
             (&["GPS"], "US Space Force (GPS)"),
             (&["ICEYE"], "ICEYE"),
             (&["CAPELLA"], "Capella Space"),
+            (&["UMBRA"], "Umbra"),
+            (&["STRIX"], "Synspective"),
+            (&["QPS-SAR"], "iQPS"),
+            (&["NUSAT"], "Satellogic"),
+            (&["LEMUR"], "Spire"),
+            (&["PLEIADES", "SPOT "], "Airbus"),
+            (&["JILIN"], "Chang Guang Satellite"),
+            (&["SUPERVIEW"], "SuperView (China Siwei)"),
+            (&["KOMPSAT", "ARIRANG"], "KARI (Korea)"),
+            (&["CARTOSAT"], "ISRO (India)"),
+            (&["HAWK-"], "HawkEye 360"),
+            (&["RADARSAT", "RCM-"], "Canadian Space Agency"),
         ];
         OPERATORS.iter().find(|(prefixes, _)| prefixes.iter().any(|p| self.name.starts_with(p))).map(|(_, op)| *op)
     }
@@ -208,6 +224,12 @@ impl Sat {
         } else {
             OrbitClass::BeyondGeo
         }
+    }
+
+    /// What it's for: radar imaging and the big communications constellations by name, then
+    /// CelesTrak's purpose groups, else [`Mission::Other`].
+    pub fn mission(&self) -> Mission {
+        mission_by_name(&self.name).or(self.group_mission).unwrap_or(Mission::Other)
     }
 
     /// Minutes per orbit.
@@ -506,6 +528,177 @@ pub fn owner_aliases(code: &str) -> &'static str {
 
 include!("satellites_owners.rs");
 
+/// What a satellite is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Mission {
+    /// Space stations and the craft that visit them.
+    SpaceStation,
+    /// Military (CelesTrak's military group).
+    Military,
+    /// Navigation: GPS, GLONASS, Galileo, BeiDou, augmentation.
+    Navigation,
+    /// Weather.
+    Weather,
+    /// Earth observation by radar (synthetic aperture radar).
+    Radar,
+    /// Earth observation, optical and other.
+    EarthObservation,
+    /// Science and geodesy.
+    Science,
+    /// Engineering and technology demonstrations.
+    Technology,
+    /// Amateur radio and education.
+    Amateur,
+    /// Communications.
+    Communications,
+    /// None of the above, or not known.
+    Other,
+}
+
+impl Mission {
+    /// Every mission, in legend order.
+    pub const ALL: [Mission; 11] = [
+        Mission::Communications,
+        Mission::EarthObservation,
+        Mission::Radar,
+        Mission::Weather,
+        Mission::Navigation,
+        Mission::Science,
+        Mission::Technology,
+        Mission::Amateur,
+        Mission::Military,
+        Mission::SpaceStation,
+        Mission::Other,
+    ];
+
+    /// Its name.
+    pub fn label(self) -> &'static str {
+        match self {
+            Mission::Communications => "communications",
+            Mission::EarthObservation => "Earth observation",
+            Mission::Radar => "radar imaging (SAR)",
+            Mission::Weather => "weather",
+            Mission::Navigation => "navigation",
+            Mission::Science => "science",
+            Mission::Technology => "technology",
+            Mission::Amateur => "amateur and education",
+            Mission::Military => "military",
+            Mission::SpaceStation => "space station",
+            Mission::Other => "other or unknown",
+        }
+    }
+
+    /// Its color on the map.
+    pub fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            Mission::Communications => (0x56, 0xd4, 0xdd),
+            Mission::EarthObservation => (0x7e, 0xe7, 0x87),
+            Mission::Radar => (0xff, 0xa6, 0x57),
+            Mission::Weather => (0x79, 0xc0, 0xff),
+            Mission::Navigation => (0xf2, 0xcc, 0x60),
+            Mission::Science => (0xd2, 0xa8, 0xff),
+            Mission::Technology => (0xb0, 0xb8, 0xc0),
+            Mission::Amateur => (0xff, 0x6b, 0xcb),
+            Mission::Military => (0xff, 0x7b, 0x72),
+            Mission::SpaceStation => (0xff, 0xff, 0xff),
+            Mission::Other => (0x6e, 0x76, 0x81),
+        }
+    }
+}
+
+/// Radar-imaging (SAR) satellites by name: prefixes checked against CelesTrak's names (exact
+/// enough not to catch COSMOS, TIGRISAT or SARAL).
+const SAR_PREFIXES: [&str; 22] = [
+    "UMBRA",
+    "ICEYE",
+    "CAPELLA",
+    "SENTINEL-1",
+    "RADARSAT",
+    "RCM-",
+    "TERRASAR",
+    "TANDEM-X",
+    "COSMO-SKYMED",
+    "CSG-",
+    "SAOCOM",
+    "NISAR",
+    "ALOS-2",
+    "ALOS-4",
+    "GAOFEN-3",
+    "STRIX",
+    "QPS-SAR",
+    "PAZ",
+    "ARIRANG-5",
+    "RISAT-",
+    "NOVASAR",
+    "SAR-LUPE",
+];
+
+/// Constellations whose purpose the name says (so their large groups needn't be fetched).
+const COMMS_PREFIXES: [&str; 7] = ["STARLINK", "ONEWEB", "KUIPER", "QIANFAN", "IRIDIUM", "GLOBALSTAR", "ORBCOMM"];
+
+/// What a satellite is for, when its name says: SAR missions and the big communications
+/// constellations.
+pub fn mission_by_name(name: &str) -> Option<Mission> {
+    if SAR_PREFIXES.iter().any(|p| name.starts_with(p)) {
+        Some(Mission::Radar)
+    } else if COMMS_PREFIXES.iter().any(|p| name.starts_with(p)) {
+        Some(Mission::Communications)
+    } else {
+        None
+    }
+}
+
+/// CelesTrak's purpose groups and what they mean, most specific first (a satellite in
+/// several takes the first): stations, military, navigation, weather, Earth observation,
+/// science, technology, amateur, then communications.
+pub const MISSION_GROUPS: [(&str, Mission); 21] = [
+    ("stations", Mission::SpaceStation),
+    ("military", Mission::Military),
+    ("gnss", Mission::Navigation),
+    ("sbas", Mission::Navigation),
+    ("weather", Mission::Weather),
+    ("resource", Mission::EarthObservation),
+    ("planet", Mission::EarthObservation),
+    ("dmc", Mission::EarthObservation),
+    ("spire", Mission::EarthObservation),
+    ("science", Mission::Science),
+    ("geodetic", Mission::Science),
+    ("engineering", Mission::Technology),
+    ("amateur", Mission::Amateur),
+    ("satnogs", Mission::Amateur),
+    ("education", Mission::Amateur),
+    ("intelsat", Mission::Communications),
+    ("ses", Mission::Communications),
+    ("eutelsat", Mission::Communications),
+    ("telesat", Mission::Communications),
+    ("x-comm", Mission::Communications),
+    ("other-comm", Mission::Communications),
+];
+
+/// What CelesTrak's purpose groups say each satellite is for, by NORAD number: each group's
+/// catalog (kept a day, as the owners are), fetched one after another with a pause between.
+/// Groups that fail are named in the second value; the rest still count.
+pub async fn load_missions() -> (HashMap<u64, Mission>, Vec<String>) {
+    let (mut by, mut notes) = (HashMap::new(), Vec::new());
+    for (group, mission) in MISSION_GROUPS {
+        // A pause between requests to CelesTrak, not between reads of the cache.
+        let cached = age(&cache_file(&format!("{group}-satcat.csv"))).is_some_and(|a| a < Duration::from_secs(24 * 3600));
+        match load_catalog(group).await {
+            Ok(cat) => {
+                for n in cat.keys() {
+                    // The first (most specific) group wins.
+                    by.entry(*n).or_insert(mission);
+                }
+            }
+            Err(e) => notes.push(format!("{group}: {e:#}")),
+        }
+        if !cached {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+    }
+    (by, notes)
+}
+
 /// Colors for the six owners with the most satellites (Starlink counted on its own), in
 /// order; everyone else is [`OTHER`].
 pub const COUNTRY_COLORS: [(u8, u8, u8); 6] =
@@ -528,6 +721,8 @@ pub enum Coloring {
     Orbit,
     /// By owner: the biggest owners' colors, by SATCAT code; the rest [`OTHER`].
     Country(Vec<(String, (u8, u8, u8))>),
+    /// By what they're for ([`Sat::mission`]).
+    Mission,
 }
 
 /// The standard orbit classes (as NASA and ESA use them), from a satellite's elements.
@@ -613,6 +808,7 @@ impl Coloring {
     pub fn rgb(&self, s: &Sat, _alt_km: f64) -> (u8, u8, u8) {
         match self {
             Coloring::Orbit => s.orbit_class().rgb(),
+            Coloring::Mission => s.mission().rgb(),
             Coloring::Country(top) => owner_group(s).and_then(|g| top.iter().find(|(code, _)| code == g)).map_or(OTHER, |(_, rgb)| *rgb),
         }
     }
@@ -632,6 +828,16 @@ impl Coloring {
                     let label = if *c == OrbitClass::BeyondGeo { c.short().to_string() } else { format!("{} {}", c.short(), c.long()) };
                     l.entry("●", rgb(c.rgb()), label, n.get(c).copied())
                 })
+            }
+            Coloring::Mission => {
+                let mut n: HashMap<Mission, usize> = HashMap::new();
+                for s in sats {
+                    *n.entry(s.mission()).or_insert(0) += 1;
+                }
+                Mission::ALL
+                    .iter()
+                    .filter(|m| n.contains_key(m))
+                    .fold(crate::legend::Legend::new("satellites by mission"), |l, m| l.entry("●", rgb(m.rgb()), m.label(), n.get(m).copied()))
             }
             Coloring::Country(top) => {
                 let mut n: HashMap<&str, usize> = HashMap::new();
@@ -1083,6 +1289,26 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         assert_eq!(orbit("2.00563", ".01", "55.0").orbit_class(), OrbitClass::Meo, "GPS");
         assert_eq!(orbit("2.00612", ".72", "63.4").orbit_class(), OrbitClass::Heo, "Molniya");
         assert_eq!(orbit("0.5", ".01", "0.0").orbit_class(), OrbitClass::BeyondGeo);
+    }
+
+    #[test]
+    fn missions_by_name_and_group() {
+        assert_eq!(mission_by_name("UMBRA-07"), Some(Mission::Radar));
+        assert_eq!(mission_by_name("ICEYE-X2"), Some(Mission::Radar));
+        assert_eq!(mission_by_name("ARIRANG-5 (KOMPSAT-5)"), Some(Mission::Radar));
+        assert_eq!(mission_by_name("RISAT-2B"), Some(Mission::Radar));
+        // Near misses that aren't SAR.
+        assert_eq!(mission_by_name("COSMOS 2385"), None);
+        assert_eq!(mission_by_name("TIGRISAT"), None);
+        assert_eq!(mission_by_name("SARAL"), None);
+        assert_eq!(mission_by_name("STARLINK-5859"), Some(Mission::Communications));
+        let mut iss = parse_csv(CSV).remove(0);
+        assert_eq!(iss.mission(), Mission::Other, "not known until the groups are in");
+        iss.group_mission = Some(Mission::SpaceStation);
+        assert_eq!(iss.mission(), Mission::SpaceStation);
+        // Most specific group first.
+        let order: Vec<Mission> = MISSION_GROUPS.iter().map(|(_, m)| *m).collect();
+        assert!(order.iter().position(|m| *m == Mission::Military) < order.iter().position(|m| *m == Mission::Communications));
     }
 
     #[test]

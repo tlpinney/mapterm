@@ -111,9 +111,21 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
   `russia`, `india`, or a catalog code such as `PRC`, `CIS`, `ESA`) and choose it to show
   only its satellites; "All countries" shows them all again. `--sats-country PRC,JPN`
   starts that way.
-- **`o`** colors satellites by owner instead of orbit height (`--sats-color country` starts
-  that way): the six with the most satellites get a color each (Starlink on its own, apart
-  from the rest of the USA), and everyone else is gray, as "other" in the legend.
+- **`o`** cycles how satellites are colored: by orbit class, by owner (the six with the
+  most satellites get a color each, Starlink on its own apart from the rest of the USA,
+  everyone else "other"), or by mission (`--sats-color orbit|country|mission` starts with
+  one).
+- **Missions:** communications, Earth observation, radar imaging (SAR), weather,
+  navigation, science, technology, amateur and education, military, space station.
+  CelesTrak groups satellites by purpose (weather, resource, gnss, science, military...),
+  so mapterm reads those groups' catalogs (kept a day; a satellite in several takes the most
+  specific), and knows radar imaging by name (Umbra, ICEYE, Capella, Sentinel-1, RADARSAT,
+  TerraSAR-X, COSMO-SkyMed, SAOCOM, NISAR, ALOS, Gaofen-3, StriX, QPS-SAR and more, each
+  name checked against CelesTrak's) and the big communications constellations by name.
+- **Filter by mission or operator** from the finder too: `sar`, `weather`, `navigation`,
+  `imaging` (Earth observation and SAR together), or an operator: `planet`, `vantor`,
+  `iceye`, `umbra`, `spire`, `airbus`... Filters combine (Chinese imaging satellites:
+  choose China, then imaging); "Show all satellites" clears them.
 
 ## Legends
 

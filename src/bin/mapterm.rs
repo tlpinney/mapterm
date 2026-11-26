@@ -80,9 +80,11 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 visual, stations, starlink, resource, amateur, weather, gnss, ...).
                 p finds one by name or operator
                 Elements are cached for 2 hours, as CelesTrak asks
-  --sats-color orbit|country
-                color satellites by orbit height (default) or by owner (the six with
-                the most in a color each, Starlink on its own, everyone else gray); o switches while it runs
+  --sats-color orbit|country|mission
+                color satellites by orbit class (default: LEO, MEO, GEO, GSO, HEO), by
+                owner (the six with the most in a color each, Starlink on its own), or by
+                mission (communications, Earth observation, radar/SAR, weather,
+                navigation, science, ...); o cycles through them while it runs
   --sats-country CODE[,CODE]
                 only the satellites of these owners: SATCAT codes (US, PRC, CIS, JPN, UK,
                 ESA, ...) or names (china, russia, japan); also from the p finder
@@ -176,8 +178,8 @@ struct Args {
     mapbox_token_cmd: Option<String>,
     /// --adsb: the live aircraft feed (lol, fi or a URL template).
     adsb: Option<String>,
-    /// --sats-color country: color satellites by owner instead of orbit.
-    sats_by_country: bool,
+    /// --sats-color: color satellites by orbit, owner or mission.
+    sats_color: SatColor,
     /// --sats-country: owner codes or names to show satellites of.
     sats_country: Vec<String>,
     /// --sats: CelesTrak groups to show.
@@ -236,7 +238,7 @@ fn args() -> Result<Args> {
         ais: false,
         sats: None,
         sats_country: Vec::new(),
-        sats_by_country: false,
+        sats_color: SatColor::Orbit,
         ais_key_cmd: None,
         at_here: false,
         location_cmd: None,
@@ -353,10 +355,11 @@ fn args() -> Result<Args> {
                 a.sats = Some(groups);
             }
             "--sats-color" => {
-                a.sats_by_country = match it.next().context("--sats-color orbit|country")?.as_str() {
-                    "country" | "owner" => true,
-                    "orbit" => false,
-                    other => bail!("--sats-color is orbit or country, not {other:?}"),
+                a.sats_color = match it.next().context("--sats-color orbit|country|mission")?.as_str() {
+                    "orbit" => SatColor::Orbit,
+                    "country" | "owner" => SatColor::Country,
+                    "mission" | "purpose" => SatColor::Mission,
+                    other => bail!("--sats-color is orbit, country or mission, not {other:?}"),
                 };
             }
             "--sats-country" => {
@@ -580,8 +583,12 @@ const AIS_MIN_ZOOM: f64 = 7.0;
 /// Something live the finder can go to.
 #[derive(Clone, Debug, PartialEq)]
 enum Target {
-    /// A satellite owner (SATCAT code), or None: all of them again.
+    /// A satellite owner (SATCAT code), or None: all satellites again.
     Country(Option<String>),
+    /// Satellite missions (one, or imaging: Earth observation and radar together).
+    Missions(Vec<mapterm::satellites::Mission>),
+    /// A satellite operator (Planet, Vantor...).
+    Operator(&'static str),
     Sat(u64),
     Ship(u32),
     Plane(String),
@@ -606,7 +613,7 @@ fn find(
     query: &str,
     sats: &[mapterm::satellites::Sat],
     hidden: &[mapterm::satellites::Sat],
-    country: &[String],
+    filter: &SatFilter,
     aircraft: &mapterm::adsb::Tracks,
     fleet: &mapterm::ais::Fleet,
 ) -> Vec<Hit> {
@@ -618,8 +625,49 @@ fn find(
             *owners.entry(c.owner.as_str()).or_insert(0) += 1;
         }
     }
-    if !country.is_empty() && mapterm::fuzzy::score(query, "all countries every satellite").is_some() {
-        v.push((10_000, Hit { target: Target::Country(None), name: "All countries".into(), detail: format!("{} satellites", sats.len() + hidden.len()) }));
+    if filter.on() && mapterm::fuzzy::score(query, "show all satellites every country mission operator").is_some() {
+        v.push((
+            10_000,
+            Hit { target: Target::Country(None), name: "Show all satellites".into(), detail: format!("{} satellites", sats.len() + hidden.len()) },
+        ));
+    }
+    // Missions too, with how many each has: "sar", "weather", "comms".
+    if !query.trim().is_empty() {
+        let mut by: std::collections::HashMap<mapterm::satellites::Mission, usize> = std::collections::HashMap::new();
+        for s in sats.iter().chain(hidden) {
+            *by.entry(s.mission()).or_insert(0) += 1;
+        }
+        for (m, n) in &by {
+            if let Some(sc) = mapterm::fuzzy::score(query, &format!("{} {}", m.label(), mission_words(*m))) {
+                v.push((sc + 40, Hit { target: Target::Missions(vec![*m]), name: m.label().to_string(), detail: format!("mission · {n} satellites") }));
+            }
+        }
+        // Imaging: optical and radar together.
+        use mapterm::satellites::Mission::{EarthObservation, Radar};
+        if let Some(sc) = mapterm::fuzzy::score(query, "imaging imagery images earth observation eo sar") {
+            let n = by.get(&EarthObservation).unwrap_or(&0) + by.get(&Radar).unwrap_or(&0);
+            v.push((
+                sc + 45,
+                Hit {
+                    target: Target::Missions(vec![EarthObservation, Radar]),
+                    name: "imaging (Earth observation + SAR)".into(),
+                    detail: format!("mission · {n} satellites"),
+                },
+            ));
+        }
+        // Operators, with how many each has: "planet", "vantor", "digitalglobe".
+        let mut ops: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+        for s in sats.iter().chain(hidden) {
+            if let Some(op) = s.operator() {
+                *ops.entry(op).or_insert(0) += 1;
+            }
+        }
+        for (op, n) in &ops {
+            if let Some(sc) = mapterm::fuzzy::score(query, op) {
+                let name = op.split(" (").next().unwrap_or(op);
+                v.push((sc + 42, Hit { target: Target::Operator(op), name: name.to_string(), detail: format!("operator · {n} satellites") }));
+            }
+        }
     }
     if !query.trim().is_empty() {
         let q = query.trim().to_lowercase();
@@ -654,7 +702,8 @@ fn find(
                 )
             })
             .map(|sc| sc - 12);
-        if let Some(sc) = by_name.max(by_operator).max(by_country) {
+        let by_mission = mapterm::fuzzy::score(query, s.mission().label()).map(|sc| sc - 12);
+        if let Some(sc) = by_name.max(by_operator).max(by_country).max(by_mission) {
             let detail = match s.operator() {
                 Some(op) => format!("{} · {}", op.split(" (").next().unwrap_or(op), s.norad),
                 None => format!("satellite · {}", s.norad),
@@ -682,9 +731,39 @@ fn find(
     v.into_iter().take(200).map(|(_, h)| h).collect()
 }
 
-/// The satellites' coloring (by owner or by orbit) and its legend.
-fn recolor(sats: &[mapterm::satellites::Sat], by_country: bool) -> (mapterm::satellites::Coloring, Option<mapterm::legend::Legend>) {
-    let c = if by_country { mapterm::satellites::Coloring::by_country(sats) } else { mapterm::satellites::Coloring::Orbit };
+/// How satellites are colored (o cycles through them).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SatColor {
+    Orbit,
+    Country,
+    Mission,
+}
+
+/// Other words for a mission, for the finder.
+fn mission_words(m: mapterm::satellites::Mission) -> &'static str {
+    use mapterm::satellites::Mission::*;
+    match m {
+        Communications => "comms telecom internet broadband",
+        EarthObservation => "eo imaging optical earth observation",
+        Radar => "sar synthetic aperture radar",
+        Weather => "meteorology met",
+        Navigation => "gps gnss positioning",
+        Science => "research geodesy",
+        Technology => "engineering demo",
+        Amateur => "ham radio education cubesat",
+        Military => "defense defence",
+        SpaceStation => "iss crew",
+        Other => "unknown",
+    }
+}
+
+/// The satellites' coloring (by orbit, owner or mission) and its legend.
+fn recolor(sats: &[mapterm::satellites::Sat], how: SatColor) -> (mapterm::satellites::Coloring, Option<mapterm::legend::Legend>) {
+    let c = match how {
+        SatColor::Orbit => mapterm::satellites::Coloring::Orbit,
+        SatColor::Country => mapterm::satellites::Coloring::by_country(sats),
+        SatColor::Mission => mapterm::satellites::Coloring::Mission,
+    };
     let l = (!sats.is_empty()).then(|| c.legend(sats));
     (c, l)
 }
@@ -706,13 +785,55 @@ fn punch(rgba: &mut [u8], w: u32, area: Rect, holes: &[Rect], cell_px: (f64, f64
     }
 }
 
-/// Keep `sats` to the owners in `country` (all when it's empty), the rest in `hidden`.
-fn filter_sats(sats: &mut Vec<mapterm::satellites::Sat>, hidden: &mut Vec<mapterm::satellites::Sat>, country: &[String]) {
+/// Which satellites to show: owners, missions and an operator (each empty for any), from
+/// the finder or --sats-country.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct SatFilter {
+    countries: Vec<String>,
+    missions: Vec<mapterm::satellites::Mission>,
+    operator: Option<&'static str>,
+}
+
+impl SatFilter {
+    /// Whether it leaves any out.
+    fn on(&self) -> bool {
+        !self.countries.is_empty() || !self.missions.is_empty() || self.operator.is_some()
+    }
+
+    /// Whether `s` is shown.
+    fn keeps(&self, s: &mapterm::satellites::Sat) -> bool {
+        (self.countries.is_empty() || s.catalog.as_ref().is_some_and(|c| self.countries.contains(&c.owner)))
+            && (self.missions.is_empty() || self.missions.contains(&s.mission()))
+            && self.operator.is_none_or(|op| s.operator() == Some(op))
+    }
+
+    /// What it shows, for the status line: " · China · imaging", or nothing.
+    fn describe(&self) -> String {
+        let mut out = String::new();
+        match self.countries.as_slice() {
+            [] => {}
+            [one] => out += &format!(" · {}", country_short(one)),
+            many => out += &format!(" · {} countries", many.len()),
+        }
+        match self.missions.as_slice() {
+            [] => {}
+            [one] => out += &format!(" · {}", one.label()),
+            _ => out += " · imaging",
+        }
+        if let Some(op) = self.operator {
+            out += &format!(" · {}", op.split(" (").next().unwrap_or(op));
+        }
+        out
+    }
+}
+
+/// Keep `sats` to those `filter` shows, the rest in `hidden`.
+fn filter_sats(sats: &mut Vec<mapterm::satellites::Sat>, hidden: &mut Vec<mapterm::satellites::Sat>, filter: &SatFilter) {
     sats.append(hidden);
-    if country.is_empty() {
+    if !filter.on() {
         return;
     }
-    let (keep, rest): (Vec<_>, Vec<_>) = std::mem::take(sats).into_iter().partition(|s| s.catalog.as_ref().is_some_and(|c| country.contains(&c.owner)));
+    let (keep, rest): (Vec<_>, Vec<_>) = std::mem::take(sats).into_iter().partition(|s| filter.keeps(s));
     *sats = keep;
     *hidden = rest;
 }
@@ -892,6 +1013,7 @@ fn draw_sat(
     l.push(Line::from(vec![key("height"), Span::raw(between), Span::styled("  perigee to apogee", dim)]));
     l.push(Line::from(vec![key("period"), Span::raw(format!("{:.1} min", s.period_min())), Span::styled(format!("  {:.1}° inclined", s.inclination), dim)]));
     l.push(Line::from(vec![key("position"), Span::raw(format!("{:.3}, {:.3}", fix.lat, fix.lon))]));
+    l.push(Line::from(vec![key("mission"), Span::raw(s.mission().label())]));
     if let Some(op) = s.operator() {
         l.push(Line::from(vec![key("operator"), Span::raw(op)]));
     }
@@ -1824,8 +1946,11 @@ async fn main() -> Result<()> {
     let mut sats: Vec<mapterm::satellites::Sat> = Vec::new();
     let mut sats_age = 0.0f64;
     let (otx, mut orx) = mpsc::unbounded_channel::<(Vec<mapterm::satellites::Sat>, f64, Vec<String>)>();
+    // What they're for, from CelesTrak's purpose groups: after the satellites are up (the
+    // first time a day it's some twenty small requests).
+    let (mtx, mut mrx) = mpsc::unbounded_channel::<(std::collections::HashMap<u64, mapterm::satellites::Mission>, Vec<String>)>();
     if let Some(groups) = a.sats.clone() {
-        let otx = otx.clone();
+        let (otx, mtx) = (otx.clone(), mtx.clone());
         tokio::spawn(async move {
             loop {
                 let (mut all, mut oldest, mut notes) = (Vec::new(), 0.0f64, Vec::new());
@@ -1854,6 +1979,9 @@ async fn main() -> Result<()> {
                 if otx.send((all, oldest, notes)).is_err() {
                     return;
                 }
+                if mtx.send(mapterm::satellites::load_missions().await).is_err() {
+                    return;
+                }
                 tokio::time::sleep(Duration::from_secs(2 * 3600 + 60)).await;
             }
         });
@@ -1867,7 +1995,7 @@ async fn main() -> Result<()> {
     let mut sat_dots = false;
     // How satellites are colored (o switches), and what the colors mean; the legends' boxes
     // (L shows or hides them), which the images under the text keep clear of.
-    let mut sats_by_country = a.sats_by_country;
+    let mut sat_color = a.sats_color;
     let mut sat_coloring = mapterm::satellites::Coloring::Orbit;
     let mut sat_legend: Option<mapterm::legend::Legend> = None;
     let mut show_legend = true;
@@ -1875,7 +2003,7 @@ async fn main() -> Result<()> {
     // `p`: the fzf-style finder over everything live (satellites, aircraft, ships).
     let mut finder: Option<Finder> = None;
     // Satellites of other owners, set aside while a country filter is on.
-    let mut sat_country: Vec<String> = a.sats_country.clone();
+    let mut sat_filter = SatFilter { countries: a.sats_country.clone(), ..SatFilter::default() };
     let mut sats_hidden: Vec<mapterm::satellites::Sat> = Vec::new();
     let mut sat_dots_drawn = Instant::now();
     // Satellite positions by SGP4 once a second, interpolated between; and how often to
@@ -2180,11 +2308,7 @@ async fn main() -> Result<()> {
                 }
                 if a.sats.is_some() {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
-                    let of = match sat_country.as_slice() {
-                        [] => String::new(),
-                        [one] => format!(" · {}", country_short(one)),
-                        many => format!(" · {} countries", many.len()),
-                    };
+                    let of = sat_filter.describe();
                     spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
                 }
                 if ais_key.is_some() {
@@ -2694,17 +2818,32 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                Some((missions, notes)) = mrx.recv() => {
+                    dlog(|| format!("sats: {} missions from groups; {notes:?}", missions.len()));
+                    for s in sats.iter_mut().chain(sats_hidden.iter_mut()) {
+                        s.group_mission = missions.get(&s.norad).copied();
+                    }
+                    if !sat_filter.missions.is_empty() {
+                        filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                    }
+                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                }
                 Some((loaded, age, notes)) = orx.recv() => {
                     dlog(|| format!("sats: {} loaded, {:.0} min old; {notes:?}", loaded.len(), age / 60.0));
                     if !notes.is_empty() {
                         note = Some((Instant::now(), notes.join("; ")));
                     }
                     if !loaded.is_empty() {
+                        let known: std::collections::HashMap<u64, mapterm::satellites::Mission> =
+                            sats.iter().chain(sats_hidden.iter()).filter_map(|s| s.group_mission.map(|m| (s.norad, m))).collect();
                         sats = loaded;
+                        for s in &mut sats {
+                            s.group_mission = known.get(&s.norad).copied();
+                        }
                         sats_hidden.clear();
                         sats_age = age;
-                        filter_sats(&mut sats, &mut sats_hidden, &sat_country);
-                        (sat_coloring, sat_legend) = recolor(&sats, sats_by_country);
+                        filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                        (sat_coloring, sat_legend) = recolor(&sats, sat_color);
                     }
                 }
                 Some(ev) = srx_ais.recv() => {
@@ -2854,14 +2993,40 @@ async fn main() -> Result<()> {
                                                 let target = hit.target.clone();
                                                 let now = unix_now();
                                                 // A country: filter the satellites to it (or show them all again).
-                                                if let Target::Country(code) = &target {
-                                                    sat_country = code.iter().cloned().collect();
-                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_country);
-                                                    (sat_coloring, sat_legend) = recolor(&sats, sats_by_country);
+                                                if let Target::Missions(ms) = &target {
+                                                    sat_filter.missions = ms.clone();
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
                                                     if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
                                                         selected_sat = None;
                                                     }
-                                                    let what = code.as_deref().map_or("all countries".to_string(), country_short);
+                                                    note = Some((Instant::now(), format!("{} satellites:{}", sats.len(), sat_filter.describe())));
+                                                    finder = None;
+                                                    continue;
+                                                }
+                                                if let Target::Operator(op) = &target {
+                                                    sat_filter.operator = Some(op);
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                                    if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
+                                                        selected_sat = None;
+                                                    }
+                                                    note = Some((Instant::now(), format!("{} satellites:{}", sats.len(), sat_filter.describe())));
+                                                    finder = None;
+                                                    continue;
+                                                }
+                                                if let Target::Country(code) = &target {
+                                                    // A country filters to it; "Show all satellites" clears both filters.
+                                                    if code.is_none() {
+                                                        sat_filter = SatFilter::default();
+                                                    }
+                                                    sat_filter.countries = code.iter().cloned().collect();
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                                    if selected_sat.is_some_and(|n| !sats.iter().any(|s| s.norad == n)) {
+                                                        selected_sat = None;
+                                                    }
+                                                    let what = code.as_deref().map_or("all".to_string(), country_short);
                                                     note = Some((Instant::now(), format!("{} satellites: {what}", sats.len())));
                                                     finder = None;
                                                     continue;
@@ -2870,19 +3035,19 @@ async fn main() -> Result<()> {
                                                 if let Target::Sat(n) = &target
                                                     && sats_hidden.iter().any(|s| s.norad == *n)
                                                 {
-                                                    sat_country.clear();
-                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_country);
-                                                    (sat_coloring, sat_legend) = recolor(&sats, sats_by_country);
+                                                    sat_filter = SatFilter::default();
+                                                    filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
+                                                    (sat_coloring, sat_legend) = recolor(&sats, sat_color);
                                                 }
                                                 let at = match &target {
                                                     Target::Sat(n) => sats.iter().find(|s| s.norad == *n).and_then(|s| s.at(now)).map(|f| (f.lon, f.lat)),
                                                     Target::Ship(m) => fleet.get(*m, now - AIS_DELAY).map(|(_, p)| (p.lon, p.lat)),
                                                     Target::Plane(h) => aircraft.get(h, now - adsb_delay).map(|(_, p, _)| (p.lon, p.lat)),
-                                                    Target::Country(_) => None,
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) => None,
                                                 };
                                                 (selected, selected_ship, selected_sat) = (None, None, None);
                                                 match target {
-                                                    Target::Country(_) => {}
+                                                    Target::Country(_) | Target::Missions(_) | Target::Operator(_) => {}
                                                     Target::Sat(n) => selected_sat = Some(n),
                                                     Target::Ship(m) => selected_ship = Some(m),
                                                     Target::Plane(h) => selected = Some(h),
@@ -2897,7 +3062,7 @@ async fn main() -> Result<()> {
                                         _ => {}
                                     }
                                     if refilter && let Some(fd) = finder.as_mut() {
-                                        fd.hits = find(&fd.query, &sats, &sats_hidden, &sat_country, &aircraft, &fleet);
+                                        fd.hits = find(&fd.query, &sats, &sats_hidden, &sat_filter, &aircraft, &fleet);
                                         fd.sel = 0;
                                     }
                                     continue;
@@ -2959,16 +3124,21 @@ async fn main() -> Result<()> {
                                 }
                                 match k.code {
                                     KeyCode::Char('o') if !sats.is_empty() => {
-                                        sats_by_country = !sats_by_country;
-                                        (sat_coloring, sat_legend) = recolor(&sats, sats_by_country);
-                                        note = Some((Instant::now(), format!("satellites colored by {}", if sats_by_country { "country" } else { "orbit" })));
+                                        sat_color = match sat_color {
+                                            SatColor::Orbit => SatColor::Country,
+                                            SatColor::Country => SatColor::Mission,
+                                            SatColor::Mission => SatColor::Orbit,
+                                        };
+                                        (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                                        let by = ["orbit", "country", "mission"][sat_color as usize];
+                                        note = Some((Instant::now(), format!("satellites colored by {by}")));
                                     }
                                     KeyCode::Char('L') => {
                                         show_legend = !show_legend;
                                         note = Some((Instant::now(), if show_legend { "legend on" } else { "legend off" }.into()));
                                     }
                                     KeyCode::Char('p') if !sats.is_empty() || !aircraft.is_empty() || !fleet.is_empty() => {
-                                        finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &sats_hidden, &sat_country, &aircraft, &fleet) });
+                                        finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &sats_hidden, &sat_filter, &aircraft, &fleet) });
                                     }
                                     KeyCode::Char('/') => {
                                         search = Search::Typing(String::new());
