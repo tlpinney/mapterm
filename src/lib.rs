@@ -68,6 +68,7 @@
 
 #![warn(missing_docs)]
 
+pub mod adsb;
 pub mod cache;
 pub mod cluster;
 pub mod describe;
@@ -104,6 +105,7 @@ pub mod spec;
 pub mod store;
 pub mod stylejson;
 pub mod tilecache;
+pub mod timeseries;
 
 pub use interact::{Click, Controller};
 pub use layer::{CustomLayer, DrawContext, Markers, PickContext};

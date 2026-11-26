@@ -8,6 +8,24 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Live aircraft: `--adsb [lol|fi|URL]` draws aircraft from a free ADS-B feed (adsb.lol by
+  default) as arrows along their tracks, colored by altitude, with callsigns and 90 s
+  trails, refreshed for the area in view (`mapterm::adsb`). Gentle on the free feeds:
+  adsb.lol every 30 s without a key (500 requests a day per address) or 12 s with one
+  (`ADSB_LOL_KEY`, `--adsb-key-cmd`, sent as `x-api-key` to adsb.lol only), slowed to fit
+  the quota it reports (`adsb::Quota`, shown on the status line); a 60 nm circle at most
+  (`--adsb-radius`); no requests below zoom 7; a pause of 30 s to 5 min (or the feed's
+  `Retry-After`) after errors and 429s. The feed's credit (adsb.lol, ODbL) comes first.
+- `mapterm-aviation`, a dark flight-tracker style (airports, runways and taxiways stand out;
+  few roads and places), the default with `--adsb` (`Map::aviation`,
+  `stylejson::aviation_style`).
+- `--adsb`: click an aircraft, or Tab through them, for a live panel (type, registration,
+  altitude and climb, speed, track, squawk, distance from you); `f` follows it. Trails are
+  drawn as an image under the text with kitty graphics, fading with age
+  (`adsb::render_trails`), and aircraft stay visible when `v` / `n` hide the map's labels.
+- Time-series positions: `mapterm::timeseries::SampledPosition` keeps timed fixes and
+  interpolates between them (extrapolating along a velocity past the last), with trails.
+  `--adsb` draws a poll interval in the past so aircraft glide between real fixes.
 - Your location: `--at here` starts where you are, zoomed to the fix's accuracy, and `g`
   flies there and marks it. The position comes from a command printing
   `LAT LON [ACCURACY_M]`: `--location-cmd`, `MAPTERM_LOCATION_CMD`, or on macOS

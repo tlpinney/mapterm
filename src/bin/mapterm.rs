@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -67,6 +67,17 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 loading it as the map moves
   --at          start position (default: fit the GeoJSON layers, else the source's center);
                 `here` is where you are (see --location-cmd), zoomed to its accuracy
+  --adsb [FEED]  live aircraft over the map, from a free ADS-B feed: lol (adsb.lol, the
+                default), fi (adsb.fi), or a URL with {lat}, {lon} and {nm}. Polled every
+                10 s for the area in view; between polls planes move along their tracks.
+                Arrows point along the track, colored by altitude; i inspects one
+  --adsb-key-cmd CMD
+                print an adsb.lol API key with a command (else ADSB_LOL_KEY). Without
+                one adsb.lol allows 500 requests a day per address (--adsb asks every
+                30 s); a free feeder key allows 7,200 (every 12 s)
+  --adsb-radius NM
+                the largest circle --adsb asks the feed for (default 60 nm); below zoom 7
+                it asks for nothing, and after errors it waits 30 s to 5 min
   --location-cmd CMD
                 a command that prints your location as LAT LON [ACCURACY_M], for
                 `--at here` and `g` (else MAPTERM_LOCATION_CMD; on macOS, CoreLocationCLI
@@ -142,6 +153,12 @@ struct Args {
     raster_attribution: Option<String>,
     raster_key_cmd: Option<String>,
     mapbox_token_cmd: Option<String>,
+    /// --adsb: the live aircraft feed (lol, fi or a URL template).
+    adsb: Option<String>,
+    /// --adsb-key-cmd: prints the adsb.lol API key.
+    adsb_key_cmd: Option<String>,
+    /// --adsb-radius: the largest circle asked for, nautical miles.
+    adsb_radius: f64,
     /// --at here: start where you are.
     at_here: bool,
     /// --location-cmd: prints LAT LON [ACCURACY_M].
@@ -182,6 +199,9 @@ fn args() -> Result<Args> {
         raster_attribution: None,
         raster_key_cmd: None,
         mapbox_token_cmd: None,
+        adsb: None,
+        adsb_radius: ADSB_RADIUS,
+        adsb_key_cmd: None,
         at_here: false,
         location_cmd: None,
         raster_headers: Vec::new(),
@@ -214,7 +234,7 @@ fn args() -> Result<Args> {
     if let Ok(v) = std::env::var("MAPTERM_RASTER_LIMIT") {
         a.raster_limit = Some(parse_limit(&v)?);
     }
-    let mut it = std::env::args().skip(1);
+    let mut it = std::env::args().skip(1).peekable();
     while let Some(x) = it.next() {
         match x.as_str() {
             "--at" => {
@@ -275,6 +295,19 @@ fn args() -> Result<Args> {
                     bail!("--bbox W,S,E,N: west must be less than east and south less than north");
                 }
                 a.bbox = Some([w, s, e, nn]);
+            }
+            "--adsb" => {
+                // The feed is optional: take the next argument only if it names one.
+                let feed = it.next_if(|n| ["lol", "fi", "adsb.lol", "adsb.fi"].contains(&n.as_str()) || n.contains("{lat}"));
+                a.adsb = Some(feed.unwrap_or_default());
+            }
+            "--adsb-key-cmd" => a.adsb_key_cmd = Some(it.next().context("--adsb-key-cmd CMD")?),
+            "--adsb-radius" => {
+                let nm: f64 = it.next().context("--adsb-radius NM")?.parse().context("--adsb-radius NM")?;
+                if !(1.0..=250.0).contains(&nm) {
+                    bail!("--adsb-radius is 1 to 250 nautical miles");
+                }
+                a.adsb_radius = nm;
             }
             "--location-cmd" => a.location_cmd = Some(it.next().context("--location-cmd CMD")?),
             "--raster-key-cmd" => a.raster_key_cmd = Some(it.next().context("--raster-key-cmd CMD")?),
@@ -345,6 +378,8 @@ type Done = (String, TileId, Result<Loaded>);
 
 /// The built-in terminal style's entry in the `m` style cycle.
 const BUILTIN: &str = "built-in";
+/// The aviation style's entry in the `m` style cycle (and its --style name).
+const AVIATION: &str = "mapterm-aviation";
 
 type StyleDone = (String, Result<(Map, Option<(Schema, bool)>, String)>);
 
@@ -444,6 +479,31 @@ fn is_imagery(id: &str) -> bool {
     id == RASTER || id.strip_prefix(RASTER).is_some_and(|r| r.starts_with('-'))
 }
 const OVERLAYS: &str = "mapterm-overlays";
+/// The --adsb source and layer.
+const AIRCRAFT: &str = "aircraft";
+/// The largest circle --adsb asks for by default, nautical miles (the feeds take 250).
+const ADSB_RADIUS: f64 = 60.0;
+/// Below this zoom --adsb asks for nothing: a region's worth of aircraft every 5 s is more
+/// than a free feed should carry for one viewer.
+const ADSB_MIN_ZOOM: f64 = 7.0;
+/// Seconds of trail behind each aircraft.
+const ADSB_TRAIL: f64 = 90.0;
+/// The --adsb trails' source and layer.
+const TRAILS: &str = "aircraft-trails";
+/// The kitty image id of the --adsb trail image (far from the tile ids).
+const TRAIL_IMAGE: u32 = 4_000_000_002;
+
+/// Seconds since the Unix epoch, the clock aircraft fixes are kept on.
+fn unix_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// The circle around the view: its center and the distance to a corner, in nautical miles.
+fn view_circle(cam: &Camera, area: Rect) -> (f64, f64, f64) {
+    let vp = Viewport::new(cam, area);
+    let corner = vp.cell_to_lonlat(0, 0);
+    (cam.lon, cam.lat, mapterm::adsb::distance_nm((cam.lon, cam.lat), corner).max(1.0))
+}
 
 /// Debug log for troubleshooting (MAPTERM_LOG=path); a no-op unless set.
 fn dlog(msg: impl FnOnce() -> String) {
@@ -526,6 +586,80 @@ fn fmt_len(km: f64) -> String {
 
 /// The inspector panel: the features under the clicked spot, then the selected one's details.
 /// Returns the screen rows of the list entries, so clicks can select them.
+/// The --adsb panel for the selected aircraft: who it is and what it's doing, live.
+fn draw_aircraft(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    (a, at, seen): (&mapterm::adsb::Aircraft, mapterm::timeseries::Sample, f64),
+    now: f64,
+    follow: bool,
+    me: Option<&mapterm::locate::Fix>,
+) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" aircraft ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let key = |k: &str| Span::styled(format!(" {k:<13}"), dim);
+    let name = a.flight.clone().or_else(|| a.registration.clone()).unwrap_or_else(|| a.hex.to_uppercase());
+    let mut d = vec![Line::from(vec![
+        Span::styled(format!(" {} {name}", mapterm::adsb::arrow(a)), TStyle::new().fg(Color::Rgb(127, 178, 255)).add_modifier(Modifier::BOLD)),
+        Span::styled(a.type_code.as_deref().map(|t| format!("  {t}")).unwrap_or_default(), dim),
+    ])];
+    for s in [a.desc.as_deref(), a.operator.as_deref()].into_iter().flatten() {
+        d.push(Line::from(Span::raw(format!(" {s}"))));
+    }
+    d.push(Line::default());
+    if let Some(e) = &a.emergency {
+        d.push(Line::from(vec![key("emergency"), Span::styled(e.to_uppercase(), TStyle::new().fg(Color::Red).add_modifier(Modifier::BOLD))]));
+    }
+    let thousands = |n: f64| {
+        let s = format!("{:.0}", n.abs());
+        let mut out = String::new();
+        for (i, c) in s.chars().enumerate() {
+            if i > 0 && (s.len() - i) % 3 == 0 {
+                out.push(',');
+            }
+            out.push(c);
+        }
+        if n < 0.0 { format!("-{out}") } else { out }
+    };
+    let altitude = match (a.on_ground, at.alt) {
+        (true, _) => "on the ground".to_string(),
+        (false, Some(ft)) => format!("{} ft", thousands(ft)),
+        _ => "unknown".to_string(),
+    };
+    let climb = match a.vert_rate {
+        Some(r) if !a.on_ground && r.abs() >= 200.0 => format!("  {} {} ft/min", if r > 0.0 { "↑" } else { "↓" }, thousands(r.abs())),
+        _ => String::new(),
+    };
+    d.push(Line::from(vec![key("altitude"), Span::raw(altitude), Span::styled(climb, dim)]));
+    if let Some(gs) = a.gs_kt {
+        d.push(Line::from(vec![key("speed"), Span::raw(format!("{gs:.0} kt")), Span::styled(format!("  {:.0} km/h", gs * 1.852), dim)]));
+    }
+    if let Some(t) = a.track {
+        d.push(Line::from(vec![key("track"), Span::raw(format!("{:03.0}°", t.rem_euclid(360.0)))]));
+    }
+    if let Some(r) = &a.registration {
+        d.push(Line::from(vec![key("registration"), Span::raw(r.clone())]));
+    }
+    d.push(Line::from(vec![key("ICAO address"), Span::raw(a.hex.to_uppercase())]));
+    if let Some(s) = &a.squawk {
+        d.push(Line::from(vec![key("squawk"), Span::raw(s.clone())]));
+    }
+    d.push(Line::from(vec![key("position"), Span::raw(format!("{:.4}, {:.4}", at.lat, at.lon))]));
+    if let Some(me) = me {
+        let nm = mapterm::adsb::distance_nm((me.lon, me.lat), (at.lon, at.lat));
+        d.push(Line::from(vec![key("from you"), Span::raw(format!("{nm:.1} nm")), Span::styled(format!("  {:.1} km", nm * 1.852), dim)]));
+    }
+    d.push(Line::from(vec![key("last report"), Span::raw(format!("{:.0} s ago", (now - seen + a.seen_pos).max(0.0)))]));
+    d.push(Line::default());
+    d.push(Line::from(Span::styled(format!(" f {} · esc close", if follow { "stop following" } else { "follow" }), dim)));
+    f.render_widget(Paragraph::new(d).wrap(Wrap { trim: false }), inner);
+}
+
 fn draw_inspector(f: &mut ratatui::Frame, area: Rect, picks: &[mapterm::Pick], sel: usize) -> Vec<(u16, usize)> {
     use ratatui::style::Modifier;
     use ratatui::widgets::{Borders, Wrap};
@@ -683,6 +817,11 @@ async fn detect_schema(src: &Source, cam: &Camera) -> Schema {
 fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, labels: bool, vector: u8, raster: bool) {
     let ids: Vec<String> = map.layer_ids().into_iter().map(str::to_string).collect();
     for id in ids {
+        // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
+        // it is the clearest view of them.
+        if id == AIRCRAFT || id == TRAILS {
+            continue;
+        }
         let Some(l) = map.layer(&id) else { continue };
         let src = l.source.as_deref().and_then(|s| map.source(s));
         let basemap = matches!(src, Some(MapSource::Vector(_)));
@@ -792,7 +931,12 @@ async fn main() -> Result<()> {
     let mut theme: Option<(Schema, bool)> = None;
     if let Some(src) = src {
         let schema = detect_schema(&src, &cam).await;
-        map = Map::terminal(src, schema, !a.light)?;
+        // Watching aircraft over the default basemap: the aviation style, unless --light.
+        if a.adsb.is_some() && a.source.is_none() && !a.light {
+            map = Map::aviation(src, schema)?;
+        } else {
+            map = Map::terminal(src, schema, !a.light)?;
+        }
         theme = Some((schema, !a.light));
     }
     for w in map.warnings() {
@@ -801,10 +945,14 @@ async fn main() -> Result<()> {
     let style_warnings = map.warnings().len();
     let mut basemap_ids: Vec<String> = map.layer_ids().into_iter().map(str::to_string).collect();
     let mut basemap_sources: Vec<String> = map.sources().map(|(id, _)| id.to_string()).collect();
-    // The `m` cycle: the --style given, the built-in style, then the OpenFreeMap styles.
+    // The `m` cycle: the --style given, the built-in style, the aviation style, then the
+    // OpenFreeMap styles.
     let builtin_source = a.source.clone().unwrap_or_else(|| OPENFREEMAP.to_string());
     let mut styles: Vec<String> = a.style.iter().cloned().collect();
-    for s in std::iter::once(BUILTIN).chain(stylejson::OPENFREEMAP_STYLES) {
+    if a.adsb.is_some() && a.style.is_none() && a.source.is_none() && !a.light {
+        styles.push(AVIATION.to_string());
+    }
+    for s in [BUILTIN, AVIATION].into_iter().chain(stylejson::OPENFREEMAP_STYLES) {
         if !styles.iter().any(|x| x == s) {
             styles.push(s.to_string());
         }
@@ -935,6 +1083,23 @@ async fn main() -> Result<()> {
         }
         legend.push((id, color));
     }
+    // Live aircraft (--adsb): a GeoJSON source the loop refills, over your layers.
+    let mut adsb_feed = a.adsb.as_deref().map(mapterm::adsb::Feed::named).transpose()?;
+    // adsb.lol's key, only ever sent to adsb.lol.
+    if let Some(feed) = adsb_feed.as_mut().filter(|f| f.name == "adsb.lol") {
+        feed.key = mapterm::raster::find_key(a.adsb_key_cmd.as_deref(), &["ADSB_LOL_KEY"])?;
+    }
+    // How often to ask (slowed further by the feed's quota), and how far in the past to draw:
+    // a poll interval and a second, so frames fall between two real fixes.
+    let adsb_every = adsb_feed.as_ref().map_or(Duration::from_secs(10), mapterm::adsb::Feed::every);
+    let adsb_delay = adsb_every.as_secs_f64() + 1.0;
+    if let Some(feed) = &adsb_feed {
+        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
+        map.add_source(AIRCRAFT, MapSource::geojson(&empty)?)?;
+        map.add_source(TRAILS, MapSource::geojson(&empty)?)?;
+        map.set_attribution(AIRCRAFT, &feed.attribution)?;
+        map.add_layers(vec![mapterm::adsb::trail_layer(TRAILS, TRAILS), mapterm::adsb::layer(AIRCRAFT, AIRCRAFT)], None)?;
+    }
     // Highlights, the crosshair and the clicked spot, on top of everything.
     map.add_custom_layer(OVERLAYS, Markers::default(), None)?;
     let mut base = base_visibility(&map);
@@ -958,6 +1123,18 @@ async fn main() -> Result<()> {
 
     if let Some((w, h)) = a.snapshot {
         let area = Rect::new(0, 0, w, h);
+        if let Some(feed) = &adsb_feed {
+            let (lon, lat, nm) = view_circle(&cam, area);
+            match mapterm::adsb::fetch(feed, lon, lat, nm).await {
+                Ok(answer) => {
+                    let mut tracks = mapterm::adsb::Tracks::default();
+                    let now = unix_now();
+                    tracks.update(answer.aircraft, now);
+                    map.set_data(AIRCRAFT, &tracks.points(now))?;
+                }
+                Err(e) => eprintln!("{e:#}"),
+            }
+        }
         // An image export fetches imagery at image resolution, not one color per cell.
         if a.format == "png" {
             map.raster_mode = RasterMode::Kitty { cell_px: (PNG_CELL.0 as f64, PNG_CELL.1 as f64) };
@@ -1096,7 +1273,13 @@ async fn main() -> Result<()> {
     let mut term = ratatui::init();
     // Images through shared memory when the terminal (or herdr) says it reads them, else
     // inline. It asks the terminal, so it runs in raw mode, before the input thread starts.
-    let shm = (kitty || pixels_on) && mapterm::kitty::shm_supported();
+    // --adsb trails as an image under the text where the terminal shows images: braille lines
+    // re-snap to their dot grid as they grow, which shimmers.
+    let trails_kitty = adsb_feed.is_some() && mapterm::kitty::supported();
+    if trails_kitty {
+        let _ = map.set_visibility(TRAILS, false);
+    }
+    let shm = (kitty || pixels_on || trails_kitty) && mapterm::kitty::shm_supported();
     dlog(|| format!("kitty medium: {}", if shm { "shared memory" } else { "inline" }));
     kstate.shm = kitty && shm;
     let pixels_shm = shm;
@@ -1174,6 +1357,24 @@ async fn main() -> Result<()> {
     let mut held_back = false;
     let mut throttled_at: Option<Instant> = None;
     let (ctx, mut crx) = mpsc::unbounded_channel::<Result<String>>();
+    // --adsb: every aircraft's fixes over time, the last request and the one in flight, and
+    // when the layers were last redrawn.
+    let (atx, mut arx) = mpsc::unbounded_channel::<Result<mapterm::adsb::Answer>>();
+    // The feed's quota as of the last answer (adsb.lol reports it).
+    let mut aircraft_quota: Option<mapterm::adsb::Quota> = None;
+    let mut aircraft = mapterm::adsb::Tracks::default();
+    let mut aircraft_asked: Option<(Instant, (f64, f64, f64))> = None;
+    let mut aircraft_inflight = false;
+    let mut aircraft_drawn = Instant::now();
+    // After a failed request: failures in a row, and no request before this time.
+    let mut aircraft_failures = 0u32;
+    let mut aircraft_retry: Option<Instant> = None;
+    // The aircraft clicked (its hex), shown in the panel and highlighted; `f` follows it.
+    let mut selected: Option<String> = None;
+    let mut follow = false;
+    // The trail image needs drawing again (new positions, or the view moved).
+    let mut trails_dirty = false;
+    let mut trails_cam: Option<(f64, f64, f64, Rect)> = None;
     // `g`: the location helper runs on a blocking task; its answer flies the map there.
     let (ltx, mut lrx) = mpsc::unbounded_channel::<Result<mapterm::locate::Fix>>();
     let mut locating = false;
@@ -1196,8 +1397,16 @@ async fn main() -> Result<()> {
                 ctl.key(crossterm::event::KeyEvent::from(code));
             }
             ctl.tick(Instant::now());
+            // Keep the followed aircraft in the middle (where it's drawn, adsb_delay back).
+            if follow
+                && !ctl.animating()
+                && let Some((_, at, _)) = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay))
+            {
+                ctl.cam.lon = at.lon;
+                ctl.cam.lat = at.lat;
+            }
             // One synchronized update per frame when escape sequences follow the cells.
-            let sync = smooth_on || kitty || pixels_on;
+            let sync = smooth_on || kitty || pixels_on || trails_kitty;
             if sync {
                 crossterm::execute!(std::io::stdout(), crossterm::terminal::BeginSynchronizedUpdate)?;
             }
@@ -1229,6 +1438,19 @@ async fn main() -> Result<()> {
                 for ((ax, ay), (bx, by)) in [((x - 3.0, y), (x + 3.0, y)), ((x, y - 3.0), (x, y + 3.0))] {
                     overlays.push(Overlay::Line { pts: vec![vp.dot_to_lonlat(ax, ay), vp.dot_to_lonlat(bx, by)], color: cross });
                 }
+            }
+            // The selected aircraft: its arrow reversed, with its callsign, over the others.
+            if let Some((a, at, _)) = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay)) {
+                let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255)).add_modifier(ratatui::style::Modifier::BOLD);
+                let name = a.flight.clone().or_else(|| a.registration.clone()).unwrap_or_else(|| a.hex.clone());
+                overlays.push(Overlay::Marker {
+                    lon: at.lon,
+                    lat: at.lat,
+                    glyph: mapterm::adsb::arrow(a).into(),
+                    style: st,
+                    label: Some((name, st)),
+                    priority: 101,
+                });
             }
             // Where you are (--at here, g): a blue dot under the search markers.
             if let Some(fix) = &me {
@@ -1274,14 +1496,19 @@ async fn main() -> Result<()> {
             term.draw(|f| {
                 let [main, s] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(f.area());
                 let results = matches!(search, Search::Results { .. });
-                let panel_w = if results || (inspect && !picks.is_empty()) { 52.min(main.width / 2) } else { 0 };
+                let plane = selected.as_deref().and_then(|h| aircraft.get(h, unix_now() - adsb_delay));
+                let panel_w = if results || (inspect && !picks.is_empty()) || plane.is_some() { 52.min(main.width / 2) } else { 0 };
                 let [m, panel] = Layout::horizontal([Constraint::Min(1), Constraint::Length(panel_w)]).areas(main);
                 map_area = m;
                 panel_area = panel;
                 f.render_widget(map.view(&draw_cam), m);
                 list_rows = match &search {
                     Search::Results { places, sel } if panel_w > 0 => draw_results(f, panel, places, *sel),
-                    _ if panel_w > 0 => draw_inspector(f, panel, &picks, sel),
+                    _ if inspect && !picks.is_empty() => draw_inspector(f, panel, &picks, sel),
+                    _ if let Some(p) = plane => {
+                        draw_aircraft(f, panel, p, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
                     _ => Vec::new(),
                 };
                 if let Some(r) = box_rect {
@@ -1359,9 +1586,26 @@ async fn main() -> Result<()> {
                         None => spans.push(Span::styled(format!("{name} "), dim)),
                     }
                 }
+                if adsb_feed.is_some() {
+                    let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
+                    let text = match aircraft_retry.map(|t| t.saturating_duration_since(Instant::now())) {
+                        _ if cam.zoom < ADSB_MIN_ZOOM => "✈ zoom in for aircraft ".to_string(),
+                        Some(w) if !w.is_zero() => format!("✈ paused {} s ", w.as_secs() + 1),
+                        _ => match aircraft_quota {
+                            Some(q) => format!("✈ {} · {} left ", aircraft.len(), q.remaining),
+                            None => format!("✈ {} ", aircraft.len()),
+                        },
+                    };
+                    spans.push(Span::styled(text, st));
+                }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
                 // Credits of the sources being drawn, as the style or tiles give them.
-                let credits = map.attributions(cam.zoom);
+                let mut credits = map.attributions(cam.zoom);
+                // The aircraft feed's credit (ODbL for adsb.lol) first, where it isn't cut off.
+                if let Some(f) = &adsb_feed {
+                    credits.retain(|c| *c != f.attribution);
+                    credits.insert(0, f.attribution.clone());
+                }
                 let credits = if credits.is_empty() { basemap_name.clone() } else { credits.join(" · ") };
                 spans.push(Span::styled(format!("· {credits} · q quit"), dim));
                 // While typing a search, the status line is the search box.
@@ -1385,6 +1629,16 @@ async fn main() -> Result<()> {
                     // Declare after drawing, in the same synchronized update as the cells.
                     let decl = if shift_mode { smooth::declare_shift(0, map_area, ox, oy) } else { smooth::declare(0, map_area, &cam) };
                     out.write_all(decl.as_bytes())?;
+                }
+                if trails_kitty && map_area.width > 0 && (trails_dirty || trails_cam != Some((draw_cam.lon, draw_cam.lat, draw_cam.zoom, map_area))) {
+                    // One image over the map, above imagery and pixel tiles, under the text.
+                    trails_dirty = false;
+                    trails_cam = Some((draw_cam.lon, draw_cam.lat, draw_cam.zoom, map_area));
+                    let (w, h) = ((map_area.width as f64 * cpx.0).round() as u32, (map_area.height as f64 * cpx.1).round() as u32);
+                    let vp = Viewport::new(&draw_cam, map_area);
+                    let rgba = mapterm::adsb::render_trails(&aircraft, unix_now() - adsb_delay, ADSB_TRAIL, &vp, w, h, cpx);
+                    let img = mapterm::kitty::show_rgba(TRAIL_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -10, shm);
+                    out.write_all(img.as_bytes())?;
                 }
                 if kitty {
                     // Re-place the raster images under the text: images are sent once, then
@@ -1522,6 +1776,48 @@ async fn main() -> Result<()> {
                 spawn_load(req, tx.clone());
             }
 
+            // Go easy on the free feed: nothing when zoomed out past ADSB_MIN_ZOOM, a circle of
+            // at most --adsb-radius, and a growing pause after errors.
+            let adsb_waiting = aircraft_retry.is_some_and(|t| Instant::now() < t);
+            if let Some(feed) = adsb_feed.as_ref().filter(|_| !aircraft_inflight && !adsb_waiting && map_area.width > 0 && cam.zoom >= ADSB_MIN_ZOOM) {
+                // Ask every adsb_every (longer when the day's quota runs low), or sooner (but
+                // not more than three times as often) once the view has left the circle last
+                // asked for, and not mid-animation. A little more than the view, so short
+                // pans have planes already.
+                let every = aircraft_quota.map_or(adsb_every, |q| q.pace(adsb_every));
+                let (lon, lat, view_nm) = view_circle(&cam, map_area);
+                let nm = (view_nm * 1.3).min(a.adsb_radius).min(feed.max_nm);
+                let due = match aircraft_asked {
+                    None => true,
+                    Some((at, (alon, alat, anm))) => {
+                        // The capped circle, so a view wider than the cap isn't always "moved".
+                        let moved = mapterm::adsb::distance_nm((lon, lat), (alon, alat)) + view_nm.min(nm) > anm * 1.1;
+                        at.elapsed() >= every || (moved && at.elapsed() >= (every / 3).max(Duration::from_secs(2)) && !ctl.animating())
+                    }
+                };
+                if due {
+                    aircraft_asked = Some((Instant::now(), (lon, lat, nm)));
+                    aircraft_inflight = true;
+                    dlog(|| format!("adsb: asking for {nm:.0} nm at z{:.1}", cam.zoom));
+                    let (feed, atx) = (feed.clone(), atx.clone());
+                    tokio::spawn(async move {
+                        let _ = atx.send(mapterm::adsb::fetch(&feed, lon, lat, nm).await);
+                    });
+                }
+            }
+            // Move the aircraft a few times a second, drawn adsb_delay in the past so they glide
+            // between real fixes (and follow turns) rather than guess ahead.
+            if adsb_feed.is_some() && !aircraft.is_empty() && aircraft_drawn.elapsed() >= Duration::from_millis(250) {
+                aircraft_drawn = Instant::now();
+                let t = unix_now() - adsb_delay;
+                map.set_data(AIRCRAFT, &aircraft.points(t))?;
+                if trails_kitty {
+                    trails_dirty = true;
+                } else {
+                    map.set_data(TRAILS, &aircraft.trails(t, ADSB_TRAIL))?;
+                }
+            }
+
             if let Some(g) = google.as_ref().filter(|_| !credit_pending) {
                 let vp = Viewport::new(&cam, map_area);
                 let (west, north) = vp.cell_to_lonlat(0, 0);
@@ -1545,7 +1841,14 @@ async fn main() -> Result<()> {
             }
 
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
-            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() { Duration::from_millis(16) } else { Duration::from_millis(500) };
+            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() {
+                Duration::from_millis(16)
+            } else if !aircraft.is_empty() {
+                // Aircraft keep moving.
+                Duration::from_millis(250)
+            } else {
+                Duration::from_millis(500)
+            };
             tokio::select! {
                 Some((di, done)) = drx.recv() => {
                     let d = &mut datasets[di];
@@ -1582,6 +1885,30 @@ async fn main() -> Result<()> {
                             } else {
                                 errors += 1;
                             }
+                        }
+                    }
+                }
+                Some(r) = arx.recv() => {
+                    aircraft_inflight = false;
+                    match r {
+                        Ok(answer) => {
+                            aircraft_quota = answer.quota.or(aircraft_quota);
+                            aircraft.update(answer.aircraft, unix_now());
+                            aircraft_failures = 0;
+                            aircraft_retry = None;
+                            if let Some(h) = selected.as_deref().filter(|h| aircraft.get(h, unix_now()).is_none()) {
+                                note = Some((Instant::now(), format!("lost contact with {h}")));
+                                selected = None;
+                                follow = false;
+                            }
+                        }
+                        Err(e) => {
+                            // Wait before asking again: what the feed said, else 30 s doubling.
+                            aircraft_failures += 1;
+                            let wait = mapterm::adsb::backoff(&e, aircraft_failures);
+                            aircraft_retry = Some(Instant::now() + wait);
+                            dlog(|| format!("adsb: {e:#}; next try in {} s", wait.as_secs()));
+                            note = Some((Instant::now(), format!("{e:#} · trying again in {} s", wait.as_secs())));
                         }
                     }
                 }
@@ -1729,6 +2056,14 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
                                         });
                                     }
+                                    KeyCode::Esc if selected.is_some() && !inspect => {
+                                        selected = None;
+                                        follow = false;
+                                    }
+                                    KeyCode::Char('f') if selected.is_some() => {
+                                        follow = !follow;
+                                        note = Some((Instant::now(), if follow { "following" } else { "not following" }.into()));
+                                    }
                                     KeyCode::Esc if found.is_some() && picks.is_empty() => found = None,
                                     KeyCode::Esc if !picks.is_empty() => {
                                         picks.clear();
@@ -1759,6 +2094,21 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                     KeyCode::Tab if !picks.is_empty() => sel = (sel + 1) % picks.len(),
+                                    // --adsb: Tab / shift+Tab step through the aircraft from the
+                                    // middle of the map outward.
+                                    KeyCode::Tab | KeyCode::BackTab if !inspect && !aircraft.is_empty() => {
+                                        let order = aircraft.by_distance(unix_now() - adsb_delay, ctl.cam.lon, ctl.cam.lat);
+                                        let at = selected.as_ref().and_then(|h| order.iter().position(|x| x == h));
+                                        let next = match (at, k.code) {
+                                            (None, _) => 0,
+                                            (Some(i), KeyCode::BackTab) => (i + order.len() - 1) % order.len(),
+                                            (Some(i), _) => (i + 1) % order.len(),
+                                        };
+                                        if order.get(next) != selected.as_ref() {
+                                            follow = false;
+                                        }
+                                        selected = order.get(next).cloned();
+                                    }
                                     KeyCode::BackTab if !picks.is_empty() => sel = (sel + picks.len() - 1) % picks.len(),
                                     KeyCode::Char('y') if !picks.is_empty() => {
                                         if let Some(p) = picks.get(sel) {
@@ -1900,15 +2250,24 @@ async fn main() -> Result<()> {
                                     continue;
                                 }
                                 ctl.mouse(m);
-                                if let Some(k) = ctl.take_click()
-                                    && inspect
-                                {
-                                    let dot = Viewport::new(&last_cam, map_area).dot_ll(k.lon, k.lat);
-                                    picks = map.query_features(&last_cam, map_area, dot);
-                                    sel = 0;
-                                    click_at = Some((k.lon, k.lat));
-                                    if picks.is_empty() {
-                                        note = Some((Instant::now(), "nothing here".into()));
+                                if let Some(k) = ctl.take_click() {
+                                    if inspect {
+                                        let dot = Viewport::new(&last_cam, map_area).dot_ll(k.lon, k.lat);
+                                        picks = map.query_features(&last_cam, map_area, dot);
+                                        sel = 0;
+                                        click_at = Some((k.lon, k.lat));
+                                        if picks.is_empty() {
+                                            note = Some((Instant::now(), "nothing here".into()));
+                                        }
+                                    } else if adsb_feed.is_some() {
+                                        // A click on (or next to) an aircraft selects it.
+                                        let vp = Viewport::new(&last_cam, map_area);
+                                        if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, vp.dot_ll(k.lon, k.lat), 6.0) {
+                                            if selected.as_deref() != Some(hex.as_str()) {
+                                                follow = false;
+                                            }
+                                            selected = Some(hex);
+                                        }
                                     }
                                 }
                             }
@@ -1926,7 +2285,7 @@ async fn main() -> Result<()> {
     }
     let _ = set_pixel_mouse(false);
     let _ = set_pointer("default");
-    if kitty || pixels_on {
+    if kitty || pixels_on || trails_kitty {
         let _ = std::io::stdout().write_all(mapterm::kitty::FREE_ALL.as_bytes());
     }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
