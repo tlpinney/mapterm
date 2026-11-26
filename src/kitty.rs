@@ -184,6 +184,18 @@ pub fn place(id: u32, placement: u32, col: u16, row: u16, src: (u32, u32, u32, u
     format!("\x1b[{};{}H\x1b_Ga=p,i={id},p={placement},x={x},y={y},w={w},h={h},c={cols},r={rows},z={z},C=1,q=2\x1b\\", row as u32 + 1, col as u32 + 1)
 }
 
+/// Like [`place`], with the image moved right and down by (`x_off`, `y_off`) pixels inside
+/// its first cell: for following a map shifted by part of a cell.
+#[allow(clippy::too_many_arguments)]
+pub fn place_offset(id: u32, placement: u32, col: u16, row: u16, src: (u32, u32, u32, u32), cols: u16, rows: u16, z: i32, x_off: u32, y_off: u32) -> String {
+    let (x, y, w, h) = src;
+    format!(
+        "\x1b[{};{}H\x1b_Ga=p,i={id},p={placement},x={x},y={y},w={w},h={h},c={cols},r={rows},X={x_off},Y={y_off},z={z},C=1,q=2\x1b\\",
+        row as u32 + 1,
+        col as u32 + 1
+    )
+}
+
 /// Remove placement `placement` of image `id` (the image stays loaded).
 pub fn unplace_one(id: u32, placement: u32) -> String {
     format!("\x1b_Ga=d,d=i,i={id},p={placement},q=2\x1b\\")

@@ -3102,7 +3102,7 @@ async fn main() -> Result<()> {
                         trails_drawn = Instant::now();
                         let t_trails = Instant::now();
                         let (w, h) = ((map_area.width as f64 * cpx.0).round() as u32, (map_area.height as f64 * cpx.1).round() as u32);
-                        let vp = Viewport::new(&draw_cam, map_area);
+                        let vp = Viewport::new(&cam, map_area);
                         let now = unix_now();
                         let sets: [TrailSet; 2] = [
                             (
@@ -3145,6 +3145,8 @@ async fn main() -> Result<()> {
                         }
                         dlog(|| format!("trails: {w}x{h} px, {:.1} ms, shown {trails_shown:?}", t_trails.elapsed().as_secs_f64() * 1000.0));
                     }
+                    // (The images drawn here use the true camera, not the one on the cell grid:
+                    // with smooth scrolling they land where the shifted text does.)
                     // Satellites as dots with their names, five times a second once the map is
                     // still; the cell glyphs and text names stand in while it moves. Full
                     // resolution when there are names to draw (text needs it), else half,
@@ -3156,7 +3158,7 @@ async fn main() -> Result<()> {
                         let named = sats.iter().any(|s| !s.is_starlink());
                         let scale = if named || selected_sat.is_some() { 1.0 } else { 0.5 };
                         let (w, h) = ((map_area.width as f64 * cpx.0 * scale).round() as u32, (map_area.height as f64 * cpx.1 * scale).round() as u32);
-                        let vp = Viewport::new(&draw_cam, map_area);
+                        let vp = Viewport::new(&cam, map_area);
                         // Low orbit crosses the ground at about 7 km/s: redraw so it moves ~1 px a frame,
                         // from 4 to 15 times a second (zoomed out it barely moves).
                         let px_per_km = cpx.0 / vp.km_per_col(draw_cam.lat).max(1e-6);
@@ -3193,6 +3195,9 @@ async fn main() -> Result<()> {
                 if kitty {
                     // Re-place the raster images under the text: images are sent once, then
                     // each frame only moves placements.
+                    // Smooth scrolling: the terminal shifts the text by part of a cell; the
+                    // image tiles go with it.
+                    kstate.shift = if smooth_on && shift_mode { (ox as f64 / 1000.0 * cpx.0, oy as f64 / 1000.0 * cpx.1) } else { (0.0, 0.0) };
                     let cmds = map.kitty_commands(&draw_cam, map_area, &mut kstate);
                     dlog(|| format!("frame: kitty cmds {} bytes, {} KiB of images held, cell_px={cpx:?} map={map_area:?}", cmds.len(), kstate.bytes() >> 10));
                     out.write_all(cmds.as_bytes())?;

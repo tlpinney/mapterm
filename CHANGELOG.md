@@ -164,6 +164,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- Smooth scrolling (`MAPTERM_SMOOTH=shift`, Ghostty Smooth): images now move with the text
+  instead of a cell at a time. Image tiles (radar, alerts, imagery) are placed with the same
+  sub-cell shift the terminal gives the text (`KittyState::shift`, `kitty::place_offset`),
+  and the images mapterm draws (satellite dots, trails) use the true camera.
 - Opening a panel (an alert, aircraft, ship, satellite, the finder, search results) no
   longer moves the map: the panel floats over its right side instead of taking room from
   it. Images keep clear of the panel and the legends (`KittyState::holes`,
