@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--radar] [--alerts] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -68,8 +68,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --at          start position (default: fit the GeoJSON layers, else the source's center);
                 `here` is where you are (see --location-cmd), zoomed to its accuracy
   --adsb [FEED]  live aircraft over the map, from a free ADS-B feed: lol (adsb.lol, the
-                default), fi (adsb.fi), or a URL with {lat}, {lon} and {nm}. Polled every
-                10 s for the area in view; between polls planes move along their tracks.
+                default), fi (adsb.fi), or a URL with {lat}, {lon} and {nm}. Polled for the
+                area in view (adsb.lol every 30 s, 12 s with a key; others every 10 s);
+                between polls planes move along their tracks.
                 Arrows point along the track, colored by altitude; i inspects one
   --sats [GROUPS]
                 satellites, placed from CelesTrak's orbital elements (no key): ◇ (◆ the
@@ -152,6 +153,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                           billed providers, none for free ones; also MAPTERM_RASTER_LIMIT)
   --raster-attribution T  credit for the layer (known providers are filled in)
   --tms                   count raster rows from the bottom (TMS) even with a plain {y}
+  --version     print mapterm's version and exit
   --light       light theme (the built-in style; t switches)
   --no-labels   start with labels and symbols hidden (n shows them); with --snapshot, a
                 frame of map lines and fills only
@@ -373,6 +375,10 @@ fn args() -> Result<Args> {
                 // The feed is optional: take the next argument only if it names one.
                 let feed = it.next_if(|n| ["lol", "fi", "adsb.lol", "adsb.fi"].contains(&n.as_str()) || n.contains("{lat}"));
                 a.adsb = Some(feed.unwrap_or_default());
+            }
+            "--version" | "-V" => {
+                println!("mapterm {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
             }
             "--ais" => a.ais = true,
             "--sondes" | "--balloons" => a.sondes = true,
@@ -884,7 +890,7 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
         ("find", vec![("/", "search for a place"), ("i", "inspect: what's under the pointer"), ("y", "copy the inspected feature (JSON)")]),
     ];
     if on.live || on.alerts {
-        let mut v = vec![("click · Tab", "select (aircraft, ship, satellite, alert)"), ("Esc", "close the panel")];
+        let mut v = vec![("click · Tab", "select (aircraft, ship, satellite; click for an alert)"), ("Esc", "close the panel")];
         if on.live {
             v.insert(1, ("f", "follow the selected one"));
             v.insert(2, ("p", "finder: names, countries, missions..."));

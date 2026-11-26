@@ -6,8 +6,21 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-26
+
+Live layers and weather: every active satellite (by orbit, country or mission, with radio
+frequencies from SatNOGS), weather balloons from SondeHub, RainViewer radar you can play
+back on a timeline, and US weather alerts; a clock for the map, after Cesium's. Plus a
+proxy for everything mapterm fetches, a key list on `?`, times in your own time zone, and
+release binaries for macOS and Linux ARM with an install script and Homebrew.
+
 ### Added
 
+- Release binaries for macOS (one universal binary for Apple silicon and Intel, signed with
+  the maintainer's Developer ID and notarized) and Linux ARM64, next to Linux x86-64; an
+  install script (`install.sh`: the right build, checked against the signed checksums, into
+  `~/.local/bin`); a Homebrew formula from the binaries (`release/brew-formula.sh`); and
+  `mapterm --version`.
 - Weather balloons: `--sondes` follows the radiosondes amateur receivers track on SondeHub
   (no key; CC BY-SA 2.0): ▲ climbing and ▼ falling, colored by altitude, with their
   flights as trails, and a panel on click or Tab (altitude, climb, drift, temperature,
@@ -590,7 +603,8 @@ cargo install --git https://github.com/tlpinney/mapterm --tag v0.1.0-alpha.1
 - GeoJSON sources with a spatial index and point clustering; tiles loaded in the
   background with retries; kitty image memory kept within a budget; source attribution.
 
-[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/tlpinney/mapterm/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/tlpinney/mapterm/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/tlpinney/mapterm/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/tlpinney/mapterm/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/tlpinney/mapterm/compare/v0.1.2...v0.2.0
