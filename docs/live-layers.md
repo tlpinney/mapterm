@@ -247,7 +247,7 @@ entity's availability): live, that's now; with `--radar` paused or playing, the 
 time. The NWS lists only alerts still active, so ones that ended within the radar's two
 hours don't come back.
 
-## Power outages (Pennsylvania, Maryland)
+## Power outages
 
 ```
 mapterm --outages --at 39.6,-76.6 -z 7
@@ -277,9 +277,20 @@ The outlines never change: each layer's are fetched once and kept for 30 days. T
 outage areas or restoration times; the states' maps have neither. With `--outages` the map
 switches to `mapterm-weather`, like `--radar` and `--alerts`.
 
-Other states: most don't publish outages as a public feed (they point to the utilities'
-maps), and the national sources are closed or paid. A state that does can be added as a few
-lines in `src/outages.rs` (`FEEDS`): its layers' URLs and which fields hold what.
+Everywhere else, the counties come from ODIN, the Outage Data Initiative Nationwide (Oak
+Ridge National Laboratory, for the U.S. Department of Energy), from its public county-level
+feed (no key). Only the utilities taking part report to ODIN (about 160 today, many of them
+cooperatives), so a county without shading may still have outages. ODIN gives no customers
+served, so its counties are shaded by customers out, under "ODIN counties" in the legend. A
+utility that hasn't reported for 3 hours is left out rather than shown with old figures; the
+legend counts them as "not reporting". Click an ODIN county for the utilities' figures, their
+estimated restoration time and cause where given, and any disclaimer; your utility's own
+outage map has the details. mapterm asks ODIN every 5 minutes (the list with its ETag), and
+fetches a county's outline once, the first time it has an outage.
+
+A state with a public feed of its own can be added as a few lines in `src/outages.rs`
+(`FEEDS`): its layers' URLs and which fields hold what. Its counties then come from it rather
+than from ODIN.
 
 ## Legends
 

@@ -80,6 +80,8 @@ pub struct Layer {
     pub updated: Option<&'static str>,
     /// Only the areas with customers out (a URL-encoded `where`), or all (`1%3D1`).
     pub filter: &'static str,
+    /// What its areas are called in a legend: "MD ZIP codes".
+    pub group: &'static str,
     /// How far (degrees) the service may move an outline's points when simplifying it.
     pub simplify: f64,
 }
@@ -90,6 +92,8 @@ pub struct Feed {
     pub id: &'static str,
     /// The state's postal code, for the status line: "PA".
     pub state: &'static str,
+    /// The state's FIPS code: "42". Other sources (ODIN) leave its counties to this feed.
+    pub fips: &'static str,
     /// Who to credit: "PEMA / PennDOT".
     pub credit: &'static str,
     /// Its county layer.
@@ -113,6 +117,7 @@ pub const FEEDS: [Feed; 2] = [
     Feed {
         id: "pa",
         state: "PA",
+        fips: "42",
         credit: "PEMA / PennDOT",
         county: Layer {
             url: "https://gis.penndot.pa.gov/gis/rest/services/poweroutages/papoweroutages/FeatureServer/1",
@@ -127,6 +132,7 @@ pub const FEEDS: [Feed; 2] = [
             county_out: None,
             updated: Some("UPDATE_DATE"),
             filter: "1%3D1",
+            group: "PA counties",
             simplify: 0.002,
         },
         local: Some(Layer {
@@ -142,12 +148,14 @@ pub const FEEDS: [Feed; 2] = [
             county_out: Some("COUNTY_OUT"),
             updated: Some("UPDATE_DATE"),
             filter: "MUNICIPAL_OUT%3E0",
+            group: "PA municipalities",
             simplify: 0.0005,
         }),
     },
     Feed {
         id: "md",
         state: "MD",
+        fips: "24",
         credit: "Maryland Dept. of Emergency Management",
         county: Layer {
             url: "https://services.arcgis.com/njFNhDsUCentVYJW/arcgis/rest/services/PowerOutage_CountiesGeneralDEV_Join/FeatureServer/0",
@@ -162,6 +170,7 @@ pub const FEEDS: [Feed; 2] = [
             county_out: None,
             updated: Some("dt_stamp"),
             filter: "1%3D1",
+            group: "MD counties",
             simplify: 0.002,
         },
         local: Some(Layer {
@@ -177,13 +186,14 @@ pub const FEEDS: [Feed; 2] = [
             county_out: None,
             updated: Some("dt_stamp"),
             filter: "outages%3E0",
+            group: "MD ZIP codes",
             simplify: 0.0005,
         }),
     },
 ];
 
 /// One area's outage.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Area {
     /// The feed's id and the area's own: `pa:42029`, `pa:42029-83080`, `md:Anne Arundel`.
     pub key: String,
@@ -205,6 +215,18 @@ pub struct Area {
     pub county_out: Option<u64>,
     /// When the utilities' figures were gathered (Unix seconds).
     pub updated: Option<f64>,
+    /// Who the figures are from, for the panel: "PEMA / PennDOT", "ODIN".
+    pub source: &'static str,
+    /// What it's counted with in a legend by customers out: "MD ZIP codes", "ODIN counties".
+    pub group: &'static str,
+    /// The utilities reporting it, with their customers out (ODIN).
+    pub utilities: Vec<(String, u64)>,
+    /// The latest estimated restoration time given (Unix seconds; ODIN).
+    pub restore: Option<f64>,
+    /// The causes given (ODIN).
+    pub causes: Vec<String>,
+    /// A utility's disclaimer about its figures (ODIN).
+    pub disclaimer: Option<String>,
 }
 
 impl Area {
@@ -307,6 +329,9 @@ pub fn parse_counts(feed: &Feed, level: Level, text_: &str) -> Result<(Vec<Area>
                 served: layer.served.and_then(|s| num(p, s)),
                 county_out: layer.county_out.and_then(|c| num(p, c)),
                 updated: layer.updated.and_then(|u| p.get(u)?.as_f64()).map(|ms| ms / 1000.0),
+                source: feed.credit,
+                group: layer.group,
+                ..Area::default()
             })
         })
         .collect();
@@ -441,6 +466,12 @@ pub async fn outlines(feed: &Feed, level: Level) -> Result<HashMap<String, Value
 pub struct Outages {
     counts: HashMap<(usize, Level), Vec<Area>>,
     outlines: HashMap<(usize, Level), HashMap<String, Value>>,
+    /// ODIN's counties (outside the states above), shown at both levels.
+    odin: Vec<Area>,
+    /// Their outlines, by key.
+    odin_outlines: HashMap<String, Value>,
+    /// ODIN utilities left out as not reporting lately.
+    odin_stale: usize,
 }
 
 impl Outages {
@@ -454,14 +485,34 @@ impl Outages {
         self.outlines.insert((feed, level), outlines);
     }
 
+    /// ODIN's counties, and how many utilities were left out as not reporting lately.
+    pub fn set_odin(&mut self, areas: Vec<Area>, stale: usize) {
+        (self.odin, self.odin_stale) = (areas, stale);
+    }
+
+    /// Outlines of ODIN's counties, by key (added to those already in).
+    pub fn add_odin_outlines(&mut self, outlines: HashMap<String, Value>) {
+        self.odin_outlines.extend(outlines);
+    }
+
+    /// The ODIN counties without an outline yet.
+    pub fn odin_missing(&self) -> Vec<String> {
+        self.odin.iter().filter(|a| !self.odin_outlines.contains_key(&a.key)).map(|a| a.key.clone()).collect()
+    }
+
     /// Whether any county figures have arrived.
     pub fn has_counts(&self) -> bool {
-        self.counts.keys().any(|(_, l)| *l == Level::County)
+        self.counts.keys().any(|(_, l)| *l == Level::County) || !self.odin.is_empty()
     }
 
     /// The area with this key, at either level.
     pub fn find(&self, key: &str) -> Option<&Area> {
-        self.counts.values().flatten().find(|a| a.key == key)
+        self.counts.values().flatten().chain(&self.odin).find(|a| a.key == key)
+    }
+
+    /// The areas at `level`, the states' and ODIN's.
+    fn at_level(&self, level: Level) -> impl Iterator<Item = &Area> {
+        self.counts.iter().filter(move |((_, l), _)| *l == level).flat_map(|(_, v)| v).chain(&self.odin)
     }
 
     /// Every feed's areas at `level`, each with its outline where it's in: counties with
@@ -476,6 +527,7 @@ impl Outages {
                 let outlines = self.outlines.get(&(*f, *l));
                 areas.iter().filter_map(move |a| Some((a, outlines?.get(&a.key)?)))
             })
+            .chain(self.odin.iter().filter_map(|a| Some((a, self.odin_outlines.get(&a.key)?))))
             .filter(|(a, _)| level == Level::County || a.out > 0)
             .collect();
         let rank = |a: &Area| (Some(a.key.as_str()) == selected, band(a).map_or(-1, |b| b as i64), a.out);
@@ -520,7 +572,7 @@ impl Outages {
     /// areas have no customers served (Maryland's ZIP codes), the count bands.
     pub fn legends(&self, level: Level) -> Vec<crate::legend::Legend> {
         use ratatui::style::Color;
-        let areas: Vec<&Area> = self.counts.iter().filter(|((_, l), _)| *l == level).flat_map(|(_, v)| v).collect();
+        let areas: Vec<&Area> = self.at_level(level).collect();
         let (mut by_share, mut by_count) = ([0usize; 5], [0usize; 5]);
         let (mut shares, mut counts) = (false, false);
         for a in &areas {
@@ -540,28 +592,36 @@ impl Outages {
             }));
         }
         if counts {
-            let kinds: Vec<&str> = {
-                let mut k: Vec<&str> = areas.iter().filter(|a| a.share().is_none()).map(|a| a.kind).collect();
+            let groups: Vec<&str> = {
+                let mut k: Vec<&str> = areas.iter().filter(|a| a.share().is_none()).map(|a| a.group).collect();
                 k.sort_unstable();
                 k.dedup();
                 k
             };
-            let title = format!("{} by customers out", kinds.iter().map(|k| format!("{k}s")).collect::<Vec<_>>().join(", "));
-            out.push(
-                COUNT_BANDS
-                    .iter()
-                    .zip(BANDS.iter())
-                    .zip(by_count)
-                    .rev()
-                    .fold(crate::legend::Legend::new(title), |l, (((_, label), (_, _, (r, g, b))), n)| l.entry("■", Color::Rgb(*r, *g, *b), *label, Some(n))),
-            );
+            let title = format!("{} by customers out", groups.join(", "));
+            let mut l = COUNT_BANDS
+                .iter()
+                .zip(BANDS.iter())
+                .zip(by_count)
+                .rev()
+                .fold(crate::legend::Legend::new(title), |l, (((_, label), (_, _, (r, g, b))), n)| l.entry("■", Color::Rgb(*r, *g, *b), *label, Some(n)));
+            if self.odin_stale > 0 {
+                l = l.entry("·", Color::DarkGray, "ODIN utilities not reporting", Some(self.odin_stale));
+            }
+            out.push(l);
         }
         out
     }
 
-    /// Each state's customers out (from its counties), in [`FEEDS`] order: ("PA", 197069).
+    /// Each state's customers out (from its counties), in [`FEEDS`] order, then ODIN's
+    /// elsewhere: ("PA", 197069), ("ODIN", 25431).
     pub fn totals(&self) -> Vec<(&'static str, u64)> {
-        (0..FEEDS.len()).filter_map(|f| Some((FEEDS[f].state, self.counts.get(&(f, Level::County))?.iter().map(|a| a.out).sum()))).collect()
+        let mut t: Vec<(&'static str, u64)> =
+            (0..FEEDS.len()).filter_map(|f| Some((FEEDS[f].state, self.counts.get(&(f, Level::County))?.iter().map(|a| a.out).sum()))).collect();
+        if !self.odin.is_empty() {
+            t.push(("ODIN", self.odin.iter().map(|a| a.out).sum()));
+        }
+        t
     }
 }
 
@@ -576,9 +636,9 @@ pub fn layers(source: &str) -> Result<Vec<crate::StyleLayer>> {
     [fill, line, selected].iter().map(|j| Ok(crate::StyleLayer::from_json(j)?.0)).collect()
 }
 
-/// The credit shown while outages are on: every feed's.
+/// The credit shown while outages are on: every feed's, and ODIN's.
 pub fn credit() -> String {
-    format!("Power outages: {}", FEEDS.iter().map(|f| f.credit).collect::<Vec<_>>().join(", "))
+    format!("Power outages: {}, {}", FEEDS.iter().map(|f| f.credit).collect::<Vec<_>>().join(", "), crate::odin::CREDIT)
 }
 
 #[cfg(test)]
@@ -636,18 +696,7 @@ mod tests {
 
     #[test]
     fn bands_by_share_or_count() {
-        let a = |out, served| Area {
-            key: "x:1".into(),
-            state: "PA",
-            kind: "county",
-            name: String::new(),
-            code: None,
-            county: None,
-            out,
-            served,
-            county_out: None,
-            updated: None,
-        };
+        let a = |out, served| Area { key: "x:1".into(), state: "PA", kind: "county", out, served, ..Area::default() };
         assert_eq!(band(&a(0, Some(100))), None);
         assert_eq!(band(&a(1, Some(1000))), Some(0));
         assert_eq!(band(&a(1, Some(100))), Some(1));
@@ -673,7 +722,10 @@ mod tests {
                 assert!(f.layer(l).is_some_and(|l| l.url.starts_with("https://")));
             }
         }
-        assert_eq!(credit(), "Power outages: PEMA / PennDOT, Maryland Dept. of Emergency Management");
+        assert_eq!(
+            credit(),
+            "Power outages: PEMA / PennDOT, Maryland Dept. of Emergency Management, Outage Data Initiative Nationwide (ODIN), ORNL / U.S. DOE"
+        );
     }
 
     #[test]

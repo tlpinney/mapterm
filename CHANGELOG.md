@@ -15,7 +15,11 @@ All notable changes to mapterm are listed here. The format follows
   total and when the figures were gathered; the status line has each state's total, and
   legends the areas in each band. The states update every 15 minutes; mapterm asks every 5,
   with the ETag; outlines once, kept 30 days. Each state is an entry in
-  `mapterm::outages::FEEDS`.
+  `mapterm::outages::FEEDS`. Elsewhere, counties come from ODIN (the Outage Data Initiative
+  Nationwide, Oak Ridge National Laboratory / U.S. DOE), its public county-level feed:
+  shaded by customers out, with the utilities' figures, estimated restoration times, causes
+  and disclaimers on click; utilities that haven't reported for 3 hours are left out and
+  counted as not reporting. `mapterm::odin`.
 - `mapterm --cache` lists, and `--cache-clear` empties, the live layers' caches by name:
   `radio` (SatNOGS), `zones` (NWS alert zones), `radar` (RainViewer scans) and `outages`.
 
