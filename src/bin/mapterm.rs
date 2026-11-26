@@ -107,10 +107,11 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 text. Areas that name forecast zones fill in as their outlines arrive
                 (one a second, kept 90 days). With --radar, the alerts in force at the
                 radar's time
-  --outages     power outages in Pennsylvania from the state's outage map (PEMA and
-                PennDOT, no key): counties, and from zoom 9 municipalities, shaded by
-                the share of customers out; click one for its numbers. The state
-                updates it every 15 minutes; mapterm asks every 5
+  --outages     power outages from the states that publish them (no key): Pennsylvania
+                (PEMA / PennDOT) and Maryland (MDEM). Counties, and from zoom 9
+                municipalities or ZIP codes, shaded by the share of customers out (by
+                how many where the state doesn't count customers); click one for its
+                numbers. The states update every 15 minutes; mapterm asks every 5
   --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
                 this computer's time zone
   --sondes      live weather balloons (radiosondes) from SondeHub, tracked by amateur
@@ -222,7 +223,7 @@ struct Args {
     sondes: bool,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
-    /// --outages: Pennsylvania power outages (PEMA / PennDOT).
+    /// --outages: power outages (Pennsylvania, Maryland).
     outages: bool,
     /// --utc: show times in UTC rather than the computer's time zone.
     utc: bool,
@@ -1518,15 +1519,15 @@ fn draw_alert(f: &mut ratatui::Frame, area: Rect, al: &mapterm::nws::Alert) {
 
 /// What the --outages task sends.
 enum OutageMsg {
-    /// A level's outlines, by key.
-    Outlines(mapterm::outages::Level, std::collections::HashMap<String, serde_json::Value>),
-    /// A level's figures (municipalities: those with customers out).
-    Counts(mapterm::outages::Level, Vec<mapterm::outages::Area>),
+    /// A feed's level's outlines, by key.
+    Outlines(usize, mapterm::outages::Level, std::collections::HashMap<String, serde_json::Value>),
+    /// A feed's level's figures (finer areas: those with customers out).
+    Counts(usize, mapterm::outages::Level, Vec<mapterm::outages::Area>),
     /// Why a request failed.
     Error(String),
 }
 
-/// The --outages panel for the selected county or municipality.
+/// The --outages panel for the selected county, municipality or ZIP code.
 fn draw_outage(f: &mut ratatui::Frame, area: Rect, o: &mapterm::outages::Area) {
     use ratatui::style::Modifier;
     use ratatui::widgets::{Borders, Wrap};
@@ -1536,29 +1537,32 @@ fn draw_outage(f: &mut ratatui::Frame, area: Rect, o: &mapterm::outages::Area) {
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(block, area);
     let (r, g, b) = mapterm::outages::rgb(o);
-    let town = o.key.contains('-');
     let key = |k: &str| Span::styled(format!(" {k:<9}"), dim);
-    let title = if town { o.name.clone() } else { format!("{} County", o.name) };
-    let mut l = vec![Line::from(Span::styled(format!(" {title}"), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
-    if town {
-        l.push(Line::from(Span::styled(format!(" {} County", o.county), dim)));
-    }
+    let mut l = vec![Line::from(Span::styled(format!(" {}", o.title()), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
+    let under = match &o.county {
+        Some(c) => format!(" {c} County, {}", o.state),
+        None if o.kind == "county" => format!(" {}", o.state),
+        None => format!(" {}, {}", o.kind, o.state),
+    };
+    l.push(Line::from(Span::styled(under, dim)));
     l.push(Line::default());
     l.push(Line::from(vec![key("out"), Span::styled(format!("{} customers", thousands(o.out as usize)), TStyle::new().fg(Color::Rgb(r, g, b)))]));
-    if o.served > 0 {
-        l.push(Line::from(vec![key("served"), Span::raw(format!("{} (estimated)", thousands(o.served as usize)))]));
-        let pct = o.share() * 100.0;
+    if let (Some(served), Some(share)) = (o.served, o.share()) {
+        l.push(Line::from(vec![key("served"), Span::raw(format!("{} (estimated)", thousands(served as usize)))]));
+        let pct = share * 100.0;
         l.push(Line::from(vec![key("share"), Span::raw(if pct > 0.0 && pct < 1.0 { format!("{pct:.1}%") } else { format!("{pct:.0}%") })]));
+    } else {
+        l.push(Line::from(vec![key("served"), Span::styled("not given for this area", dim)]));
     }
-    if let Some(c) = o.county_out {
-        l.push(Line::from(vec![key("county"), Span::raw(format!("{} out in {} County", thousands(c as usize), o.county))]));
+    if let (Some(c), Some(county)) = (o.county_out, &o.county) {
+        l.push(Line::from(vec![key("county"), Span::raw(format!("{} out in {county} County", thousands(c as usize)))]));
     }
     if let Some(t) = o.updated {
         let ago = ((unix_now() - t) / 60.0).max(0.0).round();
         l.push(Line::from(vec![key("updated"), Span::raw(format!("{} · {ago:.0} min ago", hhmm(t)))]));
     }
     l.push(Line::default());
-    l.push(Line::from(Span::styled(" From the utilities' reports to the state, every 15 minutes; the state's map has no restoration times.", dim)));
+    l.push(Line::from(Span::styled(" From the utilities' reports to the state, every 15 minutes; no restoration times.", dim)));
     l.push(Line::default());
     l.push(Line::from(Span::styled(" esc close", dim)));
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
@@ -2220,10 +2224,10 @@ async fn main() -> Result<()> {
     let outage_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
     if a.outages {
         map.add_source(OUTAGES, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
-        map.set_attribution(OUTAGES, mapterm::outages::CREDIT)?;
+        map.set_attribution(OUTAGES, &mapterm::outages::credit())?;
         map.add_layers(mapterm::outages::layers(OUTAGES)?, None)?;
         if mapterm::kitty::supported() {
-            map.add_source(OUTAGE_TILES, MapSource::raster(mapterm::areas::tile_source(outage_tiles.clone(), "outages", mapterm::outages::CREDIT)?))?;
+            map.add_source(OUTAGE_TILES, MapSource::raster(mapterm::areas::tile_source(outage_tiles.clone(), "outages", &mapterm::outages::credit())?))?;
             map.add_layer(mapterm::StyleLayer::raster(OUTAGE_TILES, OUTAGE_TILES))?;
             for id in OUTAGE_LAYERS {
                 map.set_visibility(id, false)?;
@@ -2670,10 +2674,7 @@ async fn main() -> Result<()> {
     // --outages: each level's outlines once (kept on disk for 30 days), then its counts every
     // 5 minutes (the state updates them every 15) with their ETag; counties first, as
     // they're shown first.
-    let mut outage_counties: Vec<mapterm::outages::Area> = Vec::new();
-    let mut outage_towns: Vec<mapterm::outages::Area> = Vec::new();
-    let mut outage_county_outlines: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
-    let mut outage_town_outlines: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let mut outages = mapterm::outages::Outages::default();
     // What the outage layer was last built from: new data since, the level, the selection.
     let mut outages_new = false;
     let mut outage_level: Option<mapterm::outages::Level> = None;
@@ -2682,43 +2683,46 @@ async fn main() -> Result<()> {
     let (outx, mut outrx) = mpsc::unbounded_channel::<OutageMsg>();
     if a.outages {
         tokio::spawn(async move {
-            use mapterm::outages::{Level, counts, outlines};
-            let mut tags: std::collections::HashMap<Level, Option<String>> = std::collections::HashMap::new();
-            let mut have: std::collections::HashSet<Level> = std::collections::HashSet::new();
+            use mapterm::outages::{FEEDS, Level, counts, outlines};
+            let mut tags: std::collections::HashMap<(usize, Level), Option<String>> = std::collections::HashMap::new();
+            let mut have: std::collections::HashSet<(usize, Level)> = std::collections::HashSet::new();
             loop {
                 let mut failed = false;
-                for level in [Level::County, Level::Municipal] {
-                    if !have.contains(&level) {
-                        let m = match outlines(level).await {
-                            Ok(o) => {
-                                have.insert(level);
-                                OutageMsg::Outlines(level, o)
+                // Every state's counties first, as they're shown first, then the finer areas.
+                for level in [Level::County, Level::Local] {
+                    for (i, feed) in FEEDS.iter().enumerate().filter(|(_, f)| f.layer(level).is_some()) {
+                        if !have.contains(&(i, level)) {
+                            let m = match outlines(feed, level).await {
+                                Ok(o) => {
+                                    have.insert((i, level));
+                                    OutageMsg::Outlines(i, level, o)
+                                }
+                                Err(e) => {
+                                    failed = true;
+                                    OutageMsg::Error(format!("{e:#}"))
+                                }
+                            };
+                            if outx.send(m).is_err() {
+                                return;
                             }
+                        }
+                        let tag = tags.get(&(i, level)).cloned().flatten();
+                        let m = match counts(feed, level, tag.as_deref()).await {
+                            Ok(Some((areas, t))) => {
+                                tags.insert((i, level), t);
+                                Some(OutageMsg::Counts(i, level, areas))
+                            }
+                            Ok(None) => None,
                             Err(e) => {
                                 failed = true;
-                                OutageMsg::Error(format!("{e:#}"))
+                                Some(OutageMsg::Error(format!("{e:#}")))
                             }
                         };
-                        if outx.send(m).is_err() {
+                        if let Some(m) = m
+                            && outx.send(m).is_err()
+                        {
                             return;
                         }
-                    }
-                    let tag = tags.get(&level).cloned().flatten();
-                    let m = match counts(level, tag.as_deref()).await {
-                        Ok(Some((areas, t))) => {
-                            tags.insert(level, t);
-                            Some(OutageMsg::Counts(level, areas))
-                        }
-                        Ok(None) => None,
-                        Err(e) => {
-                            failed = true;
-                            Some(OutageMsg::Error(format!("{e:#}")))
-                        }
-                    };
-                    if let Some(m) = m
-                        && outx.send(m).is_err()
-                    {
-                        return;
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(if failed { 900 } else { 300 })).await;
@@ -2946,15 +2950,10 @@ async fn main() -> Result<()> {
             // The outages at the level the zoom shows: rebuilt when new figures or outlines
             // arrive, the level changes, or another area is selected.
             if a.outages {
-                use mapterm::outages::Level;
-                let level = Level::at(draw_cam.zoom);
+                let level = mapterm::outages::Level::at(draw_cam.zoom);
                 if outages_new || outage_level != Some(level) || selected_outage != outage_shown_selected {
-                    let (areas, outlines) = match level {
-                        Level::County => (&outage_counties, &outage_county_outlines),
-                        Level::Municipal => (&outage_towns, &outage_town_outlines),
-                    };
-                    map.set_data(OUTAGES, &mapterm::outages::features(areas, outlines, level, selected_outage.as_deref()))?;
-                    outage_tiles.set(mapterm::outages::shapes(areas, outlines, level, selected_outage.as_deref()));
+                    map.set_data(OUTAGES, &outages.features(level, selected_outage.as_deref()))?;
+                    outage_tiles.set(outages.shapes(level, selected_outage.as_deref()));
                     map.put_raster_tile(OUTAGE_TILES, None, true);
                     (outages_new, outage_level, outage_shown_selected) = (false, Some(level), selected_outage.clone());
                 }
@@ -3114,7 +3113,7 @@ async fn main() -> Result<()> {
                 let balloon = selected_balloon.as_deref().and_then(|s| balloons.get(s, unix_now() - SONDE_DELAY));
                 let sat = sats.iter().find(|s| Some(s.norad) == selected_sat).and_then(|s| Some((s, s.at(unix_now())?)));
                 let alert = selected_alert.as_ref().and_then(|id| alerts.iter().find(|a| &a.id == id));
-                let outage = selected_outage.as_ref().and_then(|k| outage_counties.iter().chain(outage_towns.iter()).find(|a| &a.key == k));
+                let outage = selected_outage.as_deref().and_then(|k| outages.find(k));
                 let panel_w =
                     if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || balloon.is_some() {
                         52.min(main.width / 2)
@@ -3139,10 +3138,8 @@ async fn main() -> Result<()> {
                     if ais_key.is_some() && !fleet.is_empty() {
                         legends.push(mapterm::ais::legend(&fleet));
                     }
-                    if a.outages && !outage_counties.is_empty() {
-                        let level = mapterm::outages::Level::at(cam.zoom);
-                        let areas = if level == mapterm::outages::Level::County { &outage_counties } else { &outage_towns };
-                        legends.push(mapterm::outages::legend(areas, level));
+                    if a.outages {
+                        legends.extend(outages.legends(mapterm::outages::Level::at(cam.zoom)));
                     }
                     let mut room = m;
                     for l in &legends {
@@ -3309,10 +3306,12 @@ async fn main() -> Result<()> {
                 }
                 if a.outages {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0xb4, 0x46));
-                    let text = if outage_counties.is_empty() {
+                    let totals = outages.totals();
+                    let text = if totals.is_empty() {
                         "⚡ … ".to_string()
                     } else {
-                        format!("⚡ {} out ", thousands(outage_counties.iter().map(|c| c.out as usize).sum()))
+                        let each: Vec<String> = totals.iter().map(|(st, n)| format!("{st} {}", thousands(*n as usize))).collect();
+                        format!("⚡ {} out ", each.join(" · "))
                     };
                     spans.push(Span::styled(text, st));
                 }
@@ -3931,15 +3930,12 @@ async fn main() -> Result<()> {
                     }
                 }
                 Some(m) = outrx.recv() => {
-                    use mapterm::outages::Level;
                     match m {
-                        OutageMsg::Outlines(Level::County, o) => outage_county_outlines = o,
-                        OutageMsg::Outlines(Level::Municipal, o) => outage_town_outlines = o,
-                        OutageMsg::Counts(Level::County, v) => {
-                            dlog(|| format!("outages: {} customers out", v.iter().map(|c| c.out).sum::<u64>()));
-                            outage_counties = v;
+                        OutageMsg::Outlines(f, level, o) => outages.set_outlines(f, level, o),
+                        OutageMsg::Counts(f, level, v) => {
+                            dlog(|| format!("outages: {} {:?}: {} areas, {} out", mapterm::outages::FEEDS[f].state, level, v.len(), v.iter().map(|c| c.out).sum::<u64>()));
+                            outages.set_counts(f, level, v);
                         }
-                        OutageMsg::Counts(Level::Municipal, v) => outage_towns = v,
                         OutageMsg::Error(e) => {
                             dlog(|| format!("outages: {e}"));
                             note = Some((Instant::now(), format!("outages: {e}")));
@@ -4761,8 +4757,9 @@ async fn main() -> Result<()> {
                                             } else {
                                                 hits.iter()
                                                     .filter(|p| p.source.as_deref() == Some(OUTAGES))
+                                                    .filter(|p| p.prop("level").and_then(|v| v.as_str()) == Some(level.name()))
                                                     .filter_map(|p| p.prop("key").and_then(|v| v.as_str()))
-                                                    .find(|k| k.contains('-') == (level == mapterm::outages::Level::Municipal))
+                                                    .next()
                                                     .map(str::to_string)
                                             };
                                             if selected_alert.is_some() || selected_outage.is_some() {

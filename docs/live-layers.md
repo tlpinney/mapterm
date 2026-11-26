@@ -247,28 +247,39 @@ entity's availability): live, that's now; with `--radar` paused or playing, the 
 time. The NWS lists only alerts still active, so ones that ended within the radar's two
 hours don't come back.
 
-## Power outages (Pennsylvania)
+## Power outages (Pennsylvania, Maryland)
 
 ```
-mapterm --outages --at 40.0,-75.9 -z 8
+mapterm --outages --at 39.6,-76.6 -z 7
 ```
 
-Customers without power in Pennsylvania, from the state's outage map, run by PEMA (the
-Pennsylvania Emergency Management Agency) and PennDOT from the utilities' reports (a public
-service, no key). Below zoom 9 each county is shaded by the share of its customers out;
-from zoom 9, each municipality with customers out. Yellow is under 1%, through orange and
-red, to magenta at 30% or more; counties with nobody out are a faint outline. As with
-alerts, image tiles where the terminal shows images, braille elsewhere.
+Customers without power, from the states that publish them as a public feed (no key), from
+the utilities' reports, updated every 15 minutes:
+
+| State | From | Counties | From zoom 9 |
+|---|---|---|---|
+| Pennsylvania | PEMA and PennDOT | by share out | municipalities, by share out |
+| Maryland | Maryland Department of Emergency Management | by share out | ZIP codes, by customers out |
+
+Areas are shaded by the share of customers out: yellow under 1%, through orange and red, to
+magenta at 30% or more. Maryland's ZIP codes don't come with how many customers each has, so
+they're shaded by how many are out instead (1–9 up to 2,000 or more), with a legend of their
+own. Counties with nobody out are a faint outline. As with alerts, image tiles where the
+terminal shows images, braille elsewhere.
 
 Click an area for its numbers: customers out and served (an estimate), the share, the
-county's total for a municipality, and when the utilities' figures were gathered. The status
-line has the statewide total (⚡ 178,839 out), and the legend counts the areas in each band.
+county's total for a municipality, and when the figures were gathered. The status line has
+each state's total (⚡ PA 207,492 · MD 176,862 out), and the legends count the areas in each
+band.
 
-The state updates the figures every 15 minutes, and mapterm asks every 5, with the
-ETag, so an unchanged answer is a tiny reply. The outlines never change: each level's are
-fetched once (about 100 KB for counties, 2 MB for municipalities) and kept for 30 days.
-There are no outage areas or restoration times; the state's map has neither. With
-`--outages` the map switches to `mapterm-weather`, like `--radar` and `--alerts`.
+mapterm asks every 5 minutes, with each layer's ETag, so an unchanged answer is a tiny reply.
+The outlines never change: each layer's are fetched once and kept for 30 days. There are no
+outage areas or restoration times; the states' maps have neither. With `--outages` the map
+switches to `mapterm-weather`, like `--radar` and `--alerts`.
+
+Other states: most don't publish outages as a public feed (they point to the utilities'
+maps), and the national sources are closed or paid. A state that does can be added as a few
+lines in `src/outages.rs` (`FEEDS`): its layers' URLs and which fields hold what.
 
 ## Legends
 

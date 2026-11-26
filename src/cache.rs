@@ -61,7 +61,7 @@ pub fn caches_in(root: &Path) -> Vec<Cache> {
                 "radio" => ("satellite transmitters from the SatNOGS DB (--sats)", "re-read after a day".to_string()),
                 "zones" => ("weather alert zone outlines from the NWS (--alerts)", "kept 90 days".to_string()),
                 "radar" => ("weather radar scans from RainViewer (--radar)", "scans over 3 hours old go".to_string()),
-                "outages" => ("power outage outlines from PEMA / PennDOT (--outages)", "re-read after 30 days".to_string()),
+                "outages" => ("power outage outlines from the states (--outages)", "re-read after 30 days".to_string()),
                 _ => ("left by earlier versions (a file per tile), no longer read", "none: clear it".to_string()),
             };
             Cache { name, about, paths, bytes, files, limit }

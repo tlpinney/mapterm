@@ -8,11 +8,14 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
-- Power outages in Pennsylvania: `--outages` shades counties, and from zoom 9
-  municipalities, by the share of customers without power, from the state's outage map (PEMA
-  and PennDOT, no key). Click an area for customers out and served, the county's total and
-  when the figures were gathered; the status line has the statewide total, and a legend the
-  areas in each band. The state updates the figures every 15 minutes; mapterm asks every 5, with the ETag; outlines once, kept 30 days.
+- Power outages: `--outages` shades counties, and from zoom 9 finer areas, by the share of
+  customers without power, from the states that publish a public feed (no key): Pennsylvania
+  (PEMA and PennDOT; municipalities) and Maryland (MDEM; ZIP codes, shaded by customers out,
+  as they have no customer counts). Click an area for customers out and served, the county's
+  total and when the figures were gathered; the status line has each state's total, and
+  legends the areas in each band. The states update every 15 minutes; mapterm asks every 5,
+  with the ETag; outlines once, kept 30 days. Each state is an entry in
+  `mapterm::outages::FEEDS`.
 - `mapterm --cache` lists, and `--cache-clear` empties, the live layers' caches by name:
   `radio` (SatNOGS), `zones` (NWS alert zones), `radar` (RainViewer scans) and `outages`.
 
