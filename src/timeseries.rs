@@ -177,6 +177,39 @@ pub fn render_trails<'a>(
         .collect()
 }
 
+/// A path to draw: lon/lat points and an RGB color.
+pub type Line = (Vec<(f64, f64)>, (u8, u8, u8));
+
+/// Draw `lines` (lon/lat points, each line with its color) into an RGBA image (not
+/// premultiplied), `w` x `h` pixels, for a map drawn by `vp` in cells of `cell_px` pixels:
+/// smooth paths such as a satellite's ground track, as a kitty image under the text.
+pub fn render_lines(lines: &[Line], vp: &crate::Viewport, w: u32, h: u32, cell_px: (f64, f64)) -> Vec<u8> {
+    use tiny_skia::{LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
+    let Some(mut pm) = Pixmap::new(w.max(1), h.max(1)) else { return Vec::new() };
+    let (sx, sy) = (cell_px.0 / 2.0, cell_px.1 / 4.0);
+    let stroke = Stroke { width: (cell_px.0 / 5.0).clamp(1.5, 4.0) as f32, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
+    for (pts, (r, g, b)) in lines {
+        let mut pb = PathBuilder::new();
+        for (i, &(lon, lat)) in pts.iter().enumerate() {
+            let (x, y) = vp.dot_ll(lon, lat);
+            let (x, y) = ((x * sx) as f32, (y * sy) as f32);
+            if i == 0 { pb.move_to(x, y) } else { pb.line_to(x, y) }
+        }
+        let Some(path) = pb.finish() else { continue };
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(*r, *g, *b, 210);
+        paint.anti_alias = true;
+        pm.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+    }
+    pm.pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect()
+}
+
 /// The point `meters` from (`lon`, `lat`) along `bearing` (degrees from north), on a sphere
 /// (flat-earth steps are fine for the few kilometers between samples).
 pub fn travel(lon: f64, lat: f64, meters: f64, bearing: f64) -> (f64, f64) {
@@ -255,5 +288,15 @@ mod tests {
         }
         assert_eq!(p.trail(15.0, 60.0), vec![(0.0, 0.0), (1.0, 0.0), (1.5, 0.0)]);
         assert_eq!(p.trail(15.0, 6.0), vec![(1.0, 0.0), (1.5, 0.0)]);
+    }
+
+    #[test]
+    fn lines_render_as_an_image() {
+        let vp = crate::Viewport::new(&crate::Camera::new(0.0, 0.0, 3.0), ratatui::layout::Rect::new(0, 0, 40, 10));
+        let line = vec![(-10.0, -5.0), (0.0, 0.0), (10.0, 5.0)];
+        let rgba = render_lines(&[(line, (127, 178, 255))], &vp, 320, 160, (8.0, 16.0));
+        assert_eq!(rgba.len(), 320 * 160 * 4);
+        assert!(rgba.chunks(4).filter(|p| p[3] > 0).count() > 100);
+        assert!(render_lines(&[], &vp, 320, 160, (8.0, 16.0)).chunks(4).all(|p| p[3] == 0));
     }
 }

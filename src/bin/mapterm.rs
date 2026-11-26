@@ -537,6 +537,8 @@ const TRAIL_IMAGE: u32 = 4_000_000_002;
 /// The --ais source and layer, and its trail image.
 const SHIPS: &str = "ships";
 const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
+/// The kitty image of paths: the selected satellite's ground track (over the trails).
+const PATH_IMAGE: u32 = 4_000_000_005;
 /// --ais draws ships this many seconds in the past (ships under way report every 2 to 10 s;
 /// small boats every 30 s, which past the last fix move along their course).
 const AIS_DELAY: f64 = 10.0;
@@ -668,8 +670,7 @@ fn draw_sat(
     f.render_widget(block, area);
     let key = |k: &str| Span::styled(format!(" {k:<13}"), dim);
     let (r, g, b) = mapterm::satellites::orbit_rgb(fix.alt_km);
-    let glyph = if s.norad == 25544 { "◆" } else { "◇" };
-    let mut l = vec![Line::from(Span::styled(format!(" {glyph} {}", s.name), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
+    let mut l = vec![Line::from(Span::styled(format!(" {} {}", s.glyph(), s.name), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
     l.push(Line::default());
     l.push(Line::from(vec![key("altitude"), Span::raw(format!("{:.0} km", fix.alt_km))]));
     l.push(Line::from(vec![key("speed"), Span::raw(format!("{:.2} km/s", fix.speed)), Span::styled(format!("  {:.0} km/h", fix.speed * 3600.0), dim)]));
@@ -1481,7 +1482,7 @@ async fn main() -> Result<()> {
     // inline. It asks the terminal, so it runs in raw mode, before the input thread starts.
     // --adsb trails as an image under the text where the terminal shows images: braille lines
     // re-snap to their dot grid as they grow, which shimmers.
-    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some()) && mapterm::kitty::supported();
+    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some()) && mapterm::kitty::supported();
     if trails_kitty {
         let _ = map.set_visibility(TRAILS, false);
     }
@@ -1632,7 +1633,7 @@ async fn main() -> Result<()> {
     // (aircraft, ships) are up.
     let mut trails_moved = Instant::now();
     let mut trails_drawn = Instant::now() - Duration::from_secs(10);
-    let mut trails_shown = (false, false);
+    let mut trails_shown = (false, false, false);
     // `g`: the location helper runs on a blocking task; its answer flies the map there.
     let (ltx, mut lrx) = mpsc::unbounded_channel::<Result<mapterm::locate::Fix>>();
     let mut locating = false;
@@ -1710,12 +1711,14 @@ async fn main() -> Result<()> {
                 && let Some(f) = s.at(unix_now())
             {
                 let dim = Color::Rgb(127, 178, 255);
-                for part in s.track(unix_now(), s.period_min()) {
-                    overlays.push(Overlay::Line { pts: part, color: dim });
+                // As an image with the trails where the terminal shows images; braille otherwise.
+                if !trails_kitty {
+                    for part in s.track(unix_now(), s.period_min()) {
+                        overlays.push(Overlay::Line { pts: part, color: dim });
+                    }
                 }
                 let st = TStyle::new().fg(Color::Black).bg(dim).add_modifier(ratatui::style::Modifier::BOLD);
-                let glyph = if s.norad == 25544 { "◆" } else { "◇" };
-                overlays.push(Overlay::Marker { lon: f.lon, lat: f.lat, glyph: glyph.into(), style: st, label: Some((s.name.clone(), st)), priority: 101 });
+                overlays.push(Overlay::Marker { lon: f.lon, lat: f.lat, glyph: s.glyph().into(), style: st, label: Some((s.name.clone(), st)), priority: 101 });
             }
             // The selected ship, the same way.
             if let Some((s, at)) = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY)) {
@@ -1959,14 +1962,21 @@ async fn main() -> Result<()> {
                     if trails_cam != Some(view) {
                         trails_cam = Some(view);
                         trails_moved = Instant::now();
-                        for (id, shown) in [(TRAIL_IMAGE, &mut trails_shown.0), (SHIP_TRAIL_IMAGE, &mut trails_shown.1)] {
+                        for (id, shown) in [(TRAIL_IMAGE, &mut trails_shown.0), (SHIP_TRAIL_IMAGE, &mut trails_shown.1), (PATH_IMAGE, &mut trails_shown.2)] {
                             if std::mem::take(shown) {
                                 out.write_all(mapterm::kitty::free(id).as_bytes())?;
                             }
                         }
                     }
                     let settled = trails_moved.elapsed() >= Duration::from_millis(150) && !ctl.animating();
-                    let hidden = (adsb_feed.is_some() && !trails_shown.0) || (ais_key.is_some() && !trails_shown.1);
+                    // Paths: the selected satellite's ground track.
+                    let path_lines: Vec<mapterm::timeseries::Line> = sats
+                        .iter()
+                        .find(|s| Some(s.norad) == selected_sat)
+                        .map(|s| s.track(unix_now(), s.period_min()).into_iter().map(|p| (p, (127, 178, 255))).collect())
+                        .unwrap_or_default();
+                    let hidden =
+                        (adsb_feed.is_some() && !trails_shown.0) || (ais_key.is_some() && !trails_shown.1) || (!path_lines.is_empty() && !trails_shown.2);
                     if settled && ((trails_dirty && trails_drawn.elapsed() >= Duration::from_secs(1)) || (hidden && trails_dirty)) {
                         trails_dirty = false;
                         trails_drawn = Instant::now();
@@ -1999,6 +2009,17 @@ async fn main() -> Result<()> {
                                 mapterm::kitty::show_rgba(id, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, z, shm).as_bytes(),
                             )?;
                             *shown = true;
+                        }
+                        if path_lines.is_empty() {
+                            if std::mem::take(&mut trails_shown.2) {
+                                out.write_all(mapterm::kitty::free(PATH_IMAGE).as_bytes())?;
+                            }
+                        } else {
+                            let rgba = mapterm::timeseries::render_lines(&path_lines, &vp, w, h, cpx);
+                            out.write_all(
+                                mapterm::kitty::show_rgba(PATH_IMAGE, w, h, &rgba, map_area.x, map_area.y, map_area.width, map_area.height, -9, shm).as_bytes(),
+                            )?;
+                            trails_shown.2 = true;
                         }
                         dlog(|| format!("trails: {w}x{h} px, {:.1} ms, shown {trails_shown:?}", t_trails.elapsed().as_secs_f64() * 1000.0));
                     }
@@ -2202,6 +2223,10 @@ async fn main() -> Result<()> {
             let every = if sats.len() > 2000 { Duration::from_millis(500) } else { Duration::from_millis(250) };
             if !sats.is_empty() && sats_drawn.elapsed() >= every {
                 sats_drawn = Instant::now();
+                // The selected one's ground track moves on with it (or goes, when deselected).
+                if selected_sat.is_some() || trails_shown.2 {
+                    trails_dirty = true;
+                }
                 map.set_data(SATS, &mapterm::satellites::points(&sats, unix_now()))?;
             }
             if let (Some(norad), Some(me)) = (selected_sat, me.as_ref())

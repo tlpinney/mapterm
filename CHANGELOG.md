@@ -14,6 +14,9 @@ All notable changes to mapterm are listed here. The format follows
   with `--at here`, its place in your sky and next pass (`mapterm::satellites`). Elements
   are cached for 2 hours per group and errors back off 2 hours, following CelesTrak's
   one-download-per-update policy; the cache shows in `mapterm --cache` as `orbits`.
+  Starlink's thousands are a small unnamed ·, and the selected satellite's ground track is
+  a smooth image under the text where the terminal shows kitty graphics (braille elsewhere;
+  `timeseries::render_lines`).
 
 - When the status line doesn't fit, the credits get their own line above it (up to three,
   wrapped) instead of being cut off; the data's licenses ask for them to show.

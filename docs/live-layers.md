@@ -100,7 +100,9 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
 - Groups are CelesTrak's, comma-separated: `--sats` alone is `visual` (the ~100 brightest,
   with the ISS); others include `stations`, `amateur`, `weather`, `noaa`, `gnss` and
   `starlink` (about 11,000; there are always a couple of hundred above the horizon).
-- Each satellite is ◇ (the ISS ◆), colored by orbit: low, medium, geostationary.
+- Each satellite is ◇ (the ISS ◆), colored by orbit: low, medium, geostationary. Starlink
+  satellites are a small · without names, since there are thousands; select one to see
+  its name.
 - **Click** one (or **Tab** through them when there are no aircraft or ships) for its
   altitude, speed, period and inclination, and its ground track for the next orbit on the
   map. With `--at here` the panel shows where it is in your sky when it's up, and its next

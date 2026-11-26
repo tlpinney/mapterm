@@ -137,6 +137,21 @@ impl Sat {
         Some(Fix { lon, lat, alt_km, speed: (vx * vx + vy * vy + vz * vz).sqrt(), ecef: e })
     }
 
+    /// Whether it's one of SpaceX's Starlink satellites (thousands of them: drawn small and
+    /// unnamed).
+    pub fn is_starlink(&self) -> bool {
+        self.name.starts_with("STARLINK")
+    }
+
+    /// Its marker: ◆ the ISS, · a Starlink satellite, ◇ any other.
+    pub fn glyph(&self) -> &'static str {
+        match self {
+            s if s.norad == 25544 => "◆",
+            s if s.is_starlink() => "·",
+            _ => "◇",
+        }
+    }
+
     /// Minutes per orbit.
     pub fn period_min(&self) -> f64 {
         1440.0 / self.mean_motion
@@ -360,7 +375,8 @@ pub fn points(sats: &[Sat], t: f64) -> Json {
                 "type": "Feature",
                 "id": s.norad,
                 "geometry": {"type": "Point", "coordinates": [f.lon, f.lat]},
-                "properties": {"glyph": if s.norad == 25544 { "◆" } else { "◇" }, "label": s.name, "orbit": orbit,
+                // Starlink's thousands go unnamed; the selected one still shows its name.
+                "properties": {"glyph": s.glyph(), "label": if s.is_starlink() { "" } else { s.name.as_str() }, "orbit": orbit,
                                "name": s.name, "norad": s.norad, "altitude_km": f.alt_km.round()},
             }))
         })
@@ -368,8 +384,8 @@ pub fn points(sats: &[Sat], t: f64) -> Json {
     json!({"type": "FeatureCollection", "features": features})
 }
 
-/// The style layer for satellites from source `source`: ◇ (◆ for the ISS) colored by orbit
-/// height, with names.
+/// The style layer for satellites from source `source`: ◇ (◆ for the ISS, · for Starlink)
+/// colored by orbit height, with names (not Starlink's).
 pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
     let hex = |(r, g, b): (u8, u8, u8)| format!("#{r:02x}{g:02x}{b:02x}");
     let color = json!(["match", ["get", "orbit"], "low", hex(orbit_rgb(500.0)), "medium", hex(orbit_rgb(20000.0)), hex(orbit_rgb(36000.0))]);
@@ -473,6 +489,19 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
             assert!(drift < 0.5 && b.lat.abs() < 0.1, "{drift} degrees after {hours} h");
             assert!((35700.0..35900.0).contains(&b.alt_km), "{}", b.alt_km);
         }
+    }
+
+    #[test]
+    fn starlink_is_small_and_unnamed() {
+        let csv = CSV.replace("\"ISS (ZARYA)\",1998-067A", "STARLINK-31415,2024-001B").replace(",25544,", ",58001,");
+        let sats = parse_csv(&csv);
+        let s = &sats[0];
+        assert!(s.is_starlink());
+        assert_eq!(s.glyph(), "·");
+        let doc = points(&sats, s.epoch);
+        assert_eq!(doc["features"][0]["properties"]["label"], "");
+        assert_eq!(doc["features"][0]["properties"]["name"], "STARLINK-31415");
+        assert_eq!(parse_csv(CSV)[0].glyph(), "◆");
     }
 
     #[test]
