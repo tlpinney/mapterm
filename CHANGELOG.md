@@ -21,6 +21,10 @@ All notable changes to mapterm are listed here. The format follows
   and its credit "Weather data by RainViewer" (`mapterm::rainviewer`).
 - mapterm's mark on the map: "mt" in braille (⠍⠞) and the name, "map" amber and "term"
   blue on a dark tile as on mapterm.com, at the end of the credits line.
+- Times are shown in this computer's time zone (EST, EDT...): the radar's scan time, the
+  timeline (ticks on round local times), satellite passes, and when alerts end (before, in
+  the issuing office's zone). `--utc` shows UTC as before. `clock::Zone`, and
+  `Timeline::zone`.
 - `?` shows the keys over the map, the sections for what's on (map, look, find, live
   layers, radar and time); `?` or Esc closes it. The status line says `? keys`.
 - A timeline for the map's clock (`mapterm::timeline`, after Cesium's Timeline widget): tick

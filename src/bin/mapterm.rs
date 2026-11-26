@@ -105,6 +105,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 text. Areas that name forecast zones fill in as their outlines arrive
                 (one a second, kept 90 days). With --radar, the alerts in force at the
                 radar's time
+  --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
+                this computer's time zone
   --ais-key-cmd CMD
                 print the aisstream.io API key with a command (else AISSTREAM_API_KEY)
   --adsb-key-cmd CMD
@@ -207,6 +209,8 @@ struct Args {
     radar: bool,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
+    /// --utc: show times in UTC rather than the computer's time zone.
+    utc: bool,
     /// --ais-key-cmd: prints the aisstream.io API key.
     ais_key_cmd: Option<String>,
     /// --adsb-key-cmd: prints the adsb.lol API key.
@@ -259,6 +263,7 @@ fn args() -> Result<Args> {
         ais: false,
         radar: false,
         alerts: false,
+        utc: false,
         sats: None,
         sats_country: Vec::new(),
         sats_color: SatColor::Orbit,
@@ -365,6 +370,7 @@ fn args() -> Result<Args> {
             "--ais" => a.ais = true,
             "--radar" => a.radar = true,
             "--alerts" => a.alerts = true,
+            "--utc" => a.utc = true,
             "--sats" | "--satellites" => {
                 // The groups are optional: take the next argument only if it's a list of
                 // group names (not a file, URL or option).
@@ -1191,9 +1197,16 @@ const SATS: &str = "satellites";
 const ALERTS: &str = "alerts";
 
 /// `HH:MM` (UTC) of a Unix time.
+/// The time zone times are shown in: this computer's, or UTC with --utc.
+static ZONE: std::sync::OnceLock<mapterm::clock::Zone> = std::sync::OnceLock::new();
+
+fn zone() -> mapterm::clock::Zone {
+    ZONE.get().copied().unwrap_or_default()
+}
+
+/// `t` as `HH:MM EST` in the zone times are shown in.
 fn hhmm(t: f64) -> String {
-    let s = t.rem_euclid(86400.0) as u64;
-    format!("{:02}:{:02}", s / 3600, s / 60 % 60)
+    zone().hhmm_zone(t)
 }
 
 /// Seconds since the Unix epoch, the clock aircraft fixes are kept on.
@@ -1347,10 +1360,10 @@ fn draw_sat(
         match pass {
             Some(Some(p)) => {
                 let mins = |t: f64| ((t - now) / 60.0).max(0.0);
-                let when = if p.rise <= now { "now".to_string() } else { format!("{} UTC, in {:.0} min", hhmm(p.rise), mins(p.rise)) };
+                let when = if p.rise <= now { "now".to_string() } else { format!("{}, in {:.0} min", hhmm(p.rise), mins(p.rise)) };
                 l.push(Line::from(vec![key("next pass"), Span::raw(when)]));
-                l.push(Line::from(vec![key("highest"), Span::raw(format!("{:.0}° at {} UTC", p.max_elevation, hhmm(p.peak)))]));
-                l.push(Line::from(vec![key("sets"), Span::raw(format!("{} UTC", hhmm(p.set)))]));
+                l.push(Line::from(vec![key("highest"), Span::raw(format!("{:.0}° at {}", p.max_elevation, hhmm(p.peak)))]));
+                l.push(Line::from(vec![key("sets"), Span::raw(hhmm(p.set))]));
             }
             Some(None) => l.push(Line::from(vec![key("next pass"), Span::styled("none over 10° in 24 h", dim)])),
             None => {}
@@ -1422,9 +1435,19 @@ fn draw_alert(f: &mut ratatui::Frame, area: Rect, al: &mapterm::nws::Alert) {
     let mut l = vec![Line::from(Span::styled(format!(" {}", al.event), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
     l.push(Line::default());
     l.push(Line::from(vec![key("severity"), Span::styled(al.severity.label(), TStyle::new().fg(Color::Rgb(r, g, b)))]));
-    if let Some(u) = &al.until {
-        let local = u.get(..16).unwrap_or(u).replace('T', " ");
-        l.push(Line::from(vec![key("until"), Span::raw(local), Span::styled(format!(" {}", u.get(19..).unwrap_or("")), dim)]));
+    if let Some(to) = al.to {
+        // In the zone times are shown in, with the day when it's not today.
+        let (off, _) = zone().at(to);
+        let day = |t: f64| ((t + zone().at(t).0 as f64) / 86400.0).floor();
+        let when = if day(to) == day(unix_now()) {
+            hhmm(to)
+        } else {
+            let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][(((to + off as f64) / 86400.0).floor() as i64).rem_euclid(7) as usize];
+            format!("{wd} {}", hhmm(to))
+        };
+        l.push(Line::from(vec![key("until"), Span::raw(when)]));
+    } else if let Some(u) = &al.until {
+        l.push(Line::from(vec![key("until"), Span::raw(u.clone())]));
     }
     if !al.sender.is_empty() {
         l.push(Line::from(vec![key("from"), Span::raw(al.sender.clone())]));
@@ -1782,6 +1805,7 @@ fn base_visibility(map: &Map) -> std::collections::HashMap<String, bool> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut a = args()?;
+    let _ = ZONE.set(if a.utc { mapterm::clock::Zone::Utc } else { mapterm::clock::Zone::Local });
     // --at here: ask the location helper before anything depends on the start view.
     let mut me: Option<mapterm::locate::Fix> = None;
     if a.at_here {
@@ -2782,6 +2806,7 @@ async fn main() -> Result<()> {
                         let (r, g, b) = al.severity.rgb();
                         timeline.highlight(al.from.unwrap_or(f64::MIN), al.to.unwrap_or(f64::MAX), Color::Rgb(r / 3, g / 3, b / 3));
                     }
+                    timeline.zone = zone();
                     timeline.render(f.buffer_mut(), tl, &clock, now);
                 }
                 let results = matches!(search, Search::Results { .. }) || finder.is_some();
@@ -2975,7 +3000,7 @@ async fn main() -> Result<()> {
                                 "⏸ ".to_string()
                             };
                             let st = if clock.is_live() { dim } else { TStyle::new().fg(Color::Rgb(127, 178, 255)) };
-                            spans.push(Span::styled(format!("☂ {state}{} UTC · {ago:.0} min ago ", hhmm(t)), st));
+                            spans.push(Span::styled(format!("☂ {state}{} · {ago:.0} min ago ", hhmm(t)), st));
                         }
                         None => spans.push(Span::styled("☂ … ", dim)),
                     }
