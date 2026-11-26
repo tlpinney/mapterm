@@ -114,6 +114,12 @@ All notable changes to mapterm are listed here. The format follows
   the old guess; never over SSH. `MAPTERM_KITTY_MEDIUM` still overrides it
   (`kitty::probe_shm`).
 
+### Fixed
+
+- Credits on a narrow screen: they take as many lines above the status as they need (up to
+  half the window), broken between credits rather than mid-word, so the last one is never
+  cut off; before, the line count guessed character wrapping and stopped at three.
+
 ## [0.4.0] - 2026-11-24
 
 ### Added

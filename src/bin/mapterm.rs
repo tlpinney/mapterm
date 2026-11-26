@@ -776,6 +776,42 @@ fn find(
     v.into_iter().take(200).map(|(_, h)| h).collect()
 }
 
+/// The credits as lines `width` wide: each line starts with a space, credits are joined
+/// with " · " and broken between credits, and only a credit wider than a whole line is
+/// broken inside (at a space when it can be).
+fn credit_lines(items: &[String], width: usize) -> Vec<String> {
+    let room = width.max(8) - 1;
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let len = |s: &str| s.chars().count();
+    for item in items.iter().map(|i| i.trim()).filter(|i| !i.is_empty()) {
+        let need = if cur.is_empty() { len(item) } else { len(&cur) + 3 + len(item) };
+        if need <= room {
+            if !cur.is_empty() {
+                cur += " · ";
+            }
+            cur += item;
+            continue;
+        }
+        if !cur.is_empty() {
+            lines.push(format!(" {cur}"));
+            cur.clear();
+        }
+        // Too long for a line by itself: break it by words, or by characters.
+        let mut rest: Vec<char> = item.chars().collect();
+        while rest.len() > room {
+            let cut = rest[..=room].iter().rposition(|c| *c == ' ').filter(|&i| i > 0).unwrap_or(room);
+            lines.push(format!(" {}", rest[..cut].iter().collect::<String>().trim_end()));
+            rest = rest[cut..].iter().copied().skip_while(|c| *c == ' ').collect();
+        }
+        cur = rest.into_iter().collect();
+    }
+    if !cur.is_empty() {
+        lines.push(format!(" {cur}"));
+    }
+    lines
+}
+
 /// How satellites are colored (o cycles through them).
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum SatColor {
@@ -2448,7 +2484,8 @@ async fn main() -> Result<()> {
                     credits.retain(|c| *c != f.attribution);
                     credits.insert(0, f.attribution.clone());
                 }
-                let credits = if credits.is_empty() { basemap_name.clone() } else { credits.join(" · ") };
+                let credit_items = if credits.is_empty() { vec![basemap_name.clone()] } else { credits };
+                let credits = credit_items.join(" · ");
                 // While the finder is open, the status line is its prompt.
                 if let Some(fd) = finder.as_ref() {
                     spans = vec![
@@ -2474,16 +2511,22 @@ async fn main() -> Result<()> {
                 // takes effect from the next frame.
                 let width = s.width.max(1) as usize;
                 let status_width: usize = spans.iter().map(Span::width).sum();
-                let credit = Span::styled(format!("{credits} "), dim);
-                let together = status_width + 2 + credit.width() + 8 <= width;
-                let credit_rows = if together { 0 } else { credit.width().div_ceil(width).clamp(1, 3) as u16 };
-                status_rows = 1 + credit_rows;
+                let together = status_width + 2 + Span::raw(credits.as_str()).width() + 10 <= width;
+                // Otherwise as many lines as they take, broken between credits, up to half
+                // the window.
+                let lines = if together { Vec::new() } else { credit_lines(&credit_items, width) };
+                let most = (f.area().height / 2).max(1) as usize;
+                status_rows = 1 + lines.len().min(most) as u16;
                 if together || s.height < 2 {
                     spans.push(Span::styled(format!("· {credits} · q quit"), dim));
                     f.render_widget(Paragraph::new(Line::from(spans)), Rect { y: s.bottom() - 1, height: 1, ..s });
                 } else {
                     let [above, line] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(s);
-                    f.render_widget(Paragraph::new(Line::from(vec![Span::raw(" "), credit])).wrap(ratatui::widgets::Wrap { trim: false }), above);
+                    // Bottom-aligned, so a frame where the rows haven't caught up yet loses
+                    // the top line, not the end of the last.
+                    let shown = lines.len().min(above.height as usize);
+                    let text: Vec<Line> = lines[lines.len() - shown..].iter().map(|l| Line::from(Span::styled(l.clone(), dim))).collect();
+                    f.render_widget(Paragraph::new(text), Rect { y: above.bottom() - shown as u16, height: shown as u16, ..above });
                     spans.push(Span::styled("· q quit", dim));
                     f.render_widget(Paragraph::new(Line::from(spans)), line);
                 }
@@ -3599,5 +3642,24 @@ impl Bucket {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn credits_break_between_credits() {
+        let items: Vec<String> =
+            ["© OpenStreetMap contributors", "OpenFreeMap", "CelesTrak · SatNOGS DB (CC BY-SA 4.0)", "adsb.lol (ODbL 1.0)"].map(String::from).to_vec();
+        let lines = super::credit_lines(&items, 40);
+        assert_eq!(lines, vec![" © OpenStreetMap contributors", " OpenFreeMap", " CelesTrak · SatNOGS DB (CC BY-SA 4.0)", " adsb.lol (ODbL 1.0)"]);
+        assert!(lines.iter().all(|l| l.chars().count() <= 40));
+        // Wide: as few lines as fit.
+        assert_eq!(super::credit_lines(&items, 200).len(), 1);
+        // A credit wider than the line breaks at a space, and nothing is lost.
+        let long = vec!["Imagery © a very long provider name that does not fit".to_string()];
+        let lines = super::credit_lines(&long, 20);
+        assert!(lines.iter().all(|l| l.chars().count() <= 20), "{lines:?}");
+        assert_eq!(lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" "), long[0]);
     }
 }
