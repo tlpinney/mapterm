@@ -152,6 +152,73 @@ smoothly (mapterm's ISS agrees with live trackers to within a kilometer).
   `iceye`, `umbra`, `spire`, `airbus`... Filters combine (Chinese imaging satellites:
   choose China, then imaging); "Show all satellites" clears them.
 
+## Weather radar
+
+```
+mapterm --radar --at here -z 6
+```
+
+Rain and snow worldwide from [RainViewer](https://www.rainviewer.com) (no key), drawn over
+the map. With `--radar` or `--alerts` the map switches to `mapterm-weather` (unless you give
+`--style`, a source or `--light`; `m` cycles styles): greys only, so the radar and alert
+colors are the only color on it, with water a slightly different grey rather than blue
+(light rain is blue), coastlines and state and country borders as lines that stay readable
+over the radar, motorways faintly, and city names light enough to read over rain. The radar
+itself: where the terminal shows images, the radar's own colors over the land and water,
+under the roads and labels; elsewhere, cell colors where it rains. RainViewer keeps the
+last two hours in 10-minute scans:
+
+| Key | Does |
+| --- | --- |
+| `space` | play the two hours in a loop (about six seconds), each scan fading into the next; again to pause |
+| `,` `.` | step back or forward one scan; `.` past the latest goes back to now |
+| `R` | hide or show the radar |
+
+The status line shows the scan's time (☂ 22:40 UTC · 20 min ago; ▶ playing, ⏸ paused). It
+looks for new scans every 5 minutes. RainViewer serves detail to zoom 7; closer in, the
+radar is the zoom 7 image enlarged.
+
+**Being a good client.** RainViewer's free API is for personal, educational and small
+community projects, allows 100 requests a minute per address and asks clients to cache.
+mapterm asks for the scan list every 5 minutes, uses 512-pixel tiles (a quarter of the
+requests), loads only the scan on screen unless playing (then the rest, a few at a time),
+keeps them in memory, and holds itself to 60 tile requests a minute. Its terms ask for the
+credit "Weather data by RainViewer" with a link, which mapterm shows while the radar is on.
+
+**How it works.** The map has a clock (`mapterm::clock`, after Cesium's): live, it's real
+time; playing, it loops over the scans. The radar is a time layer
+(`mapterm::timelayer::TimeRaster`): a transparent image layer per scan, the one for the
+clock's time shown, the next loaded ahead, and the one before kept up until a new one's
+tiles are in, so it never flashes blank. Playing, each scan fades into the next through two
+blends made from both (kitty can't draw an image half transparent, so a blend is a new
+image); the last doesn't fade into the first. Aircraft, ships and satellites stay live whatever
+the clock says.
+
+## Weather alerts (US)
+
+```
+mapterm --alerts --radar --at here -z 6
+```
+
+The National Weather Service's warnings, watches and advisories (api.weather.gov, public
+domain, no key) as areas outlined and faintly filled by severity: purple extreme, red
+severe, orange moderate, yellow minor. Click one for its text: what it is, until when, who
+issued it, the area, the headline, description and what to do. The status line counts the
+alerts in force (⚠ 431).
+
+Thunderstorm, tornado and flood warnings come with their own outline and show at once. Most
+alerts (small craft, gale, wind, winter weather...) name forecast or marine zones instead,
+and the NWS gives a zone's outline one zone a request: mapterm asks for them one a second,
+the most severe alerts' first, and keeps them for 90 days, so the first time there are a lot
+of alerts the areas fill in over some minutes (⚠ 431 (areas 340/1459)), and after that
+almost all come from the cache. The list itself is asked for every 5 minutes with its ETag,
+so an unchanged list is a tiny reply.
+
+Each alert is shown only while it's in force (from its onset to its end, like a Cesium
+entity's availability): live, that's now; with `--radar` paused or playing, the radar's
+time. The NWS lists only alerts still active, so ones that ended within the radar's two
+hours don't come back.
+
 ## Legends
 
 Whatever is colored gets a legend in the map's lower left, with how many of each:

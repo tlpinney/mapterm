@@ -194,6 +194,14 @@ enum Fetch {
 /// A fetched and decoded tile.
 pub struct Loaded(LoadedTile);
 
+#[cfg(test)]
+impl Loaded {
+    /// A raster tile known to be empty, for tests.
+    pub(crate) fn empty_raster() -> Loaded {
+        Loaded(LoadedTile::Raster(None))
+    }
+}
+
 enum LoadedTile {
     Vector(Vec<store::Feature>),
     Raster(Option<RasterTile>),
@@ -214,6 +222,8 @@ impl TileRequest {
                 None => LoadedTile::Vector(Vec::new()),
             },
             Fetch::Raster(src) => match src.tile(z, x, y).await? {
+                // An opaque tile from a source that's always transparent is its error image.
+                Some(b) if src.require_alpha && !crate::raster::png_has_alpha(&b) => LoadedTile::Raster(None),
                 Some(b) => LoadedTile::Raster(Some(tokio::task::spawn_blocking(move || crate::raster::decode(&b)).await??)),
                 None => LoadedTile::Raster(None),
             },
@@ -594,6 +604,9 @@ pub struct Map {
     pub center: Option<(f64, f64, f64)>,
     /// When to ask again for tiles that failed to load.
     pub retry: RetryPolicy,
+    /// Raster sources to load for the view even while no shown layer uses them: the next
+    /// frame of a time layer, so it's there when the clock gets to it.
+    prefetch: Vec<String>,
     /// Tiles whose last load failed: attempts so far and when to try again.
     failed: HashMap<(String, TileId), (u32, std::time::Instant)>,
     /// Feature state by source, then feature id (as text), then key.
@@ -742,7 +755,7 @@ impl Map {
         }
         let started = std::time::Instant::now();
         let zoom = cam.zoom;
-        let imagery = self.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(zoom)));
+        let imagery = self.base_imagery_shown(zoom);
         let bg_rgb = if imagery { None } else { self.background(zoom).map(|c| c.to_u8()) };
         // A grid fine enough that each tile is about 512 pixels across (braille's tiles would
         // be thousands of pixels wide on a Retina screen).
@@ -1204,7 +1217,75 @@ impl Map {
                 MapSource::GeoJson(_) => {}
             }
         }
+        // Then what's wanted ahead: after everything shown, so the view loads first.
+        for id in &self.prefetch {
+            if used.contains(id.as_str()) {
+                continue;
+            }
+            if let Some(MapSource::Raster(r)) = self.source(id) {
+                let rz = self.raster_zoom(&r.src, cam);
+                if rz < r.src.min_zoom {
+                    continue;
+                }
+                out.extend(crate::raster::tiles_for(cam, area, rz).into_iter().filter(|t| !r.tiles.contains(t) && self.due(id, t)).map(|t| TileRequest {
+                    source: id.clone(),
+                    id: t,
+                    fetch: Fetch::Raster(r.src.clone()),
+                }));
+            }
+        }
         out
+    }
+
+    /// Load these raster sources' tiles for the view too, after those of shown layers, even
+    /// while no shown layer uses them (replacing the last list).
+    pub fn set_prefetch(&mut self, ids: Vec<String>) {
+        self.prefetch = ids;
+    }
+
+    /// The tiles raster source `id` would draw this view with.
+    pub fn raster_view_tiles(&self, id: &str, cam: &Camera, area: Rect) -> Vec<TileId> {
+        let Some(MapSource::Raster(r)) = self.source(id) else { return Vec::new() };
+        crate::raster::tiles_for(cam, area, self.raster_zoom(&r.src, cam))
+    }
+
+    /// Raster source `source`'s tile `id`, if it's loaded.
+    pub fn raster_tile(&self, source: &str, id: TileId) -> Option<Arc<RasterTile>> {
+        match self.source(source)? {
+            MapSource::Raster(r) => r.tiles.get(&id),
+            _ => None,
+        }
+    }
+
+    /// Put a tile into raster source `source` (one made here rather than loaded, such as a
+    /// blend of two frames), or with `clear`, empty it first.
+    pub fn put_raster_tile(&mut self, source: &str, id: Option<(TileId, RasterTile)>, clear: bool) {
+        if let Some((_, MapSource::Raster(r))) = self.sources.iter_mut().find(|(s, _)| s == source) {
+            if clear {
+                r.tiles.clear();
+            }
+            if let Some((id, t)) = id {
+                r.tiles.insert(id, Some(t));
+            }
+        }
+    }
+
+    /// Whether raster source `id` has every tile this view needs (loaded, or known empty).
+    pub fn raster_ready(&self, id: &str, cam: &Camera, area: Rect) -> bool {
+        let Some(MapSource::Raster(r)) = self.source(id) else { return false };
+        let rz = self.raster_zoom(&r.src, cam);
+        rz < r.src.min_zoom || crate::raster::tiles_for(cam, area, rz).iter().all(|t| r.tiles.contains(t))
+    }
+
+    /// Whether imagery that the map is drawn over is shown (raster layers that aren't
+    /// [overlays](RasterSource::overlay)): then the map's background and fills give way to it.
+    pub fn base_imagery_shown(&self, zoom: f64) -> bool {
+        self.layers.iter().any(|e| match e {
+            Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(zoom) => {
+                !matches!(l.source.as_deref().and_then(|s| self.source(s)), Some(MapSource::Raster(r)) if r.src.overlay)
+            }
+            _ => false,
+        })
     }
 
     /// Raster sources this view is zoomed out too far for (past their
@@ -2316,7 +2397,7 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
             })
             .collect();
         // Imagery under the map shows through the image, so the background isn't painted.
-        let imagery = map.layers.iter().any(|e| matches!(e, Entry::Style(l) if l.kind == Kind::Raster && l.shown_at(cam.zoom)));
+        let imagery = map.base_imagery_shown(cam.zoom);
         let skip_bg = pix.is_some() && imagery;
         crate::layer::render_labelled(cam, area, buf, pix, labels, map.label_placement == LabelPlacement::Sticky, |ctx| {
             for (i, entry) in map.layers.iter().enumerate() {
@@ -2425,8 +2506,17 @@ fn draw_layers(map: &Map, cam: &Camera, area: Rect, buf: &mut Buffer, pass: Pass
                             for row in 0..b.cells.height {
                                 for col in 0..b.cells.width {
                                     let (x, y) = (sx + (col as f64 * cw) as u32, sy + (row as f64 * ch) as u32);
+                                    let (cx, cy) = (b.cells.x - area.x + col, b.cells.y - area.y + row);
+                                    if r.src.overlay {
+                                        // Only where it shows: a cell mostly clear keeps the map.
+                                        let (c, covered) = b.tile.average_visible(x, y, cw.ceil() as u32, ch.ceil() as u32);
+                                        if covered * opacity >= 0.25 {
+                                            ctx.cell_bg(cx, cy, c);
+                                        }
+                                        continue;
+                                    }
                                     let c = b.tile.average(x, y, cw.ceil() as u32, ch.ceil() as u32);
-                                    ctx.cell_bg(b.cells.x - area.x + col, b.cells.y - area.y + row, blend(c));
+                                    ctx.cell_bg(cx, cy, blend(c));
                                 }
                             }
                         }

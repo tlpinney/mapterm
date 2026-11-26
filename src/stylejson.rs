@@ -97,7 +97,7 @@ pub fn style_layers(doc: &Json) -> Result<(Vec<StyleLayer>, Vec<String>)> {
 }
 
 impl Map {
-    /// A map from a style: `mapterm-dark`, `mapterm-light` or `mapterm-aviation` (the built-in
+    /// A map from a style: `mapterm-dark`, `mapterm-light`, `mapterm-aviation` or `mapterm-weather` (the built-in
     /// terminal styles over OpenFreeMap), an OpenFreeMap name ([`OPENFREEMAP_STYLES`]), a URL
     /// or a file.
     pub async fn from_style(spec: &str) -> Result<Map> {
@@ -106,7 +106,8 @@ impl Map {
                 "dark" => true,
                 "light" => false,
                 "aviation" => return Map::aviation(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles),
-                _ => bail!("built-in styles are mapterm-dark, mapterm-light and mapterm-aviation"),
+                "weather" => return Map::weather(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles),
+                _ => bail!("built-in styles are mapterm-dark, mapterm-light, mapterm-aviation and mapterm-weather"),
             };
             return Map::terminal(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles, dark);
         }
@@ -134,6 +135,14 @@ impl Map {
         let mut map = Map::new();
         map.add_source(BASEMAP, MapSource::vector(src))?;
         map.add_style_layers(&aviation_style(schema))?;
+        Ok(map)
+    }
+
+    /// A map drawing `src` with the built-in weather style ([`weather_style`]).
+    pub fn weather(src: Source, schema: Schema) -> Result<Map> {
+        let mut map = Map::new();
+        map.add_source(BASEMAP, MapSource::vector(src))?;
+        map.add_style_layers(&weather_style(schema))?;
         Ok(map)
     }
 
@@ -389,6 +398,37 @@ pub fn aviation_style(schema: Schema) -> Json {
     json!({"version": 8, "sources": {}, "layers": layers})
 }
 
+/// A neutral style for weather (`mapterm-weather`, the default with `--radar` and `--alerts`):
+/// greys only, so radar and alert colors are the only color on the map. Water is a slightly
+/// different grey, never blue (radar's light rain is blue); coastlines and state and country
+/// borders are lines, which stay readable over the radar (it sits under the text); motorways
+/// faintly from z7; cities in a light grey that reads over radar colors, states and
+/// countries dimmer, towns from z9. Protomaps tiles get the built-in dark style.
+pub fn weather_style(schema: Schema) -> Json {
+    use serde_json::json;
+    if schema == Schema::Protomaps {
+        return terminal_style(schema, true);
+    }
+    let poly = json!(["==", ["geometry-type"], "Polygon"]);
+    let layers = vec![
+        json!({"id": "water", "type": "fill", "source": BASEMAP, "source-layer": "water", "filter": poly.clone(), "paint": {"fill-color": "#181b20"}}),
+        // The coast: the water's edge as a line.
+        json!({"id": "coast", "type": "line", "source": BASEMAP, "source-layer": "water", "filter": poly.clone(), "paint": {"line-color": "#4b525c"}}),
+        json!({"id": "road-motorway", "type": "line", "source": BASEMAP, "source-layer": "transportation", "minzoom": 7,
+               "filter": ["in", ["get", "class"], ["literal", ["motorway"]]], "paint": {"line-color": "#2f3238"}}),
+        json!({"id": "boundary-state", "type": "line", "source": BASEMAP, "source-layer": "boundary",
+               "filter": ["all", ["in", ["get", "admin_level"], ["literal", [3, 4]]], ["!=", ["get", "maritime"], 1]], "paint": {"line-color": "#5c636e"}}),
+        json!({"id": "boundary-country", "type": "line", "source": BASEMAP, "source-layer": "boundary",
+               "filter": ["all", ["<=", ["get", "admin_level"], 2], ["!=", ["get", "maritime"], 1]], "paint": {"line-color": "#8a919c"}}),
+        json!({"id": "place", "type": "symbol", "source": BASEMAP, "source-layer": "place",
+               "filter": ["any", ["in", ["get", "class"], ["literal", ["country", "state", "city"]]], ["all", [">=", ["zoom"], 9], ["==", ["get", "class"], "town"]]],
+               "layout": {"text-field": ["get", "name"],
+                          "symbol-sort-key": ["+", 10, ["-", ["coalesce", ["get", "rank"], 10], ["match", ["get", "class"], "country", 9, "state", 6, "city", 4, 0]]]},
+               "paint": {"text-color": ["match", ["get", "class"], "city", "#d0d4da", "town", "#a9aeb6", "#7c828b"]}}),
+    ];
+    json!({"version": 8, "sources": {}, "layers": layers})
+}
+
 /// mapterm's own styles, tuned for terminal cells: few layers, roads drawn smallest first so
 /// major roads stay on top, labels ranked by importance. `dark` picks colors for a dark
 /// terminal background (the background itself is left to the terminal). Pair with a source
@@ -558,6 +598,23 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_weather_style_is_grey() {
+        // Radar and alerts are the only color: every color in the style is a grey (no blue
+        // water to mistake for light rain).
+        let style = super::weather_style(super::Schema::OpenMapTiles);
+        let text = style.to_string();
+        let colors: Vec<&str> = text.split('"').filter(|t| t.starts_with('#') && t.len() == 7).collect();
+        assert!(colors.len() >= 6, "{colors:?}");
+        for c in colors {
+            let ch: Vec<i32> = (0..3).map(|k| i32::from_str_radix(&c[1 + 2 * k..3 + 2 * k], 16).unwrap()).collect();
+            let spread = ch.iter().max().unwrap() - ch.iter().min().unwrap();
+            assert!(spread <= 0x12, "{c} isn't grey");
+        }
+        let ids: Vec<&str> = style["layers"].as_array().unwrap().iter().filter_map(|l| l["id"].as_str()).collect();
+        assert!(ids.contains(&"coast") && ids.contains(&"boundary-state") && ids.contains(&"place"), "{ids:?}");
+    }
+
     use super::*;
     use crate::{cluster::ClusterOptions, map::MapSource};
     use serde_json::json;
