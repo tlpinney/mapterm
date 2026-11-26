@@ -264,7 +264,7 @@ Click an area for its numbers: customers out and served (an estimate), the share
 county's total for a municipality, and when the utilities' figures were gathered. The status
 line has the statewide total (⚡ 178,839 out), and the legend counts the areas in each band.
 
-The state updates the figures about hourly, and mapterm asks every 10 minutes, with the
+The state updates the figures every 15 minutes, and mapterm asks every 5, with the
 ETag, so an unchanged answer is a tiny reply. The outlines never change: each level's are
 fetched once (about 100 KB for counties, 2 MB for municipalities) and kept for 30 days.
 There are no outage areas or restoration times; the state's map has neither. With

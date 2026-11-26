@@ -12,7 +12,7 @@ All notable changes to mapterm are listed here. The format follows
   municipalities, by the share of customers without power, from the state's outage map (PEMA
   and PennDOT, no key). Click an area for customers out and served, the county's total and
   when the figures were gathered; the status line has the statewide total, and a legend the
-  areas in each band. Figures every 10 minutes with their ETag; outlines once, kept 30 days.
+  areas in each band. The state updates the figures every 15 minutes; mapterm asks every 5, with the ETag; outlines once, kept 30 days.
 - `mapterm --cache` lists, and `--cache-clear` empties, the live layers' caches by name:
   `radio` (SatNOGS), `zones` (NWS alert zones), `radar` (RainViewer scans) and `outages`.
 

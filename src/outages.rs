@@ -1,6 +1,6 @@
 //! Power outages in Pennsylvania, from the state's outage map, run by PEMA (the Pennsylvania
 //! Emergency Management Agency) and PennDOT: customers without power and customers served,
-//! by county and by municipality, from the utilities' reports, updated about hourly. A
+//! by county and by municipality, from the utilities' reports, updated every 15 minutes. A
 //! public ArcGIS service, no key.
 //!
 //! The outlines don't change, so each level's are fetched once and kept on disk for 30 days

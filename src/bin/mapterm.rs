@@ -110,7 +110,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --outages     power outages in Pennsylvania from the state's outage map (PEMA and
                 PennDOT, no key): counties, and from zoom 9 municipalities, shaded by
                 the share of customers out; click one for its numbers. The state
-                updates it about hourly; mapterm asks every 10 minutes
+                updates it every 15 minutes; mapterm asks every 5
   --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
                 this computer's time zone
   --sondes      live weather balloons (radiosondes) from SondeHub, tracked by amateur
@@ -1558,7 +1558,7 @@ fn draw_outage(f: &mut ratatui::Frame, area: Rect, o: &mapterm::outages::Area) {
         l.push(Line::from(vec![key("updated"), Span::raw(format!("{} · {ago:.0} min ago", hhmm(t)))]));
     }
     l.push(Line::default());
-    l.push(Line::from(Span::styled(" From the utilities' reports to the state, about hourly; the state's map has no restoration times.", dim)));
+    l.push(Line::from(Span::styled(" From the utilities' reports to the state, every 15 minutes; the state's map has no restoration times.", dim)));
     l.push(Line::default());
     l.push(Line::from(Span::styled(" esc close", dim)));
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
@@ -2668,7 +2668,8 @@ async fn main() -> Result<()> {
         });
     }
     // --outages: each level's outlines once (kept on disk for 30 days), then its counts every
-    // 10 minutes with their ETag; counties first, as they're shown first.
+    // 5 minutes (the state updates them every 15) with their ETag; counties first, as
+    // they're shown first.
     let mut outage_counties: Vec<mapterm::outages::Area> = Vec::new();
     let mut outage_towns: Vec<mapterm::outages::Area> = Vec::new();
     let mut outage_county_outlines: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
@@ -2720,7 +2721,7 @@ async fn main() -> Result<()> {
                         return;
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(if failed { 900 } else { 600 })).await;
+                tokio::time::sleep(Duration::from_secs(if failed { 900 } else { 300 })).await;
             }
         });
     }
