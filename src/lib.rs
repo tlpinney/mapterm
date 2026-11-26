@@ -71,6 +71,7 @@
 pub mod adsb;
 pub mod ais;
 pub mod cache;
+pub mod clock;
 pub mod cluster;
 pub mod describe;
 pub mod events;
