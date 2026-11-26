@@ -121,7 +121,12 @@ Whatever is colored gets a legend in the map's lower left, with how many of each
 satellites by orbit or by country, aircraft by altitude, ships by kind. **`L`** hides or
 shows them. Images under the text (satellite dots, trails, tracks) keep clear of the
 legend boxes.
-- Each satellite is ◇ (the ISS ◆), colored by orbit: low, medium, geostationary. Starlink
+- Each satellite is ◇ (the ISS ◆), colored by its orbit's standard class, from its
+  elements: **LEO** (apogee up to 2,000 km), **MEO** (up to geosynchronous), **GEO**
+  (geostationary: one orbit a sidereal day, circular, over the equator), **GSO**
+  (geosynchronous but inclined or eccentric), **HEO** (highly elliptical, eccentricity over
+  0.25, such as Molniya), or beyond GEO. The panel shows the class and the orbit's perigee
+  and apogee. Starlink
   satellites are a small · without names, since there are thousands; select one to see
   its name.
 - Where the terminal shows kitty graphics, satellites are dots in an image placed to the

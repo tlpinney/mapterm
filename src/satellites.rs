@@ -35,6 +35,8 @@ pub struct Sat {
     pub mean_motion: f64,
     /// Degrees.
     pub inclination: f64,
+    /// 0 for a circle, up to (not including) 1.
+    pub eccentricity: f64,
     /// Who owns it, from the satellite catalog (see [`load_catalog`]) once that's in.
     pub catalog: Option<CatalogEntry>,
     constants: sgp4::Constants,
@@ -124,6 +126,7 @@ impl Sat {
             intl: elements.international_designator.clone(),
             mean_motion: elements.mean_motion,
             inclination: elements.inclination,
+            eccentricity: elements.eccentricity,
             catalog: None,
             constants,
             epoch,
@@ -174,6 +177,37 @@ impl Sat {
             (&["CAPELLA"], "Capella Space"),
         ];
         OPERATORS.iter().find(|(prefixes, _)| prefixes.iter().any(|p| self.name.starts_with(p))).map(|(_, op)| *op)
+    }
+
+    /// The orbit's semi-major axis, km (from its period, by Kepler's third law).
+    pub fn semi_major_axis(&self) -> f64 {
+        let n = self.mean_motion * 2.0 * std::f64::consts::PI / 86_400.0;
+        (MU / (n * n)).cbrt()
+    }
+
+    /// Its lowest and highest altitude over the orbit (perigee, apogee), km above the
+    /// equator's radius.
+    pub fn perigee_apogee(&self) -> (f64, f64) {
+        let a = self.semi_major_axis();
+        (a * (1.0 - self.eccentricity) - EARTH_A, a * (1.0 + self.eccentricity) - EARTH_A)
+    }
+
+    /// Which standard class its orbit is: highly elliptical first, then by period (one a
+    /// sidereal day is geosynchronous: geostationary if circular and over the equator, else
+    /// inclined), then by apogee (LEO to 2,000 km).
+    pub fn orbit_class(&self) -> OrbitClass {
+        let (_, apogee) = self.perigee_apogee();
+        if self.eccentricity > 0.25 {
+            OrbitClass::Heo
+        } else if (self.mean_motion - SIDEREAL).abs() < 0.03 {
+            if self.eccentricity < 0.01 && self.inclination < 5.0 { OrbitClass::Geo } else { OrbitClass::Gso }
+        } else if apogee <= 2000.0 {
+            OrbitClass::Leo
+        } else if self.mean_motion > SIDEREAL {
+            OrbitClass::Meo
+        } else {
+            OrbitClass::BeyondGeo
+        }
     }
 
     /// Minutes per orbit.
@@ -496,15 +530,68 @@ pub enum Coloring {
     Country(Vec<(String, (u8, u8, u8))>),
 }
 
-/// The orbit class from orbits a day (cheaper than placing it): low under ~2,000 km,
-/// geostationary at one a day, medium between.
-fn orbit_class(mean_motion: f64) -> &'static str {
-    match mean_motion {
-        m if m > 11.25 => "low",
-        m if (0.9..1.1).contains(&m) => "geostationary",
-        _ => "medium",
+/// The standard orbit classes (as NASA and ESA use them), from a satellite's elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum OrbitClass {
+    /// Low Earth orbit: apogee at most 2,000 km.
+    Leo,
+    /// Medium Earth orbit: above that, below geosynchronous.
+    Meo,
+    /// Geostationary: one orbit a sidereal day, circular, over the equator (35,786 km).
+    Geo,
+    /// Geosynchronous but inclined or eccentric: a figure-8 in the sky, not a fixed point.
+    Gso,
+    /// Highly elliptical (eccentricity over 0.25): low perigee, high apogee (Molniya, Tundra).
+    Heo,
+    /// Beyond geosynchronous, not highly elliptical.
+    BeyondGeo,
+}
+
+impl OrbitClass {
+    /// Every class, in legend order.
+    pub const ALL: [OrbitClass; 6] = [OrbitClass::Leo, OrbitClass::Meo, OrbitClass::Geo, OrbitClass::Gso, OrbitClass::Heo, OrbitClass::BeyondGeo];
+
+    /// The abbreviation: LEO, MEO, GEO, GSO, HEO.
+    pub fn short(self) -> &'static str {
+        match self {
+            OrbitClass::Leo => "LEO",
+            OrbitClass::Meo => "MEO",
+            OrbitClass::Geo => "GEO",
+            OrbitClass::Gso => "GSO",
+            OrbitClass::Heo => "HEO",
+            OrbitClass::BeyondGeo => "beyond GEO",
+        }
+    }
+
+    /// What it stands for.
+    pub fn long(self) -> &'static str {
+        match self {
+            OrbitClass::Leo => "low Earth orbit",
+            OrbitClass::Meo => "medium Earth orbit",
+            OrbitClass::Geo => "geostationary",
+            OrbitClass::Gso => "geosynchronous, inclined",
+            OrbitClass::Heo => "highly elliptical",
+            OrbitClass::BeyondGeo => "beyond geosynchronous",
+        }
+    }
+
+    /// Its color on the map.
+    pub fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            OrbitClass::Leo => (0x79, 0xc0, 0xff),
+            OrbitClass::Meo => (0xf2, 0xcc, 0x60),
+            OrbitClass::Geo => (0xd2, 0xa8, 0xff),
+            OrbitClass::Gso => (0xff, 0x6b, 0xcb),
+            OrbitClass::Heo => (0xff, 0xa6, 0x57),
+            OrbitClass::BeyondGeo => (0x8b, 0x94, 0x9e),
+        }
     }
 }
+
+/// Earth's gravitational parameter, km³/s².
+const MU: f64 = 398_600.4418;
+/// Orbits a sidereal day: one is geosynchronous.
+const SIDEREAL: f64 = 1.0027379;
 
 impl Coloring {
     /// Color by owner: the six groups ([`owner_group`]) with the most of `sats`, then
@@ -521,10 +608,11 @@ impl Coloring {
         Coloring::Country(v.into_iter().zip(COUNTRY_COLORS).map(|((c, _), rgb)| (c.to_string(), rgb)).collect())
     }
 
-    /// The color for `s`, at height `alt_km`.
-    pub fn rgb(&self, s: &Sat, alt_km: f64) -> (u8, u8, u8) {
+    /// The color for `s` (by its orbit's class, or its owner); `_alt_km`, where it is now,
+    /// is kept for callers but no longer changes the color.
+    pub fn rgb(&self, s: &Sat, _alt_km: f64) -> (u8, u8, u8) {
         match self {
-            Coloring::Orbit => orbit_rgb(alt_km),
+            Coloring::Orbit => s.orbit_class().rgb(),
             Coloring::Country(top) => owner_group(s).and_then(|g| top.iter().find(|(code, _)| code == g)).map_or(OTHER, |(_, rgb)| *rgb),
         }
     }
@@ -535,15 +623,15 @@ impl Coloring {
         let rgb = |(r, g, b): (u8, u8, u8)| Color::Rgb(r, g, b);
         match self {
             Coloring::Orbit => {
-                let mut n: HashMap<&str, usize> = HashMap::new();
+                let mut n: HashMap<OrbitClass, usize> = HashMap::new();
                 for s in sats {
-                    *n.entry(orbit_class(s.mean_motion)).or_insert(0) += 1;
+                    *n.entry(s.orbit_class()).or_insert(0) += 1;
                 }
-                let get = |k: &str| n.get(k).copied().unwrap_or(0);
-                crate::legend::Legend::new("satellites by orbit")
-                    .entry("●", rgb(orbit_rgb(500.0)), "low (under 2,000 km)", Some(get("low")))
-                    .entry("●", rgb(orbit_rgb(20000.0)), "medium", Some(get("medium")))
-                    .entry("●", rgb(orbit_rgb(36000.0)), "geostationary", Some(get("geostationary")))
+                // Each class there is, as LEO, MEO, GEO, GSO, HEO, with what it means.
+                OrbitClass::ALL.iter().filter(|c| n.contains_key(c)).fold(crate::legend::Legend::new("satellites by orbit"), |l, c| {
+                    let label = if *c == OrbitClass::BeyondGeo { c.short().to_string() } else { format!("{} {}", c.short(), c.long()) };
+                    l.entry("●", rgb(c.rgb()), label, n.get(c).copied())
+                })
             }
             Coloring::Country(top) => {
                 let mut n: HashMap<&str, usize> = HashMap::new();
@@ -580,15 +668,6 @@ pub fn short_owner(code: &str) -> String {
     }
 }
 
-/// The colour for a satellite's height: low orbit, medium, geostationary.
-pub fn orbit_rgb(alt_km: f64) -> (u8, u8, u8) {
-    match alt_km {
-        a if a < 2000.0 => (0x79, 0xc0, 0xff),
-        a if a < 30000.0 => (0xf2, 0xcc, 0x60),
-        _ => (0xd2, 0xa8, 0xff),
-    }
-}
-
 /// The satellites at Unix time `t` as GeoJSON points (`glyph`, `label`, `orbit`, and the
 /// basics for inspect).
 pub fn points(sats: &[Sat], t: f64, coloring: &Coloring) -> Json {
@@ -596,13 +675,7 @@ pub fn points(sats: &[Sat], t: f64, coloring: &Coloring) -> Json {
         .iter()
         .filter_map(|s| {
             let f = s.at(t)?;
-            let orbit = if f.alt_km < 2000.0 {
-                "low"
-            } else if f.alt_km < 30000.0 {
-                "medium"
-            } else {
-                "geostationary"
-            };
+            let orbit = s.orbit_class().short();
             let (r, g, b) = coloring.rgb(s, f.alt_km);
             Some(json!({
                 "type": "Feature",
@@ -969,7 +1042,8 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
         let l = c.legend(&sats);
         assert_eq!(l.entries[0].label, "China");
         assert_eq!(l.entries[0].count, Some(2));
-        assert_eq!(Coloring::Orbit.legend(&sats).entries[0].count, Some(3), "all three in low orbit");
+        let orbit = Coloring::Orbit.legend(&sats);
+        assert_eq!((orbit.entries[0].label.as_str(), orbit.entries[0].count), ("LEO low Earth orbit", Some(3)), "all three in low orbit");
         // Starlink is a group of its own, not part of its owner's.
         let mut sl = parse_csv(&CSV.replace("\"ISS (ZARYA)\"", "STARLINK-1").replace(",25544,", ",44001,")).remove(0);
         own(&mut sl, "US");
@@ -989,6 +1063,26 @@ GEO TEST,2026-001A,2026-11-25T00:00:00.000000,1.00273791,.0001,0.02,90,0,180,0,U
             let apart_m = crate::adsb::distance_nm((lon, lat), (f.lon, f.lat)) * 1852.0;
             assert!(apart_m < 50.0 && (alt - f.alt_km).abs() < 0.05, "{apart_m} m at +{dt} s");
         }
+    }
+
+    #[test]
+    fn orbit_classes_by_the_standard_definitions() {
+        // (name, orbits a day, eccentricity, inclination)
+        let orbit = |mm: &str, e: &str, i: &str| {
+            let csv = CSV.replace("15.50103472", mm).replace(",.0004216,", &format!(",{e},")).replace(",51.6416,", &format!(",{i},"));
+            parse_csv(&csv).remove(0)
+        };
+        let iss = &parse_csv(CSV)[0];
+        assert_eq!(iss.orbit_class(), OrbitClass::Leo);
+        let (p, a) = iss.perigee_apogee();
+        assert!((380.0..440.0).contains(&p) && (380.0..450.0).contains(&a), "{p} {a}");
+        assert_eq!(orbit("1.00273791", ".0001", "0.02").orbit_class(), OrbitClass::Geo);
+        let geo = orbit("1.00273791", ".0001", "0.02");
+        assert!((geo.perigee_apogee().0 - 35786.0).abs() < 15.0, "{:?}", geo.perigee_apogee());
+        assert_eq!(orbit("1.00273791", ".0002", "12.0").orbit_class(), OrbitClass::Gso, "inclined");
+        assert_eq!(orbit("2.00563", ".01", "55.0").orbit_class(), OrbitClass::Meo, "GPS");
+        assert_eq!(orbit("2.00612", ".72", "63.4").orbit_class(), OrbitClass::Heo, "Molniya");
+        assert_eq!(orbit("0.5", ".01", "0.0").orbit_class(), OrbitClass::BeyondGeo);
     }
 
     #[test]

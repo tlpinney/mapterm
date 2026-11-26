@@ -25,7 +25,10 @@ All notable changes to mapterm are listed here. The format follows
   drawn once per glyph with tiny-skia and copied into place). The dots redraw often enough that the fastest move
   about a pixel a frame (4 to 15 times a second, by zoom), from positions worked out by SGP4
   once a second and interpolated between (`satellites::Ephemeris`, accurate to tens of
-  metres); 9 ms a frame for all 16,904, about 13% of a core at 15 a second.
+  metres); 9 ms a frame for all 16,904, about 13% of a core at 15 a second. Orbits are
+  classed by the standard definitions from their elements (LEO, MEO, GEO, GSO, HEO, beyond
+  GEO; `Sat::orbit_class`, `perigee_apogee`), for the colors, the legend and the panel,
+  instead of by where a satellite happens to be.
   The selected satellite (Starlink too) gets a ring and its name in that image. `--sats`
   alone is `active`: every active satellite CelesTrak publishes (~17,000), Starlink's
   unlabelled. `p` opens an fzf-style finder over satellites, aircraft and ships (by name,

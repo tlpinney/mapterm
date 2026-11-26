@@ -880,12 +880,17 @@ fn draw_sat(
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(block, area);
     let key = |k: &str| Span::styled(format!(" {k:<13}"), dim);
-    let (r, g, b) = mapterm::satellites::orbit_rgb(fix.alt_km);
+    let class = s.orbit_class();
+    let (r, g, b) = class.rgb();
     let mut l = vec![Line::from(Span::styled(format!(" {} {}", s.glyph(), s.name), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
     l.push(Line::default());
     l.push(Line::from(vec![key("altitude"), Span::raw(format!("{:.0} km", fix.alt_km))]));
     l.push(Line::from(vec![key("speed"), Span::raw(format!("{:.2} km/s", fix.speed)), Span::styled(format!("  {:.0} km/h", fix.speed * 3600.0), dim)]));
-    l.push(Line::from(vec![key("orbit"), Span::raw(format!("{:.1} min", s.period_min())), Span::styled(format!("  {:.1}° inclined", s.inclination), dim)]));
+    l.push(Line::from(vec![key("orbit"), Span::styled(class.short(), TStyle::new().fg(Color::Rgb(r, g, b))), Span::raw(format!(" · {}", class.long()))]));
+    let (perigee, apogee) = s.perigee_apogee();
+    let between = if (apogee - perigee).abs() < 20.0 { format!("{:.0} km", (perigee + apogee) / 2.0) } else { format!("{perigee:.0} to {apogee:.0} km") };
+    l.push(Line::from(vec![key("height"), Span::raw(between), Span::styled("  perigee to apogee", dim)]));
+    l.push(Line::from(vec![key("period"), Span::raw(format!("{:.1} min", s.period_min())), Span::styled(format!("  {:.1}° inclined", s.inclination), dim)]));
     l.push(Line::from(vec![key("position"), Span::raw(format!("{:.3}, {:.3}", fix.lat, fix.lon))]));
     if let Some(op) = s.operator() {
         l.push(Line::from(vec![key("operator"), Span::raw(op)]));
