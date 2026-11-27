@@ -4,8 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Nightly: the network smoke tests (OpenFreeMap, Photon, flatgeobuf.org), the performance
-  # tests, and new security advisories for unchanged dependencies.
+  # Nightly: the network smoke tests (OpenFreeMap, Photon, flatgeobuf.org), a check of every
+  # live data provider the layers use (tests/providers.rs), the performance tests, and new
+  # security advisories for unchanged dependencies.
   schedule:
     - cron: "17 7 * * *"
   workflow_dispatch:
@@ -95,6 +96,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Live services
         run: cargo test --locked --test network -- --ignored
+      # Each provider once, through mapterm's own reader: a moved endpoint or a renamed field
+      # fails the test named after the provider. Runs even if the step above failed.
+      - name: Data providers
+        if: ${{ !cancelled() }}
+        run: cargo test --locked --test providers -- --ignored
 
   perf:
     name: Performance tests
