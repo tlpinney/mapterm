@@ -292,6 +292,27 @@ A state with a public feed of its own can be added as a few lines in `src/outage
 (`FEEDS`): its layers' URLs and which fields hold what. Its counties then come from it rather
 than from ODIN.
 
+## River and creek levels
+
+```
+mapterm --floods --at 38.8,-77.3 -z 9
+```
+
+Every stream gauge in view from NOAA's National Water Prediction Service (public, no key),
+down to small creeks, from zoom 8. Each is a ◆ in its NWS flood category: green no
+flooding, yellow action stage (near flooding), orange minor, red moderate, purple major,
+and a grey dot when it's out of service. Where a forecast is worse than now, the gauge is
+drawn in the forecast's color with ↑ by its name; gauges from action stage up are named.
+The status line counts them (◆ 158 gauges · 8 flooding), and the legend by category.
+
+Click a gauge for its stage and flow now, its category and forecast, the stages at which
+it floods (action, minor, moderate, major) with where it is now, the stage over the last
+three days and the forecast as a small chart, and its record crests. The gauges are asked
+for around the view (the service can't give the whole country at once), again when the
+view leaves that area and every 10 minutes; a gauge's details once, when it's selected.
+With `--floods` the map switches to `mapterm-weather`. For flood safety, follow your local
+NWS office.
+
 ## Wildfires
 
 ```
