@@ -117,14 +117,37 @@ pub enum Row {
     Vector,
 }
 
-/// The `b` switcher: what's typed, the rows that match it and the chosen one, and the base map
-/// shown when it opened (Esc goes back to it).
+/// The overlay rows' names and the words they're found by.
+const LABELS_ROW: (&str, &str) = ("labels", "place and road names");
+const VECTOR_ROW: (&str, &str) = ("over imagery", "roads and names, vector overlay");
+
+impl Row {
+    /// Its name in the switcher, and the words after it that the filter also searches.
+    pub fn text(self, list: &[Entry]) -> (String, String) {
+        match self {
+            Row::Base(i) => {
+                let e = &list[i];
+                (e.label.clone(), format!("{} {}", e.detail, if e.base.is_imagery() { "imagery satellite" } else { "map style" }))
+            }
+            Row::Labels => (LABELS_ROW.0.into(), LABELS_ROW.1.into()),
+            Row::Vector => (VECTOR_ROW.0.into(), VECTOR_ROW.1.into()),
+        }
+    }
+}
+
+/// The `b` switcher, fzf-style: what's typed, the rows that match it (best first) with where
+/// in each row's name the query matched, the chosen one, and the base map shown when it opened
+/// (Esc goes back to it).
 #[derive(Clone, Debug)]
 pub struct Switcher {
     /// What's typed.
     pub query: String,
     /// The rows matching it.
     pub rows: Vec<Row>,
+    /// For each row, the characters of its name the query matched (to highlight).
+    pub marks: Vec<Vec<usize>>,
+    /// How many rows there are with nothing typed.
+    pub total: usize,
     /// The chosen row (an index into `rows`).
     pub sel: usize,
     /// The base map shown when it opened (an index into the list).
@@ -134,7 +157,7 @@ pub struct Switcher {
 impl Switcher {
     /// Open on the list with the current base map chosen.
     pub fn open(list: &[Entry], current: usize) -> Self {
-        let mut s = Switcher { query: String::new(), rows: Vec::new(), sel: 0, opened_on: current };
+        let mut s = Switcher { query: String::new(), rows: Vec::new(), marks: Vec::new(), total: list.len() + 2, sel: 0, opened_on: current };
         s.refilter(list);
         s.sel = s.rows.iter().position(|r| *r == Row::Base(current)).unwrap_or(0);
         s
@@ -143,24 +166,20 @@ impl Switcher {
     /// The rows matching the query: in list order while it's empty, best first once typed.
     pub fn refilter(&mut self, list: &[Entry]) {
         let keep = self.row().filter(|_| self.query.is_empty());
-        let mut scored: Vec<(i32, usize, Row)> = list
-            .iter()
+        let all = (0..list.len()).map(Row::Base).chain([Row::Labels, Row::Vector]);
+        let mut scored: Vec<(i32, usize, Row, Vec<usize>)> = all
             .enumerate()
-            .filter_map(|(i, e)| {
-                let text = format!("{} {} {}", e.label, e.detail, if e.base.is_imagery() { "imagery satellite" } else { "map style" });
-                crate::fuzzy::score(&self.query, &text).map(|sc| (sc, i, Row::Base(i)))
+            .filter_map(|(n, row)| {
+                let (name, more) = row.text(list);
+                let (sc, at) = crate::fuzzy::matches(&self.query, &format!("{name} {more}"))?;
+                let len = name.chars().count();
+                Some((sc, n, row, at.into_iter().filter(|&i| i < len).collect()))
             })
             .collect();
-        let n = list.len();
-        for (i, (row, text)) in [(Row::Labels, "labels names places roads"), (Row::Vector, "roads vector overlay over imagery")].into_iter().enumerate() {
-            if let Some(sc) = crate::fuzzy::score(&self.query, text) {
-                scored.push((sc, n + i, row));
-            }
-        }
         if !self.query.is_empty() {
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         }
-        self.rows = scored.into_iter().map(|(_, _, r)| r).collect();
+        (self.rows, self.marks) = scored.into_iter().map(|(_, _, r, m)| (r, m)).unzip();
         self.sel = keep.and_then(|k| self.rows.iter().position(|r| *r == k)).unwrap_or(0);
     }
 
@@ -248,6 +267,10 @@ mod tests {
         s.refilter(&l);
         assert_eq!(s.row(), None);
         s.step(true);
+        s.query = "usg".into();
+        s.refilter(&l);
+        assert_eq!(s.marks[0], vec![0, 1, 2]);
+        assert_eq!(s.total, l.len() + 2);
     }
 
     #[test]

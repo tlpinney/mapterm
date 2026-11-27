@@ -228,8 +228,9 @@ keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) �
       n labels · q quit
 
 base maps (b): a list of the map styles and imagery (satellite and aerial photos; keyed
-      providers once their key is set) in the middle of the map; up/down (j/k) preview the
-      chosen one after a moment, typing filters, enter keeps it, esc goes back. Imagery goes
+      providers once their key is set) in the middle of the map, fzf-style: typing filters
+      (matched letters lit, best first), up/down or ctrl-n/p preview the chosen one after a
+      moment, enter keeps it, esc goes back. Imagery goes
       under the style's roads and names (v: all, names only, none). Space or click toggles
       labels and the overlay without closing.
 
@@ -1547,29 +1548,52 @@ fn draw_switcher(
                 ("▤", "over imagery".to_string(), format!("{state} · v"))
             }
         };
-        let left = format!(" {mark} {label}");
-        let room = w.saturating_sub(left.chars().count() + 2);
-        let detail: String = if detail.chars().count() > room { format!("{}…", detail.chars().take(room.saturating_sub(1)).collect::<String>()) } else { detail };
-        let pad = " ".repeat(w.saturating_sub(left.chars().count() + detail.chars().count()));
         let chosen = n == sw.sel;
         let st = if chosen { TStyle::new().add_modifier(Modifier::REVERSED) } else { TStyle::new() };
         let dst = if chosen { st } else { dim };
-        lines.push((Some(n), Line::from(vec![Span::styled(left, st), Span::styled(format!("{pad}{detail} "), dst)])));
+        // The name with the letters the query matched picked out, as fzf does.
+        let hit = st.fg(accent).add_modifier(Modifier::BOLD);
+        let marks = sw.marks.get(n).map_or(&[][..], Vec::as_slice);
+        let mut spans = vec![Span::styled(format!(" {mark} "), st)];
+        for (k, c) in label.chars().enumerate() {
+            spans.push(Span::styled(c.to_string(), if marks.contains(&k) { hit } else { st }));
+        }
+        let left = 3 + mark.chars().count() + label.chars().count();
+        let room = w.saturating_sub(left + 2);
+        let detail: String = if detail.chars().count() > room { format!("{}…", detail.chars().take(room.saturating_sub(1)).collect::<String>()) } else { detail };
+        let pad = " ".repeat(w.saturating_sub(left + detail.chars().count()));
+        spans.push(Span::styled(format!("{pad}{detail} "), dst));
+        lines.push((Some(n), Line::from(spans)));
     }
     if sw.rows.is_empty() {
         lines.push((None, Line::styled(" nothing matches", dim)));
     }
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2)).max(3);
+    // Rows, then a rule and the prompt line.
+    let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(2)).max(5);
     let rect = Rect { x: area.x + (area.width.saturating_sub(width)) / 2, y: area.y + (area.height.saturating_sub(height)) / 2, width, height };
-    let title = if sw.query.is_empty() { " base maps ".to_string() } else { format!(" base maps · {} ", sw.query) };
     let block = Block::bordered()
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(TStyle::new().fg(accent))
-        .title(Span::styled(title, head))
+        .title(Span::styled(" base maps ", head))
         .title_bottom(Line::styled(" ↑↓ preview · enter keep · space toggle · esc back ", dim).right_aligned());
-    let inner = block.inner(rect);
+    let outer = block.inner(rect);
     f.render_widget(ratatui::widgets::Clear, rect);
     f.render_widget(block, rect);
+    // fzf's prompt: what's typed, a cursor, and how many rows match of all of them.
+    let count = format!("{}/{} ", sw.rows.len(), sw.total);
+    let typed = format!(" > {}", sw.query);
+    let gap = (outer.width as usize).saturating_sub(typed.chars().count() + 1 + count.chars().count());
+    let prompt = Line::from(vec![
+        Span::styled(" > ", TStyle::new().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::raw(sw.query.clone()),
+        Span::styled("█", TStyle::new().fg(accent)),
+        Span::styled(format!("{}{count}", " ".repeat(gap)), dim),
+    ]);
+    let prompt_at = Rect { y: outer.bottom().saturating_sub(1), height: 1, ..outer };
+    f.render_widget(Paragraph::new(prompt), prompt_at);
+    let rule = Rect { y: outer.bottom().saturating_sub(2), height: 1, ..outer };
+    f.render_widget(Paragraph::new(Line::styled("─".repeat(outer.width as usize), dim)), rule);
+    let inner = Rect { height: outer.height.saturating_sub(2), ..outer };
     // Keep the chosen row in view.
     let rows = inner.height as usize;
     let at = lines.iter().position(|(n, _)| *n == Some(sw.sel)).unwrap_or(0);
@@ -5888,9 +5912,9 @@ async fn main() -> Result<()> {
                     for ev in queued {
                         match ev {
                             Event::Key(k) if k.kind != KeyEventKind::Release => {
-                                // The base map switcher takes every key while it's open: typing
-                                // filters, up/down (j/k before typing) choose and preview, enter
-                                // keeps, space toggles or picks and stays, esc goes back.
+                                // The base map switcher takes every key while it's open, as fzf:
+                                // typing filters, up/down (ctrl-n/p, ctrl-j/k) choose and preview,
+                                // enter keeps, space toggles or picks and stays, esc goes back.
                                 if let Some(sw) = switcher.as_mut() {
                                     use mapterm::basemaps::Row;
                                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
@@ -5909,8 +5933,8 @@ async fn main() -> Result<()> {
                                             sw.query.clear();
                                             refilter = true;
                                         }
-                                        KeyCode::Char('n') if ctrl => sw.step(true),
-                                        KeyCode::Char('p') if ctrl => sw.step(false),
+                                        KeyCode::Char('n' | 'j') if ctrl => sw.step(true),
+                                        KeyCode::Char('p' | 'k') if ctrl => sw.step(false),
                                         KeyCode::Esc => {
                                             want_base = Some(sw.opened_on);
                                             close = true;
@@ -5925,8 +5949,6 @@ async fn main() -> Result<()> {
                                         KeyCode::Char(' ') => pick(sw.row(), &mut want_base, &mut labels, &mut vector),
                                         KeyCode::Down | KeyCode::Tab => sw.step(true),
                                         KeyCode::Up | KeyCode::BackTab => sw.step(false),
-                                        KeyCode::Char('j') if sw.query.is_empty() => sw.step(true),
-                                        KeyCode::Char('k') if sw.query.is_empty() => sw.step(false),
                                         KeyCode::Char(c) if !ctrl => {
                                             sw.query.push(c);
                                             refilter = true;

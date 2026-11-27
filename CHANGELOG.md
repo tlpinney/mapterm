@@ -9,8 +9,9 @@ All notable changes to mapterm are listed here. The format follows
 ### Added
 
 - Base map switcher: `b` opens a list of the map styles and imagery (satellite and aerial
-  photos; keyed providers once their key is set) in the middle of the map. Up/down (or j/k)
-  preview after a moment, typing filters, Enter keeps, Esc goes back; labels and the overlay
+  photos; keyed providers once their key is set) in the middle of the map. Up/down (or ctrl-n/p)
+  preview after a moment, typing filters fzf-style (matched letters lit, best first, a count
+  of matches), Enter keeps, Esc goes back; labels and the overlay
   over imagery toggle there too. Imagery can now be picked while the viewer runs. `m`/`M`
   step through the whole list, `'` flips back to the base map before. `mapterm::basemaps`.
 
