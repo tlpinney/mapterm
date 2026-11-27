@@ -115,6 +115,12 @@ status line.
   home, so mapterm shows, measures from and keeps each station only as an area (the middle
   of a ~5 km grid cell, drawn from zoom 9), like a phone's approximate location. Stations
   are kept on disk for 30 days, so they show before any balloon is heard.
+- Launch sites show as ⊙ (NOAA's upper-air stations still launching, about 800 worldwide,
+  from its [IGRA](https://www.ncei.noaa.gov/products/weather-balloon/integrated-global-radiosonde-archive)
+  station list, public domain, kept 30 days). Click one for its WMO number, how long it's
+  launched, its usual launch times (00 and 12 UTC, in your time) and the next one, and the
+  balloons followed that went up from it; a balloon first heard low near a site says it
+  was launched from there.
 - SondeHub asks clients not to poll its API, so mapterm asks it once for the balloons
   around the view (again only when the view moves far away, at most once a minute) and
   then follows each one's live MQTT topic over a WebSocket, plus the slow feed of newly

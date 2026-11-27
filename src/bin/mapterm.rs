@@ -733,7 +733,7 @@ fn live_sources(key: &str) -> &'static [&'static str] {
         "aircraft" => &[AIRCRAFT, TRAILS],
         "ships" => &[SHIPS],
         "satellites" => &[SATS],
-        "balloons" => &[BALLOONS, STATIONS, STATION_LINKS, STATION_AREAS, STATION_LINK_TILES],
+        "balloons" => &[BALLOONS, STATIONS, STATION_LINKS, STATION_AREAS, STATION_LINK_TILES, LAUNCH_SITES],
         "nasa" => &[NASA, NASA_TRACKS],
         "alerts" => &[ALERTS, ALERT_TILES],
         "quakes" => &[QUAKES],
@@ -944,6 +944,77 @@ fn beside_panel(target: Camera, map: Rect, panel: Rect) -> Camera {
     Camera::new(target.lon + (lon1 - lon0), target.lat, target.zoom)
 }
 
+/// The launch site balloon `b` went up from: the nearest to where it was first heard, if that
+/// was low and near one.
+fn launch_site<'a>(sites: &'a [mapterm::upperair::Site], b: &mapterm::sondehub::Balloon) -> Option<&'a mapterm::upperair::Site> {
+    let first = b.path.samples().next()?;
+    mapterm::upperair::launched_from(sites, first.lon, first.lat, first.alt.unwrap_or(f64::MAX))
+}
+
+/// `STERLING/WASHINGTON DULLES INT` as `Sterling/Washington Dulles Int`.
+fn title_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut start = true;
+    for c in s.chars() {
+        if start {
+            out.extend(c.to_uppercase());
+        } else {
+            out.extend(c.to_lowercase());
+        }
+        start = !c.is_alphanumeric();
+    }
+    out
+}
+
+/// A weather balloon launch site's panel: what it is, when it launches, and the balloons
+/// followed that went up from it (`launched`: serial, altitude now).
+fn draw_site(f: &mut ratatui::Frame, area: Rect, s: &mapterm::upperair::Site, launched: &[(String, f64)], now: f64) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" balloon launch site ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let key = |k: &str| Span::styled(format!(" {k:<13}"), dim);
+    let state = s.state.as_deref().map(|st| format!(", {st}")).unwrap_or_default();
+    let mut l = vec![
+        Line::from(Span::styled(format!(" ⊙ {}{state}", title_case(&s.name)), TStyle::new().fg(Color::Rgb(0x7e, 0xe7, 0x87)).add_modifier(Modifier::BOLD))),
+        Line::default(),
+        Line::from(vec![key("station"), Span::raw(format!("WMO {}", s.wmo)), Span::styled(format!("  IGRA {}", s.id), dim)]),
+        Line::from(vec![key("elevation"), Span::raw(format!("{:.0} m", s.elevation))]),
+        Line::from(vec![key("position"), Span::raw(format!("{:.4}, {:.4}", s.lat, s.lon))]),
+        Line::from(vec![
+            key("launching"),
+            Span::raw(format!("since {}", s.years.0)),
+            Span::styled(format!("  {} soundings on record", thousands(s.soundings as usize)), dim),
+        ]),
+        Line::default(),
+    ];
+    // Most sites launch for 00 and 12 UTC, about an hour before.
+    let next = mapterm::upperair::next_launch(now);
+    l.push(Line::from(vec![
+        key("launches"),
+        Span::raw(format!("usually for {} and {}", hhmm(next), hhmm(next + 43_200.0))),
+        Span::styled("  (00 and 12 UTC)", dim),
+    ]));
+    let to_go = next - 3600.0 - now;
+    let when = if to_go > 0.0 { format!("in about {}", mapterm::sources::span(to_go)) } else { "about now".into() };
+    l.push(Line::from(vec![key("next"), Span::raw(when), Span::styled("  (balloons go up about an hour early)", dim)]));
+    l.push(Line::default());
+    if launched.is_empty() {
+        l.push(Line::from(Span::styled(" no balloon from here is being followed", dim)));
+    } else {
+        l.push(Line::from(Span::styled(" its balloons being followed", dim)));
+        for (serial, alt) in launched {
+            l.push(Line::from(vec![key(""), Span::raw(format!("▲ {serial}")), Span::styled(format!("  {:.1} km up", alt / 1000.0), dim)]));
+        }
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(" NOAA NCEI IGRA · esc close", dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
 /// A receiving station's line in the balloon panel: its screen row, where it is, its callsign.
 struct StationRow {
     row: u16,
@@ -1065,6 +1136,8 @@ const STATION_LINKS: &str = "balloon-links";
 const STATION_AREAS: &str = "balloon-station-areas";
 /// The lines to the stations as image tiles, where the terminal shows images.
 const STATION_LINK_TILES: &str = "balloon-link-tiles";
+/// Where weather balloons are launched (NOAA's upper-air stations).
+const LAUNCH_SITES: &str = "balloon-launch-sites";
 /// Their color: violet, apart from the stations' green and the predicted path's blue.
 const STATION_LINK_RGB: (u8, u8, u8) = (0xc0, 0x84, 0xfc);
 const QUAKES: &str = "quakes";
@@ -2743,6 +2816,7 @@ fn draw_balloon(
     (b, at): (&mapterm::sondehub::Balloon, mapterm::timeseries::Sample),
     pred: Option<&mapterm::sondehub::Prediction>,
     heard: &[(&mapterm::sondehub::Station, f64, Option<f64>)],
+    from: Option<&mapterm::upperair::Site>,
     now: f64,
     follow: bool,
     me: Option<&mapterm::locate::Fix>,
@@ -2813,6 +2887,9 @@ fn draw_balloon(
     }
     if heard.len() > 6 {
         l.push(Line::from(vec![key(""), Span::styled(format!("and {} more", heard.len() - 6), dim)]));
+    }
+    if let Some(s) = from {
+        l.push(Line::from(vec![key("launched from"), Span::raw(title_case(&s.name)), Span::styled(format!("  {}", s.wmo), dim)]));
     }
     l.push(Line::from(vec![key("position"), Span::raw(format!("{:.4}, {:.4}", at.lat, at.lon))]));
     l.push(Line::from(vec![key("last report"), Span::raw(format!("{:.0} s ago", (now - t.t).max(0.0)))]));
@@ -3166,7 +3243,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
             || id == ROUTE
             || id == format!("{ROUTE}-line")
             || [CLOSURES, GAUGES, FIRES, QUAKES, TRAFFIC].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')))
-            || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS].contains(&id.as_str())
+            || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS, LAUNCH_SITES].contains(&id.as_str())
             || id.starts_with(STATION_AREAS);
         if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
@@ -3278,6 +3355,7 @@ fn add_closures(map: &mut Map, tiles: &Arc<mapterm::areas::AreaTiles>, tiles_bef
 fn add_balloons(map: &mut Map, link_tiles: &Arc<mapterm::areas::AreaTiles>, before: Option<&str>) -> Result<()> {
     map.add_source(STATION_AREAS, empty_source()?)?;
     map.add_layers(mapterm::sondehub::area_layers(STATION_AREAS, STATION_AREAS), before)?;
+    add_points(map, LAUNCH_SITES, mapterm::upperair::CREDIT, mapterm::upperair::layer(LAUNCH_SITES, LAUNCH_SITES), before)?;
     // Where the terminal shows images, the lines to the stations are smooth image lines; the
     // braille ones stay, hidden, for clicking.
     if mapterm::kitty::supported() {
@@ -4646,6 +4724,18 @@ async fn main() -> Result<()> {
     let mut stations_saved = Instant::now();
     // What the image lines to the stations were last drawn from.
     let mut links_drawn = String::new();
+    // Where balloons are launched (NOAA's list, kept 30 days), and the one clicked.
+    let mut launch_sites: Vec<mapterm::upperair::Site> = Vec::new();
+    let mut selected_site: Option<String> = None;
+    let (sitetx, mut siterx) = mpsc::unbounded_channel::<Result<Vec<mapterm::upperair::Site>>>();
+    let load_sites = |tx: mpsc::UnboundedSender<Result<Vec<mapterm::upperair::Site>>>| {
+        tokio::spawn(async move {
+            let _ = tx.send(mapterm::upperair::load().await);
+        });
+    };
+    if a.sondes {
+        load_sites(sitetx.clone());
+    }
     if a.sondes {
         balloons.load_stations(&mapterm::sondehub::stations_file(), unix_now());
         // Exact positions an earlier version kept: replaced by their areas at once.
@@ -5028,8 +5118,9 @@ async fn main() -> Result<()> {
                 let closure = selected_closure.as_deref().and_then(|k| closures.values().flatten().find(|c| c.key == k));
                 let tfr = selected_tfr.as_deref().and_then(|k| tfr_live.iter().chain(&tfr_standing).find(|r| r.key == k));
                 let gauge = selected_gauge.as_deref().and_then(|id| gauges.iter().find(|g| g.lid == id));
+                let site = selected_site.as_deref().and_then(|id| launch_sites.iter().find(|s| s.id == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() {
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() || site.is_some() {
                         52.min(main.width / 2)
                     } else {
                         0
@@ -5105,7 +5196,19 @@ async fn main() -> Result<()> {
                     }
                     _ if let Some(b) = balloon => {
                         let heard = balloons.heard_by(&b.0.latest.serial, unix_now());
-                        station_rows = draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), &heard, unix_now(), follow, me.as_ref());
+                        let from = launch_site(&launch_sites, b.0);
+                        station_rows = draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), &heard, from, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if let Some(s) = site => {
+                        // The balloons followed that went up from it.
+                        let launched: Vec<(String, f64)> = balloons
+                            .serials()
+                            .filter_map(|sn| balloons.get(sn, unix_now() - SONDE_DELAY))
+                            .filter(|(b, _)| launch_site(&launch_sites, b).is_some_and(|x| x.id == s.id))
+                            .map(|(b, at)| (b.latest.serial.clone(), at.alt.unwrap_or(0.0)))
+                            .collect();
+                        draw_site(f, panel, s, &launched, unix_now());
                         Vec::new()
                     }
                     _ if let Some(s) = ship => {
@@ -6263,6 +6366,7 @@ async fn main() -> Result<()> {
                                     a.sondes = true;
                                     let before = under(&map, &[TRAILS, AIRCRAFT, SATS]);
                                     add_balloons(&mut map, &link_tiles, before.as_deref())?;
+                                    load_sites(sitetx.clone());
                                     balloons.load_stations(&mapterm::sondehub::stations_file(), unix_now());
                                     if balloons.stations_changed() {
                                         let _ = balloons.save_stations(&mapterm::sondehub::stations_file());
@@ -6818,6 +6922,16 @@ async fn main() -> Result<()> {
                         sats_age = age;
                         filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
                         (sat_coloring, sat_legend) = recolor(&sats, sat_color);
+                    }
+                }
+                Some(r) = siterx.recv() => {
+                    match r {
+                        Ok(v) => {
+                            dlog(|| format!("launch sites: {}", v.len()));
+                            map.set_data(LAUNCH_SITES, &mapterm::upperair::points(&v))?;
+                            launch_sites = v;
+                        }
+                        Err(e) => note = Some((Instant::now(), format!("launch sites: {e:#}"))),
                     }
                 }
                 Some(m) = nasarx.recv() => {
@@ -7510,6 +7624,7 @@ async fn main() -> Result<()> {
                                         route_ends = None;
                                         route_new = true;
                                     }
+                                    KeyCode::Esc if selected_site.is_some() && !inspect => selected_site = None,
                                     KeyCode::Esc if route.is_some() && route_panel && selected.is_none() && selected_ship.is_none() && selected_sat.is_none() && selected_alert.is_none() && selected_outage.is_none() && selected_quake.is_none() && selected_fire.is_none() && selected_gauge.is_none() && selected_tfr.is_none() && selected_closure.is_none() && selected_balloon.is_none() && !inspect && !matches!(search, Search::Results { .. }) => {
                                         route_panel = false;
                                     }
@@ -7868,6 +7983,7 @@ async fn main() -> Result<()> {
                                         // ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
                                         let dot = vp.dot_ll(k.lon, k.lat);
+                                        selected_site = None;
                                         if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, dot, 6.0) {
                                             if selected.as_deref() != Some(hex.as_str()) {
                                                 follow = false;
@@ -7921,6 +8037,16 @@ async fn main() -> Result<()> {
                                             selected_fire = None;
                                             selected_quake = Some(id);
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage) = (None, None, None, None, None, None);
+                                            follow = false;
+                                        } else if let Some(id) = a
+                                            .sondes
+                                            .then(|| mapterm::upperair::nearest(&launch_sites, &vp, dot, 4.0).map(|s| s.id.clone()))
+                                            .flatten()
+                                        {
+                                            // A weather balloon launch site.
+                                            selected_site = Some(id);
+                                            (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake, selected_fire) =
+                                                (None, None, None, None, None, None, None, None);
                                             follow = false;
                                         } else if let Some(k) = a
                                             .closures
