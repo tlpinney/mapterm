@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--fires] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--fires] [--floods] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -127,6 +127,11 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 colored by containment (◇ prescribed burns), and the perimeters of those
                 still burning; click one for its size, containment, cause and dates.
                 Asked for every 5 minutes
+  --floods      river and creek levels from NOAA's National Water Prediction Service (no
+                key): every gauge in view from zoom 8, ◆ colored by NWS flood category
+                (green none, yellow action, orange minor, red moderate, purple major), ↑
+                when the forecast is worse. Click one for its stage, flood stages, record
+                crests and the stage over the last days with the forecast. Every 10 minutes
   --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
                 this computer's time zone
   --sondes      live weather balloons (radiosondes) from SondeHub, tracked by amateur
@@ -238,6 +243,8 @@ struct Args {
     sondes: bool,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
+    /// --floods: river and creek gauges from NOAA NWPS.
+    floods: bool,
     /// --fires: US wildfires from NIFC.
     fires: bool,
     /// --quakes: earthquakes from USGS, for this period.
@@ -302,6 +309,7 @@ fn args() -> Result<Args> {
         outages: false,
         quakes: None,
         fires: false,
+        floods: false,
         utc: false,
         sats: None,
         sats_country: Vec::new(),
@@ -416,6 +424,7 @@ fn args() -> Result<Args> {
             "--alerts" => a.alerts = true,
             "--outages" => a.outages = true,
             "--fires" | "--wildfires" => a.fires = true,
+            "--floods" | "--rivers" | "--gauges" => a.floods = true,
             "--quakes" | "--earthquakes" => {
                 // The period is optional: take the next argument only if it's one.
                 let p = it.next_if(|n| mapterm::quakes::Period::parse(n).is_some());
@@ -657,6 +666,7 @@ const SHIPS: &str = "ships";
 const BALLOONS: &str = "balloons";
 const QUAKES: &str = "quakes";
 const FIRES: &str = "fires";
+const GAUGES: &str = "gauges";
 const FIRE_AREAS: &str = "fire-areas";
 /// The fire perimeters' style layers (braille, where the terminal doesn't show images).
 const FIRE_LAYERS: [&str; 3] = ["fire-areas-fill", "fire-areas-line", "fire-areas-selected"];
@@ -1551,6 +1561,102 @@ fn draw_alert(f: &mut ratatui::Frame, area: Rect, al: &mapterm::nws::Alert) {
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
 }
 
+/// What the --floods requests send.
+enum GaugeMsg {
+    /// The gauges around the view.
+    Gauges(std::result::Result<Vec<mapterm::floods::Gauge>, String>),
+    /// A gauge's details and stage series.
+    Detail(String, std::result::Result<mapterm::floods::Detail, String>),
+}
+
+/// The --floods panel for the selected gauge: its stage, flood stages, the stage over the
+/// last three days with the forecast, and record crests.
+fn draw_gauge(f: &mut ratatui::Frame, area: Rect, g: &mapterm::floods::Gauge, d: Option<&mapterm::floods::Detail>) {
+    use mapterm::floods::Category;
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" river gauge ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let rgb = |c: Category| {
+        let (r, gr, b) = c.rgb();
+        Color::Rgb(r, gr, b)
+    };
+    let key = |k: &str| Span::styled(format!(" {k:<9}"), dim);
+    let units = if g.units.is_empty() { "ft" } else { g.units.as_str() };
+    let mut l = vec![Line::from(Span::styled(format!(" {}", g.name), TStyle::new().fg(rgb(g.worst())).add_modifier(Modifier::BOLD)))];
+    l.push(Line::from(Span::styled(format!(" {} · NWS", g.lid), dim)));
+    l.push(Line::default());
+    match g.stage {
+        Some(st) => {
+            let when = g.time.map(|t| format!(" · {}", day_hhmm(t))).unwrap_or_default();
+            l.push(Line::from(vec![key("stage"), Span::raw(format!("{st:.2} {units}{when}"))]));
+        }
+        None => l.push(Line::from(vec![key("stage"), Span::styled("no current reading", dim)])),
+    }
+    if let Some(q) = g.flow {
+        l.push(Line::from(vec![key("flow"), Span::raw(format!("{} cfs", thousands(q.round() as usize)))]));
+    }
+    l.push(Line::from(vec![key("now"), Span::styled(g.category.label(), TStyle::new().fg(rgb(g.category)))]));
+    if let Some(fc) = g.forecast {
+        let at = g.forecast_stage.map(|s| format!(" ({s:.1} {units})")).unwrap_or_default();
+        l.push(Line::from(vec![key("forecast"), Span::styled(format!("{}{at}", fc.label()), TStyle::new().fg(rgb(fc)))]));
+    }
+    match d {
+        None => {
+            l.push(Line::default());
+            l.push(Line::from(Span::styled(" loading flood stages…", dim)));
+        }
+        Some(d) => {
+            if !d.stages.is_empty() {
+                l.push(Line::default());
+                for (c, s) in d.stages.iter().rev() {
+                    let here = g.stage.is_some_and(|st| st >= *s);
+                    l.push(Line::from(vec![
+                        key(match c {
+                            Category::Major => "major",
+                            Category::Moderate => "moderate",
+                            Category::Minor => "minor",
+                            _ => "action",
+                        }),
+                        Span::styled(format!("{s} {units}{}", if here { "  ◀ at or above" } else { "" }), TStyle::new().fg(rgb(*c))),
+                    ]));
+                }
+            }
+            let width = (inner.width as usize).saturating_sub(2).min(60);
+            let (line, start, (lo, hi)) = mapterm::floods::sparkline(&d.observed, &d.forecast, unix_now() - 3.0 * 86400.0, width);
+            if !line.is_empty() {
+                l.push(Line::default());
+                let chars: Vec<char> = line.chars().collect();
+                let cut = start.unwrap_or(chars.len()).min(chars.len());
+                l.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(chars[..cut].iter().collect::<String>(), TStyle::new().fg(Color::Rgb(0x4f, 0xa3, 0xff))),
+                    Span::styled(chars[cut..].iter().collect::<String>(), TStyle::new().fg(Color::Rgb(0xc8, 0x4d, 0xe8))),
+                ]));
+                let fc = if start.is_some() { " · forecast in purple" } else { "" };
+                l.push(Line::from(Span::styled(format!(" last 3 days, {lo:.1}–{hi:.1} {units}{fc}"), dim)));
+            }
+            if !d.crests.is_empty() {
+                l.push(Line::default());
+                l.push(Line::from(Span::styled(" record crests", dim)));
+                for (s, t) in &d.crests {
+                    let year = 1970 + (t / 31_556_952.0).floor() as i64;
+                    l.push(Line::from(Span::raw(format!("   {s:.2} {units} · {year}"))));
+                }
+            }
+            if !d.attribution.is_empty() {
+                l.push(Line::default());
+                l.push(Line::from(Span::styled(format!(" Data: {}; NOAA NWPS.", d.attribution.join(", ")), dim)));
+            }
+        }
+    }
+    l.push(Line::from(Span::styled(" Floods: follow your local NWS office. esc close", dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
 /// What the --fires task sends.
 enum FireMsg {
     /// The current incidents.
@@ -2267,7 +2373,7 @@ async fn main() -> Result<()> {
         let schema = detect_schema(&src, &cam).await;
         // Watching weather over the default basemap: the weather style; aircraft, ships or
         // satellites alone, the aviation style; unless --light.
-        if (a.radar || a.alerts || a.outages || a.fires) && a.source.is_none() && !a.light {
+        if (a.radar || a.alerts || a.outages || a.fires || a.floods) && a.source.is_none() && !a.light {
             map = Map::weather(src, schema)?;
         } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some()) && a.source.is_none() && !a.light {
             map = Map::aviation(src, schema)?;
@@ -2287,7 +2393,7 @@ async fn main() -> Result<()> {
     let builtin_source = a.source.clone().unwrap_or_else(|| OPENFREEMAP.to_string());
     let mut styles: Vec<String> = a.style.iter().cloned().collect();
     let default_dark = a.style.is_none() && a.source.is_none() && !a.light;
-    if (a.radar || a.alerts || a.outages || a.fires) && default_dark {
+    if (a.radar || a.alerts || a.outages || a.fires || a.floods) && default_dark {
         styles.push(WEATHER.to_string());
     } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some()) && default_dark {
         styles.push(AVIATION.to_string());
@@ -2513,6 +2619,14 @@ async fn main() -> Result<()> {
         map.set_attribution(QUAKES, mapterm::quakes::CREDIT)?;
         let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
         map.add_layers(vec![mapterm::quakes::layer(QUAKES, QUAKES)], above.as_deref())?;
+    }
+    // River gauges (--floods), with the quakes.
+    if a.floods {
+        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
+        map.add_source(GAUGES, MapSource::geojson(&empty)?)?;
+        map.set_attribution(GAUGES, mapterm::floods::CREDIT)?;
+        let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
+        map.add_layers(vec![mapterm::floods::layer(GAUGES, GAUGES)], above.as_deref())?;
     }
     // Wildfire incidents (--fires), with the quakes.
     if a.fires {
@@ -3148,6 +3262,16 @@ async fn main() -> Result<()> {
     // --quakes: the USGS feed once a minute (with If-Modified-Since).
     let mut quakes: Vec<mapterm::quakes::Quake> = Vec::new();
     let mut selected_quake: Option<String> = None;
+    // --floods: the gauges around the view (asked for when the view leaves the area, or every
+    // 10 minutes), and the selected one's details.
+    let mut gauges: Vec<mapterm::floods::Gauge> = Vec::new();
+    let mut gauges_area: Option<(Instant, (f64, f64, f64, f64))> = None;
+    let mut gauges_asking = false;
+    let mut gauges_new = false;
+    let mut gauges_shown_selected: Option<String> = None;
+    let mut selected_gauge: Option<String> = None;
+    let mut gauge_details: std::collections::HashMap<String, Option<mapterm::floods::Detail>> = std::collections::HashMap::new();
+    let (gatx, mut garx) = mpsc::unbounded_channel::<GaugeMsg>();
     // --fires: incidents and perimeters every 5 minutes (each with its ETag).
     let mut fires: Vec<mapterm::fires::Fire> = Vec::new();
     let mut fire_perimeters: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
@@ -3482,8 +3606,9 @@ async fn main() -> Result<()> {
                 let outage = selected_outage.as_deref().and_then(|k| outages.find(k));
                 let quake = selected_quake.as_deref().and_then(|id| quakes.iter().find(|q| q.id == id));
                 let fire = selected_fire.as_deref().and_then(|id| fires.iter().find(|f| f.id == id));
+                let gauge = selected_gauge.as_deref().and_then(|id| gauges.iter().find(|g| g.lid == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || balloon.is_some() {
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || balloon.is_some() {
                         52.min(main.width / 2)
                     } else {
                         0
@@ -3508,6 +3633,9 @@ async fn main() -> Result<()> {
                     }
                     if a.outages {
                         legends.extend(outages.legends(mapterm::outages::Level::at(cam.zoom)));
+                    }
+                    if a.floods && !gauges.is_empty() {
+                        legends.push(mapterm::floods::legend(&gauges));
                     }
                     if a.fires && !fires.is_empty() {
                         legends.push(mapterm::fires::legend(&fires));
@@ -3548,6 +3676,10 @@ async fn main() -> Result<()> {
                     }
                     _ if let Some(s) = ship => {
                         draw_ship(f, panel, s, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if let Some(g) = gauge => {
+                        draw_gauge(f, panel, g, gauge_details.get(&g.lid).and_then(Option::as_ref));
                         Vec::new()
                     }
                     _ if let Some(fi) = fire => {
@@ -3685,6 +3817,18 @@ async fn main() -> Result<()> {
                     let have = want.iter().filter(|z| alert_zones.contains_key(**z)).count();
                     let more = if have < want.len() { format!(" (areas {have}/{})", want.len()) } else { String::new() };
                     spans.push(Span::styled(format!("⚠ {now_in}{more} "), TStyle::new().fg(Color::Rgb(0xff, 0xa6, 0x4d))));
+                }
+                if a.floods {
+                    let st = TStyle::new().fg(Color::Rgb(0x4f, 0xa3, 0xff));
+                    let flooding = gauges.iter().filter(|g| g.worst() >= mapterm::floods::Category::Minor).count();
+                    let text = if cam.zoom < mapterm::floods::MIN_ZOOM {
+                        "◆ zoom in for gauges ".to_string()
+                    } else if gauges.is_empty() {
+                        "◆ … ".to_string()
+                    } else {
+                        format!("◆ {} gauges{} ", gauges.len(), if flooding > 0 { format!(" · {flooding} flooding") } else { String::new() })
+                    };
+                    spans.push(Span::styled(text, st));
                 }
                 if a.fires {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x45, 0x3a));
@@ -4125,6 +4269,20 @@ async fn main() -> Result<()> {
                 map.set_data(QUAKES, &mapterm::quakes::points(&quakes, unix_now(), selected_quake.as_deref()))?;
                 (quakes_new, quakes_drawn, quakes_shown_selected) = (false, Instant::now(), selected_quake.clone());
             }
+            // Gauges: again when new ones come or another is selected.
+            if a.floods && (gauges_new || selected_gauge != gauges_shown_selected) {
+                map.set_data(GAUGES, &mapterm::floods::points(&gauges, selected_gauge.as_deref()))?;
+                (gauges_new, gauges_shown_selected) = (false, selected_gauge.clone());
+                // The selected gauge's details, once.
+                if let Some(lid) = selected_gauge.clone().filter(|l| !gauge_details.contains_key(l)) {
+                    gauge_details.insert(lid.clone(), None);
+                    let tx = gatx.clone();
+                    tokio::spawn(async move {
+                        let r = mapterm::floods::detail(&lid).await.map_err(|e| format!("{e:#}"));
+                        let _ = tx.send(GaugeMsg::Detail(lid, r));
+                    });
+                }
+            }
             // Fires: again when new data comes or another is selected.
             if a.fires && (fires_new || selected_fire != fires_shown_selected) {
                 map.set_data(FIRES, &mapterm::fires::points(&fires, selected_fire.as_deref()))?;
@@ -4169,6 +4327,25 @@ async fn main() -> Result<()> {
                     let (feed, atx) = (feed.clone(), atx.clone());
                     tokio::spawn(async move {
                         let _ = atx.send(mapterm::adsb::fetch(&feed, lon, lat, nm).await);
+                    });
+                }
+            }
+            // --floods: the gauges in a box around the view (half a view more on each side),
+            // again when the view leaves it or every 10 minutes; none when zoomed out.
+            if a.floods && map_area.width > 0 && !ctl.animating() && !gauges_asking && cam.zoom >= mapterm::floods::MIN_ZOOM {
+                let vp = Viewport::new(&cam, map_area);
+                let (w, n) = vp.cell_to_lonlat(0, 0);
+                let (e, s) = vp.cell_to_lonlat(map_area.width, map_area.height);
+                let inside = gauges_area.is_some_and(|(_, b)| w >= b.0 && s >= b.1 && e <= b.2 && n <= b.3);
+                let stale = gauges_area.is_some_and(|(at, _)| at.elapsed() >= Duration::from_secs(mapterm::floods::REFRESH));
+                if !inside || stale {
+                    let (dx, dy) = ((e - w) / 2.0, (n - s) / 2.0);
+                    let b = ((w - dx).max(-180.0), (s - dy).max(-90.0), (e + dx).min(180.0), (n + dy).min(90.0));
+                    gauges_area = Some((Instant::now(), b));
+                    gauges_asking = true;
+                    let tx = gatx.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(GaugeMsg::Gauges(mapterm::floods::gauges(b).await.map_err(|e| format!("{e:#}"))));
                     });
                 }
             }
@@ -4337,6 +4514,29 @@ async fn main() -> Result<()> {
                         Err(e) => {
                             dlog(|| format!("alerts: {e:#}"));
                             note = Some((Instant::now(), format!("alerts: {e:#}")));
+                        }
+                    }
+                }
+                Some(m) = garx.recv() => {
+                    match m {
+                        GaugeMsg::Gauges(Ok(g)) => {
+                            dlog(|| format!("floods: {} gauges", g.len()));
+                            gauges = g;
+                            gauges_new = true;
+                            gauges_asking = false;
+                        }
+                        GaugeMsg::Gauges(Err(e)) => {
+                            dlog(|| format!("floods: {e}"));
+                            note = Some((Instant::now(), format!("gauges: {e}")));
+                            gauges_asking = false;
+                        }
+                        GaugeMsg::Detail(lid, Ok(d)) => {
+                            gauge_details.insert(lid, Some(d));
+                        }
+                        GaugeMsg::Detail(lid, Err(e)) => {
+                            dlog(|| format!("floods: {lid}: {e}"));
+                            gauge_details.remove(&lid);
+                            note = Some((Instant::now(), format!("gauge {lid}: {e}")));
                         }
                     }
                 }
@@ -4882,7 +5082,8 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
                                         });
                                     }
-                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some() || selected_outage.is_some() || selected_quake.is_some() || selected_fire.is_some() || selected_balloon.is_some()) && !inspect => {
+                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some() || selected_outage.is_some() || selected_quake.is_some() || selected_fire.is_some() || selected_gauge.is_some() || selected_balloon.is_some()) && !inspect => {
+                                        selected_gauge = None;
                                         selected_fire = None;
                                         selected_quake = None;
                                         selected_alert = None;
@@ -5168,7 +5369,7 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires {
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires || a.floods {
                                         // A click on (or next to) an aircraft, else a balloon, else a
                                         // ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
@@ -5205,6 +5406,11 @@ async fn main() -> Result<()> {
                                             selected = None;
                                             selected_ship = None;
                                             selected_alert = None;
+                                        } else if let Some(id) = mapterm::floods::nearest(&gauges, &vp, dot, 4.0) {
+                                            selected_gauge = Some(id);
+                                            (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake, selected_fire) =
+                                                (None, None, None, None, None, None, None, None);
+                                            follow = false;
                                         } else if let Some(id) = mapterm::fires::nearest(&fires, &vp, dot, 4.0).or_else(|| {
                                             // Or the perimeter under the click.
                                             map.query_features(&last_cam, map_area, dot)
@@ -5213,6 +5419,7 @@ async fn main() -> Result<()> {
                                                 .find_map(|p| p.prop("id").and_then(|v| v.as_str()).map(str::to_string))
                                         }) {
                                             selected_fire = Some(id);
+                                            selected_gauge = None;
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake) =
                                                 (None, None, None, None, None, None, None);
                                             follow = false;

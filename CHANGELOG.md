@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- River and creek levels: `--floods` draws every NOAA National Water Prediction Service
+  gauge in view (from zoom 8; public, no key) in its NWS flood category, with ↑ where the
+  forecast is worse. Click one for its stage and flow, flood stages, the last three days and
+  the forecast as a small chart, and record crests. Gauges around the view, again when it
+  leaves that area and every 10 minutes. `mapterm::floods`.
+
 - Overture Maps themes by name: `--geojson overture-addresses`, `overture-buildings` and
   `overture-places` find the latest release in Overture's STAC catalog and load as the map
   moves. From zoom 17, address points are labeled with their house numbers (`number` or
