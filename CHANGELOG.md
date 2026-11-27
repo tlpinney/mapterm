@@ -8,6 +8,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- `--closures` renders the roads: unless another map is asked for, Esri's Dark Gray Canvas
+  goes underneath and the vector map starts on labels only. The live overlay layers
+  (closures, gauges, fires, quakes) stay up whatever `v` shows, like aircraft and ships.
+
 - `mapterm-roads`, a basemap for looking at roads and the default with `--closures`: every
   road drawn and named in greys and cool whites by class over dim land and water, with
   county lines, and no warm colors (those are the closures'). `--style mapterm-roads` and
