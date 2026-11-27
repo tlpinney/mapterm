@@ -144,6 +144,23 @@ are so many); `i` shows the structure type, owner, place and registration number
 the physical structures only: which carriers or radios are on them isn't in the database.
 mapterm keeps the FCC's weekly file (~38 MB) for a week.
 
+## Mobile cells
+
+`--cells` draws mobile network cells from [OpenCelliD](https://opencellid.org)
+([CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)), the open database of
+cells measured by volunteers' phones: each cell (a radio on a mast; a mast often carries
+several) at its *estimated* position, ▴ colored by radio: 5G NR magenta, LTE blue, 3G
+green, 2G grey. They show from zoom 11 (the US alone has about 720,000); `i` shows the
+carrier (for the big US networks; others by their network code), the cell and area ids,
+the estimated range and how many measurements it rests on.
+
+OpenCelliD needs a free account and key, and its live API is too tight for a map, so
+mapterm uses its country files: `mapterm --cells-download` (the US; or mobile country
+codes, `--cells-download 234,235`) fetches them with your key, from
+`--opencellid-key-cmd 'pass opencellid/token'` or `OPENCELLID_KEY`, at most once in 12 hours
+each (OpenCelliD allows two downloads a day), into `~/.cache/mapterm/opencellid`. Run it
+again now and then for newer data. The key is yours: keep it to yourself.
+
 ## Satellites
 
 `--sats` shows satellites, placed from [CelesTrak](https://celestrak.org)'s orbital

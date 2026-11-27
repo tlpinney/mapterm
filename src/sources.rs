@@ -78,6 +78,7 @@ pub fn live_desc(key: &str) -> Option<Desc> {
         "ships" => ("ships", "aisstream.io (AIS), streamed", TimeKind::Tracks, "AIS: aisstream.io"),
         "satellites" => ("satellites", "CelesTrak orbital elements; SatNOGS for radios", TimeKind::Computed, "Orbits: CelesTrak"),
         "balloons" => ("weather balloons", "SondeHub radiosondes, streamed", TimeKind::Tracks, "Radiosondes: SondeHub"),
+        "cells" => ("mobile cells", "OpenCelliD country files (downloaded with your key)", TimeKind::Timeless, crate::opencellid::CREDIT),
         "towers" => ("antenna structures", "FCC Antenna Structure Registration, weekly file", TimeKind::Timeless, crate::towers::CREDIT),
         "nasa" => ("NASA balloons", "NASA CSBF flight pages and tracks (csbf.nasa.gov)", TimeKind::Tracks, crate::csbf::CREDIT),
         "radar" => ("radar", "RainViewer scans, the last two hours", TimeKind::Frames, crate::rainviewer::CREDIT),

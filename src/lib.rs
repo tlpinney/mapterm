@@ -104,6 +104,7 @@ pub mod msbuildings;
 pub mod mvt;
 pub mod nws;
 pub mod odin;
+pub mod opencellid;
 pub mod outages;
 pub mod overture;
 pub mod pbf;
