@@ -245,24 +245,24 @@ pub fn wkt_geometry(s: &str) -> Option<Json> {
 const MAX_NESTING: usize = 64;
 
 #[derive(Debug, Default)]
-struct Element {
-    name: String,
-    attrs: Vec<(String, String)>,
-    children: Vec<Element>,
-    text: String,
+pub(crate) struct Element {
+    pub(crate) name: String,
+    pub(crate) attrs: Vec<(String, String)>,
+    pub(crate) children: Vec<Element>,
+    pub(crate) text: String,
 }
 
 impl Element {
     /// The local name (without a namespace prefix).
-    fn is(&self, name: &str) -> bool {
+    pub(crate) fn is(&self, name: &str) -> bool {
         self.name.rsplit(':').next() == Some(name)
     }
 
-    fn child(&self, name: &str) -> Option<&Element> {
+    pub(crate) fn child(&self, name: &str) -> Option<&Element> {
         self.children.iter().find(|c| c.is(name))
     }
 
-    fn all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Element> + 'a {
+    pub(crate) fn all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Element> + 'a {
         self.children.iter().filter(move |c| c.is(name))
     }
 
@@ -270,12 +270,12 @@ impl Element {
         self.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
     }
 
-    fn text_of(&self, name: &str) -> Option<String> {
+    pub(crate) fn text_of(&self, name: &str) -> Option<String> {
         self.child(name).map(|c| c.text.trim().to_string()).filter(|t| !t.is_empty())
     }
 
     /// Every descendant (depth first) with this local name.
-    fn descendants<'a>(&'a self, name: &'a str, out: &mut Vec<&'a Element>) {
+    pub(crate) fn descendants<'a>(&'a self, name: &'a str, out: &mut Vec<&'a Element>) {
         for c in &self.children {
             if c.is(name) {
                 out.push(c);
@@ -313,7 +313,7 @@ fn unescape(s: &str) -> String {
 
 /// Parse XML into a tree: elements, attributes, text and CDATA; comments, declarations and
 /// processing instructions are skipped.
-fn parse_xml(s: &str) -> Result<Element> {
+pub(crate) fn parse_xml(s: &str) -> Result<Element> {
     let mut stack = vec![Element::default()];
     let mut rest = s;
     while !rest.is_empty() {

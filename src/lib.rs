@@ -122,6 +122,7 @@ pub mod source;
 pub mod spec;
 pub mod store;
 pub mod stylejson;
+pub mod tfrs;
 pub mod tilecache;
 pub mod timelayer;
 pub mod timeline;

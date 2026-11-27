@@ -13,6 +13,12 @@ All notable changes to mapterm are listed here. The format follows
   forecast is worse. Click one for its stage and flow, flood stages, the last three days and
   the forecast as a small chart, and record crests. Gauges around the view, again when it
   leaves that area and every 10 minutes. `mapterm::floods`.
+- Flight restrictions: `--tfrs` draws the FAA's temporary flight restrictions (tfr.faa.gov,
+  no key) colored by kind (VIP, security, hazards, space, events), over the standing
+  restricted airspace from the FAA's ArcGIS layers: special flight rules areas (DC SFRA and
+  FRZ), prohibited areas, and stadiums' 3 NM event circles. Click one for its NOTAM: each
+  area's rule, floor and ceiling, and when it's in force. TFRs every 5 minutes; standing
+  airspace kept a week. `mapterm::tfrs`.
 
 - Overture Maps themes by name: `--geojson overture-addresses`, `overture-buildings` and
   `overture-places` find the latest release in Overture's STAC catalog and load as the map

@@ -312,6 +312,29 @@ for around the view (the service can't give the whole country at once), again wh
 view leaves that area and every 10 minutes; a gauge's details once, when it's selected.
 With `--floods` the map switches to `mapterm-weather`. For flood safety, follow your local
 NWS office.
+## Flight restrictions
+
+```
+mapterm --tfrs --at 38.9,-77.03 -z 8
+mapterm --tfrs --adsb --at 38.9,-77.03 -z 9     # with the aircraft
+```
+
+The FAA's flight restrictions (public, no key). Temporary flight restrictions (TFRs) from
+tfr.faa.gov, filled and colored by kind: purple VIP movements, red security, orange hazards
+(wildfires, disasters), blue space launches, yellow air shows and sports, teal other special
+ones. Under them, outlined, the standing restricted airspace from the FAA's ArcGIS layers:
+the special flight rules areas (the Washington DC SFRA, surface to FL180, and the FRZ
+around Reagan National), the prohibited areas (P-56 over the Mall and White House, P-40 at
+Camp David...), and the stadiums of 30,000 seats or more as the 3 NM circles of the blanket
+sporting-event restriction, which applies only from an hour before to an hour after events
+(their times aren't published).
+
+Click one for its kind, NOTAM, and for a TFR each area's rule, floor and ceiling, and when
+it's in force (coming, in force, ended), with the NOTAM's text; a TFR's NOTAM is fetched
+when it's selected. The TFRs are asked for every 5 minutes; the standing airspace, which
+changes on the 56-day chart cycle, once and kept a week. Not for navigation: check NOTAMs
+before flying. The FAA publishes no restrictions by county; special events appear only once
+their TFR is issued.
 
 ## Wildfires
 
