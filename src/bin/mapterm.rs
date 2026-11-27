@@ -170,6 +170,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 radio receivers (no key): ▲ climbing, ▼ falling, colored by altitude, with
                 their flight as a trail; click or Tab for readings, frequency and the
                 predicted landing
+  --nasa-balloons [all]
+                NASA's scientific balloons from its balloon facility (CSBF, no key): ◓ with
+                the payload's name and its track so far, for flights heard in the last 3
+                days; `all` adds past flights where they came down, dimmed, with their tracks
   --vdot-key-cmd CMD
                 print your VDOT SmarterRoads token with a command (else
                 VDOT_SMARTERROADS_TOKEN): --closures adds Virginia's work zones. Free
@@ -301,6 +305,8 @@ struct Args {
     radar: bool,
     /// --sondes: live weather balloons from SondeHub.
     sondes: bool,
+    /// --nasa-balloons: NASA's scientific balloons; `all`: past flights too.
+    nasa: Option<bool>,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
     /// --floods: river and creek gauges from NOAA NWPS.
@@ -386,6 +392,7 @@ fn args() -> Result<Args> {
         ais: false,
         radar: false,
         sondes: false,
+        nasa: None,
         alerts: false,
         outages: false,
         quakes: None,
@@ -550,6 +557,7 @@ fn args() -> Result<Args> {
             }
             "--ais" => a.ais = true,
             "--sondes" | "--balloons" => a.sondes = true,
+            "--nasa-balloons" => a.nasa = Some(it.next_if(|n| n == "all").is_some()),
             "--radar" => a.radar = true,
             "--alerts" => a.alerts = true,
             "--outages" => a.outages = true,
@@ -715,6 +723,7 @@ fn live_sources(key: &str) -> &'static [&'static str] {
         "ships" => &[SHIPS],
         "satellites" => &[SATS],
         "balloons" => &[BALLOONS, STATIONS, STATION_LINKS],
+        "nasa" => &[NASA, NASA_TRACKS],
         "alerts" => &[ALERTS, ALERT_TILES],
         "quakes" => &[QUAKES],
         "fires" => &[FIRES, FIRE_AREAS, FIRE_TILES],
@@ -1015,6 +1024,9 @@ const SHIPS: &str = "ships";
 const BALLOONS: &str = "balloons";
 /// The stations receiving the balloons, and the lines from the selected balloon to them.
 const STATIONS: &str = "balloon-stations";
+/// NASA's scientific balloons (--nasa-balloons) and their tracks.
+const NASA: &str = "nasa-balloons";
+const NASA_TRACKS: &str = "nasa-tracks";
 const STATION_LINKS: &str = "balloon-links";
 const QUAKES: &str = "quakes";
 const FIRES: &str = "fires";
@@ -3121,6 +3133,7 @@ fn base_visibility(map: &Map) -> std::collections::HashMap<String, bool> {
 const STARTABLE: &[(&str, &str)] = &[
     ("aircraft", "--adsb"),
     ("balloons", "--sondes"),
+    ("nasa", "--nasa-balloons"),
     ("alerts", "--alerts"),
     ("quakes", "--quakes"),
     ("fires", "--fires"),
@@ -3199,6 +3212,73 @@ fn add_balloons(map: &mut Map, before: Option<&str>) -> Result<()> {
     add_points(map, STATION_LINKS, SONDE_CREDIT, mapterm::sondehub::link_layer(STATION_LINKS, STATION_LINKS), before)?;
     add_points(map, STATIONS, SONDE_CREDIT, mapterm::sondehub::station_layer(STATIONS, STATIONS), before)?;
     add_points(map, BALLOONS, SONDE_CREDIT, mapterm::sondehub::layer(BALLOONS, BALLOONS), before)
+}
+
+/// NASA's balloons over their tracks, under `before` (None: on top).
+fn add_nasa(map: &mut Map, before: Option<&str>) -> Result<()> {
+    add_points(map, NASA_TRACKS, mapterm::csbf::CREDIT, mapterm::csbf::track_layer(NASA_TRACKS, NASA_TRACKS), before)?;
+    add_points(map, NASA, mapterm::csbf::CREDIT, mapterm::csbf::layer(NASA, NASA), before)
+}
+
+/// What the NASA balloon task sends: the flights read, a flight's track, or what failed.
+enum NasaMsg {
+    Flights(Vec<mapterm::csbf::Flight>),
+    Track(String, Vec<mapterm::csbf::TrackPoint>),
+    Error(String),
+}
+
+/// --nasa-balloons: the flights the campaigns link to (looked for hourly), the pages of the
+/// recent ones every 2 minutes (all of them after each look), and the recent flights' tracks
+/// every 10 minutes (`all`: every flight's track, once).
+fn spawn_nasa(tx: mpsc::UnboundedSender<NasaMsg>, all: bool) {
+    use mapterm::csbf;
+    tokio::spawn(async move {
+        let mut urls: Vec<String> = Vec::new();
+        let mut looked: Option<Instant> = None;
+        let mut flights: std::collections::HashMap<String, csbf::Flight> = std::collections::HashMap::new();
+        let mut tracked: std::collections::HashMap<String, Instant> = std::collections::HashMap::new();
+        loop {
+            let mut read_all = false;
+            if looked.is_none_or(|t| t.elapsed() >= Duration::from_secs(csbf::DISCOVER)) {
+                match csbf::discover().await {
+                    Ok(u) => (urls, looked, read_all) = (u, Some(Instant::now()), true),
+                    Err(e) => {
+                        if tx.send(NasaMsg::Error(format!("{e:#}"))).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+            let now = unix_now();
+            for u in &urls {
+                let recent = flights.get(u).is_none_or(|f| now - f.t <= csbf::RECENT);
+                if (read_all || recent)
+                    && let Ok(Some(f)) = csbf::flight(u).await
+                {
+                    flights.insert(u.clone(), f);
+                }
+            }
+            if tx.send(NasaMsg::Flights(flights.values().cloned().collect())).is_err() {
+                return;
+            }
+            for f in flights.values() {
+                let recent = now - f.t <= csbf::RECENT;
+                let due = match tracked.get(&f.id) {
+                    None => recent || all,
+                    Some(t) => recent && t.elapsed() >= Duration::from_secs(600),
+                };
+                if let (true, Some(url)) = (due, &f.track_url) {
+                    tracked.insert(f.id.clone(), Instant::now());
+                    if let Ok(pts) = csbf::track(url).await
+                        && tx.send(NasaMsg::Track(f.id.clone(), pts)).is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(csbf::REFRESH)).await;
+        }
+    });
 }
 
 /// The aircraft and their trails, from `feed`, under `before` (None: on top).
@@ -3575,6 +3655,7 @@ async fn main() -> Result<()> {
         || a.ais
         || a.sats.is_some()
         || a.sondes
+        || a.nasa.is_some()
         || a.radar
         || a.alerts
         || a.outages
@@ -3928,6 +4009,10 @@ async fn main() -> Result<()> {
         add_points(&mut map, SHIPS, "aisstream.io", mapterm::ais::layer(SHIPS, SHIPS), above.as_deref())?;
     }
     // Live weather balloons (--sondes), between the ships and the aircraft.
+    if a.nasa.is_some() {
+        let above = map.layer_ids().into_iter().find(|id| *id == TRAILS || *id == AIRCRAFT).map(str::to_string);
+        add_nasa(&mut map, above.as_deref())?;
+    }
     if a.sondes {
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS || *id == AIRCRAFT).map(str::to_string);
         add_balloons(&mut map, above.as_deref())?;
@@ -4477,6 +4562,14 @@ async fn main() -> Result<()> {
     let (sonde_area_tx, sonde_area_rx) = tokio::sync::watch::channel::<Option<mapterm::sondehub::Area>>(None);
     let (sonde_sel_tx, sonde_sel_rx) = tokio::sync::watch::channel::<Option<String>>(None);
     let (btx, mut brx) = mpsc::unbounded_channel::<mapterm::sondehub::Event>();
+    // --nasa-balloons: the flights and their tracks, drawn again when either comes.
+    let mut nasa_flights: Vec<mapterm::csbf::Flight> = Vec::new();
+    let mut nasa_tracks: std::collections::HashMap<String, Vec<mapterm::csbf::TrackPoint>> = std::collections::HashMap::new();
+    let mut nasa_new = false;
+    let (nasatx, mut nasarx) = mpsc::unbounded_channel::<NasaMsg>();
+    if let Some(all) = a.nasa {
+        spawn_nasa(nasatx.clone(), all);
+    }
     if a.sondes {
         tokio::spawn(mapterm::sondehub::stream(sonde_area_rx.clone(), sonde_sel_rx.clone(), btx.clone()));
     }
@@ -4554,6 +4647,7 @@ async fn main() -> Result<()> {
             "ships" => ais_key.is_some(),
             "satellites" => a.sats.is_some(),
             "balloons" => a.sondes,
+            "nasa" => a.nasa.is_some(),
             "radar" => radar.is_some(),
             "alerts" => a.alerts,
             "quakes" => a.quakes.is_some(),
@@ -5054,6 +5148,15 @@ async fn main() -> Result<()> {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let of = sat_filter.describe();
                     spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
+                }
+                if a.nasa.is_some() && !live_off.contains_key("nasa") {
+                    let flying = nasa_flights.iter().filter(|f| unix_now() - f.t <= mapterm::csbf::RECENT).count();
+                    let text = match (flying, status.get("nasa").and_then(|s| s.updated)) {
+                        (_, None) => "◓ … ".to_string(),
+                        (0, _) => "◓ no NASA balloons flying ".to_string(),
+                        (n, _) => format!("◓ {n} NASA balloon{} ", if n == 1 { "" } else { "s" }),
+                    };
+                    spans.push(Span::styled(text, TStyle::new().fg(Color::Rgb(0xff, 0x6b, 0x6b))));
                 }
                 if a.sondes && !live_off.contains_key("balloons") {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
@@ -5741,6 +5844,13 @@ async fn main() -> Result<()> {
                 map.put_raster_tile(FIRE_TILES, None, true);
                 (fires_new, fires_shown_selected) = (false, selected_fire.clone());
             }
+            if let (Some(all), true) = (a.nasa, nasa_new) {
+                nasa_new = false;
+                let now = unix_now();
+                map.set_data(NASA, &mapterm::csbf::points(&nasa_flights, now, all))?;
+                let shown: HashSet<&String> = nasa_flights.iter().filter(|f| all || now - f.t <= mapterm::csbf::RECENT).map(|f| &f.id).collect();
+                map.set_data(NASA_TRACKS, &mapterm::csbf::track_lines(nasa_tracks.iter().filter(|(id, _)| shown.contains(id))))?;
+            }
             if a.sondes && !balloons.is_empty() && balloons_drawn.elapsed() >= Duration::from_millis(250) {
                 balloons_drawn = Instant::now();
                 balloons.prune(unix_now());
@@ -5997,6 +6107,12 @@ async fn main() -> Result<()> {
                                         let _ = map.set_visibility(TRAILS, false);
                                     }
                                     adsb_feed = Some(feed);
+                                }
+                                "nasa" => {
+                                    a.nasa = Some(false);
+                                    let before = under(&map, &[TRAILS, AIRCRAFT, SATS]);
+                                    add_nasa(&mut map, before.as_deref())?;
+                                    spawn_nasa(nasatx.clone(), false);
                                 }
                                 "balloons" => {
                                     a.sondes = true;
@@ -6554,6 +6670,24 @@ async fn main() -> Result<()> {
                         filter_sats(&mut sats, &mut sats_hidden, &sat_filter);
                         (sat_coloring, sat_legend) = recolor(&sats, sat_color);
                     }
+                }
+                Some(m) = nasarx.recv() => {
+                    match m {
+                        NasaMsg::Flights(f) => {
+                            let flying = f.iter().filter(|f| unix_now() - f.t <= mapterm::csbf::RECENT).count();
+                            status.entry("nasa").or_default().ok(unix_now(), Some(flying));
+                            dlog(|| format!("nasa: {} flights, {flying} recent", f.len()));
+                            nasa_flights = f;
+                        }
+                        NasaMsg::Track(id, pts) => {
+                            nasa_tracks.insert(id, pts);
+                        }
+                        NasaMsg::Error(e) => {
+                            dlog(|| format!("nasa: {e}"));
+                            status.entry("nasa").or_default().fail(unix_now(), e);
+                        }
+                    }
+                    nasa_new = true;
                 }
                 Some(ev) = brx.recv() => {
                     match ev {
