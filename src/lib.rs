@@ -73,6 +73,7 @@ pub mod ais;
 pub mod areas;
 pub mod cache;
 pub mod clock;
+pub mod closures;
 pub mod cluster;
 pub mod describe;
 pub mod events;

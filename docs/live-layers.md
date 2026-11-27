@@ -312,6 +312,35 @@ for around the view (the service can't give the whole country at once), again wh
 view leaves that area and every 10 minutes; a gauge's details once, when it's selected.
 With `--floods` the map switches to `mapterm-weather`. For flood safety, follow your local
 NWS office.
+## Road closures
+
+```
+mapterm --closures --at 39.2,-76.8 -z 8
+mapterm --closures --at 39.68,-76.38 -z 13     # one county's closures, close in
+```
+
+Road closures and work zones from county, city and state feeds (public, no key):
+
+| Source | What |
+|---|---|
+| Maryland's road closure system (MD iMAP / MDOT SHA) | closures counties and cities enter: construction, accidents, parades, special events, farmers markets, block parties; active, and planned ones a week ahead |
+| Montgomery County DOT | its closures, in the same form |
+| Prince William County, VA | its road closures and incidents |
+| Fairfax County, VA | its emergency management office's road hazards and restrictions (the service has been failing its queries; mapterm tries it each time, and says once if it fails) |
+| MDOT SHA, DelDOT, NJDOT / TRANSCOM | work zones in the national WZDx format |
+
+Each is a line along the road where the source gives one, else a point. Red is a road
+closed, orange restricted access (emergency or local only), amber lanes closed, yellow
+other work zones, and purple a closure planned in the next week. The status line counts
+them (━ 504 closures · 18 planned), and the legend by impact. Where a WZDx feed says all
+lanes are open (or doesn't say) but its description says a lane is closed, the description
+wins.
+
+Click one for the road and cross streets, how much is closed, why (construction, accident,
+parade...), the direction, when, the county or city, the text given, and the source. Every
+feed is asked every 5 minutes. DC, Arlington, Alexandria and Loudoun publish no live
+closures; Virginia's statewide feed needs a key.
+
 ## Flight restrictions
 
 ```

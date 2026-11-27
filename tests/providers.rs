@@ -80,6 +80,23 @@ fn faa_flight_restrictions() {
 
 #[test]
 #[ignore = "nightly provider check"]
+fn road_closures() {
+    block_on(async {
+        use mapterm::closures::{FEEDS, fetch};
+        // Fairfax County's service has been failing its queries (2026-11); left out until it
+        // works. The others must answer and parse; the busy ones must have something.
+        for feed in FEEDS.iter().filter(|f| !f.id.starts_with("ffx")) {
+            let c = fetch(feed).await.unwrap_or_else(|e| panic!("{}: {e:#}", feed.id));
+            if ["md", "wz-md", "wz-nj"].contains(&feed.id) {
+                assert!(!c.is_empty(), "{}: nothing", feed.id);
+                assert!(c.iter().any(|c| !c.road.is_empty()), "{}: no road names", feed.id);
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "nightly provider check"]
 fn nws_weather_alerts() {
     block_on(async {
         let (a, etag) = mapterm::nws::active(None).await.expect("NWS alerts").expect("an answer");
