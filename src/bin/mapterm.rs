@@ -1048,11 +1048,11 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, on: HelpOn) {
     let sections = help_sections(on);
     let mut all: Vec<Vec<Line>> = sections.iter().map(section_lines).collect();
     // The disclaimer, wrapped to the column, last.
-    let mut d = vec![Line::from(Span::styled(" disclaimer", head))];
+    let mut d = vec![Line::from(Span::styled(" disclaimer", TStyle::new().fg(DISCLAIMER_COLOR).add_modifier(Modifier::BOLD)))];
     let mut cur = String::new();
     for word in DISCLAIMER_FULL.split_whitespace() {
         if cur.chars().count() + word.chars().count() + 1 > 54 {
-            d.push(Line::from(Span::styled(format!("  {cur}"), dim)));
+            d.push(Line::from(Span::styled(format!("  {cur}"), TStyle::new().fg(Color::Rgb(0xe6, 0xe6, 0xe6)))));
             cur.clear();
         }
         if !cur.is_empty() {
@@ -1060,7 +1060,7 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, on: HelpOn) {
         }
         cur += word;
     }
-    d.push(Line::from(Span::styled(format!("  {cur}"), dim)));
+    d.push(Line::from(Span::styled(format!("  {cur}"), TStyle::new().fg(Color::Rgb(0xe6, 0xe6, 0xe6)))));
     all.push(d);
     let total: usize = all.iter().map(Vec::len).sum();
     let two = area.width >= 110 && total + 2 > area.height as usize;
@@ -1117,6 +1117,21 @@ const LOGO_W: u16 = 12;
 
 /// Shown after the credits while a live or hazard layer is on.
 const DISCLAIMER: &str = "Not for navigation or emergencies (? more)";
+
+/// The disclaimer's color: amber, bold, so it stands out from the dim credits.
+const DISCLAIMER_COLOR: Color = Color::Rgb(0xff, 0xc8, 0x3c);
+
+/// A line of credits in `dim`, with the disclaimer in it (where it is) bold and amber.
+fn credit_spans(line: &str, dim: TStyle) -> Vec<Span<'static>> {
+    match line.find(DISCLAIMER) {
+        Some(i) => vec![
+            Span::styled(line[..i].to_string(), dim),
+            Span::styled(DISCLAIMER, TStyle::new().fg(DISCLAIMER_COLOR).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::styled(line[i + DISCLAIMER.len()..].to_string(), dim),
+        ],
+        None => vec![Span::styled(line.to_string(), dim)],
+    }
+}
 
 /// The full disclaimer, at the end of the ? key list.
 const DISCLAIMER_FULL: &str = "mapterm shows other people's data as they publish it. Live layers (aircraft, ships, weather, alerts, outages, quakes, fires, river levels, flight restrictions, road closures) can be late, incomplete or wrong, and a service can change or stop. Not for navigation, flight planning or emergencies: follow official sources and local authorities.";
@@ -4279,7 +4294,7 @@ async fn main() -> Result<()> {
                 }
                 status_rows = 1 + credit_rows;
                 if credit_rows == 0 || s.height < 2 {
-                    spans.push(Span::styled(format!("· {credits} · ? keys · q quit"), dim));
+                    spans.extend(credit_spans(&format!("· {credits} · ? keys · q quit"), dim));
                     let row = Rect { y: s.bottom() - 1, height: 1, ..s };
                     f.render_widget(Paragraph::new(Line::from(spans)), row);
                     if logo_w > 0 {
@@ -4290,7 +4305,7 @@ async fn main() -> Result<()> {
                     // Bottom-aligned, so a frame where the rows haven't caught up yet loses
                     // the top line, not the end of the last.
                     let shown = lines.len().min(above.height as usize);
-                    let text: Vec<Line> = lines[lines.len() - shown..].iter().map(|l| Line::from(Span::styled(l.clone(), dim))).collect();
+                    let text: Vec<Line> = lines[lines.len() - shown..].iter().map(|l| Line::from(credit_spans(l, dim))).collect();
                     f.render_widget(Paragraph::new(text), Rect { y: above.bottom() - shown as u16, height: shown as u16, ..above });
                     if logo_w > 0 && shown > 0 {
                         f.render_widget(Paragraph::new(Line::from(logo)), Rect { x: above.right() - LOGO_W, y: above.bottom() - 1, width: LOGO_W, height: 1 });
