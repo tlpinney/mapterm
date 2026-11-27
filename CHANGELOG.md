@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- The clock says whether it's live: `● LIVE` (green), `⏸ 07:40 · 35 min ago` (amber,
+  stopped at a time) or `▶ 4× 07:40` (blue, playing), first on the status line and at the
+  start of the timeline. The radar part says only the scan shown and how old it is
+  (`☂ scan 08:10 EST (9 min old)`), so a live map no longer looks stopped in the past.
+  `Timeline::badge`.
+
 - Live layers start from `L` while the viewer runs: aircraft (adsb.lol), weather balloons,
   weather alerts, earthquakes, wildfires, river levels, flight restrictions, road closures,
   and traffic speeds, radar, satellites, ships (with an aisstream.io key) and power

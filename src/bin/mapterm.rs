@@ -5106,19 +5106,18 @@ async fn main() -> Result<()> {
                     };
                     spans.push(Span::styled(text, st));
                 }
+                // The clock: live, or stopped (or playing) at a time; then the radar scan shown
+                // and how old it is (live, the latest scan is a few minutes old).
+                if timeline_area.height > 0 {
+                    let (badge, color) = timeline.badge(&clock);
+                    let when = if clock.is_live() { String::new() } else { format!(" · {} ago", mapterm::sources::span((unix_now() - clock.time()).max(0.0))) };
+                    spans.insert(0, Span::styled(format!(" {badge}{when}"), TStyle::new().fg(color).add_modifier(ratatui::style::Modifier::BOLD)));
+                }
                 if let Some(r) = radar.as_ref().filter(|r| !r.is_off()) {
                     match r.shown_time() {
                         Some(t) => {
-                            let ago = ((unix_now() - t) / 60.0).max(0.0).round();
-                            let state = if clock.is_playing() {
-                                format!("{} {:.0}× ", if clock.multiplier < 0.0 { "◀" } else { "▶" }, clock.multiplier.abs())
-                            } else if clock.is_live() {
-                                String::new()
-                            } else {
-                                "⏸ ".to_string()
-                            };
-                            let st = if clock.is_live() { dim } else { TStyle::new().fg(Color::Rgb(127, 178, 255)) };
-                            spans.push(Span::styled(format!("☂ {state}{} · {ago:.0} min ago ", hhmm(t)), st));
+                            let age = mapterm::sources::span((unix_now() - t).max(0.0));
+                            spans.push(Span::styled(format!("☂ scan {} ({age} old) ", hhmm(t)), dim));
                         }
                         None => spans.push(Span::styled("☂ … ", dim)),
                     }
