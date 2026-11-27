@@ -230,7 +230,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · / search · i inspect · b base map · L layers ·
+      +/- zoom · sideways swipe pans · / search · i inspect · b base map · L layers · K legends ·
       D data sources · S sessions · m/M next or previous base map · ' the one before · t theme · c copy
       coordinates · v vector overlay · n labels · q quit
 
@@ -1305,6 +1305,7 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
             vec![
                 ("b", "base map: one style or imagery"),
                 ("L", "layers: live, imagery overlays, data, legends"),
+                ("K", "legends on or off"),
                 ("D", "data sources: updated when, errors, time"),
                 ("m M", "next or previous base map"),
                 ("'", "back to the base map before"),
@@ -7053,6 +7054,11 @@ async fn main() -> Result<()> {
                                         note = Some((Instant::now(), if off { "radar off · R shows it" } else { "radar on" }.into()));
                                     }
                                     KeyCode::Char('?') => show_help = true,
+                                    // K: the legends on or off (also a row in L).
+                                    KeyCode::Char('K') => {
+                                        show_legend = !show_legend;
+                                        note = Some((Instant::now(), if show_legend { "legends on · K hides them" } else { "legends off · K shows them" }.into()));
+                                    }
                                     // D: the data sources, how each is doing.
                                     KeyCode::Char('D') => {
                                         finder = None;

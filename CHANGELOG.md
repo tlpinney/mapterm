@@ -8,6 +8,8 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- `K` shows or hides the legends (they're also a row in `L`).
+
 - The clock says whether it's live: `● LIVE` (green), `⏸ 07:40 · 35 min ago` (amber,
   stopped at a time) or `▶ 4× 07:40` (blue, playing), first on the status line and at the
   start of the timeline. The radar part says only the scan shown and how old it is
