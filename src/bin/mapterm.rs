@@ -798,6 +798,7 @@ fn live_sources(key: &str) -> &'static [&'static str] {
         "nasa" => &[NASA, NASA_TRACKS],
         "towers" => &[TOWERS],
         "cells" => &[CELLS],
+        "mapillary" => &[MLY],
         "alerts" => &[ALERTS, ALERT_TILES],
         "quakes" => &[QUAKES],
         "fires" => &[FIRES, FIRE_AREAS, FIRE_TILES],
@@ -1345,6 +1346,8 @@ const NASA: &str = "nasa-balloons";
 const TOWERS: &str = "fcc-towers";
 /// Towers are drawn from this zoom (142,000 of them).
 const TOWERS_MIN_ZOOM: f64 = 8.0;
+/// Where Mapillary has street-level photos (with --streetview).
+const MLY: &str = "mapillary-coverage";
 /// OpenCelliD's cells (--cells), drawn from this zoom, at most this many.
 const CELLS: &str = "opencellid-cells";
 const CELLS_MIN_ZOOM: f64 = 11.0;
@@ -3472,6 +3475,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
             || id == format!("{ROUTE}-line")
             || [CLOSURES, GAUGES, FIRES, QUAKES, TRAFFIC].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')))
             || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS, LAUNCH_SITES, TOWERS, CELLS].contains(&id.as_str())
+            || id.starts_with(MLY)
             || id.starts_with(STATION_AREAS);
         if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
@@ -4991,6 +4995,16 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    // Where there are photos: Mapillary's coverage tiles, under what moves.
+    if let Some(token) = &mapillary_token {
+        let redact = |e: anyhow::Error| anyhow::anyhow!("{}", format!("{e:#}").replace(token.as_str(), "<token>"));
+        let mut src = Source::open(&mapterm::mapillary::coverage_tiles(token)).await.map_err(redact)?;
+        src.name = "Mapillary coverage".into();
+        src.attribution = Some(mapterm::mapillary::CREDIT.into());
+        map.add_source(MLY, MapSource::vector(src))?;
+        let before = under(&map, MOVING);
+        map.add_layers(mapterm::mapillary::coverage_layers(MLY, MLY), before.as_deref())?;
+    }
     let mut photos: Vec<mapterm::mapillary::Photo> = Vec::new();
     let mut photo_at = 0usize;
     let mut photos_asking = false;
@@ -5143,6 +5157,7 @@ async fn main() -> Result<()> {
             "nasa" => a.nasa.is_some(),
             "towers" => a.towers,
             "cells" => a.cells,
+            "mapillary" => a.streetview,
             "radar" => radar.is_some(),
             "alerts" => a.alerts,
             "quakes" => a.quakes.is_some(),

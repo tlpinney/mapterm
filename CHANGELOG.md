@@ -16,7 +16,9 @@ All notable changes to mapterm are listed here. The format follows
   week by id, their expiring links never. Walk mode (`w` with a photo shown): W/S (or ↑/↓)
   step along the street, following the photographer's sequence and then the nearest photo
   ahead, A/D (←/→) turn onto a photo facing left or right, Q/E older and newer photos of the
-  spot, esc leaves; the map follows, the photo takes more of the screen.
+  spot, esc leaves; the map follows, the photo takes more of the screen. Where there are
+  photos shows as a coverage layer (green: dots zoomed out, the sequences' lines, each photo
+  from zoom 16), from Mapillary's tiles kept in the tile cache; off in `L`.
   `mapterm::mapillary`.
 
 - Mobile network cells (`--cells`, or from `L`) from OpenCelliD (CC BY-SA 4.0): each cell's

@@ -151,6 +151,7 @@ pub const LIVE: &[Live] = &[
     Live { key: "nasa", label: "NASA balloons", detail: "scientific balloons, CSBF" },
     Live { key: "towers", label: "antenna structures", detail: "FCC tower registrations" },
     Live { key: "cells", label: "mobile cells", detail: "OpenCelliD, estimated" },
+    Live { key: "mapillary", label: "street-level coverage", detail: "where Mapillary has photos" },
     Live { key: "radar", label: "radar", detail: "rain and snow · R" },
     Live { key: "alerts", label: "weather alerts", detail: "NWS warnings and watches" },
     Live { key: "quakes", label: "earthquakes", detail: "USGS" },
