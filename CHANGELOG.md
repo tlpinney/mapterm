@@ -8,6 +8,9 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Route choices: up to three routes (Valhalla's `alternates`), the others drawn dim, the panel
+  listing each one's time, distance and main road; `1`–`3` picks one.
+
 - Directions: `--route FROM TO` (each end `here`, `LAT,LON` or a place), or `d` after a `/`
   search, draws the route, its distance and time on the status line, and the turns in a
   panel (`Esc` hides it, `x` clears it); `--route-mode car|bike|walk`. With `--closures` the

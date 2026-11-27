@@ -19,6 +19,8 @@ use serde_json::{Value as Json, json};
 pub const PUBLIC: &str = "https://valhalla1.openstreetmap.de";
 /// The credit shown with a route.
 pub const CREDIT: &str = "Routing: Valhalla (FOSSGIS), © OpenStreetMap contributors";
+/// How many other routes to ask for, beside the best.
+pub const ALTERNATES: usize = 2;
 /// How many points a route may be asked to avoid.
 pub const MAX_AVOID: usize = 50;
 /// The least time between requests to the public server.
@@ -76,6 +78,8 @@ pub struct Step {
     pub seconds: f64,
     /// Where it starts along the route's line (an index into [`Route::line`]).
     pub at: usize,
+    /// The roads it's on.
+    pub streets: Vec<String>,
 }
 
 /// A route.
@@ -99,6 +103,19 @@ impl Route {
     /// The route as a GeoJSON LineString.
     pub fn geometry(&self) -> Json {
         json!({"type": "LineString", "coordinates": self.line.iter().map(|(x, y)| [*x, *y]).collect::<Vec<_>>()})
+    }
+
+    /// The road it spends the most miles on ("I 70"), to tell routes apart.
+    pub fn via(&self) -> Option<String> {
+        let mut miles: Vec<(String, f64)> = Vec::new();
+        for s in &self.steps {
+            let Some(name) = s.streets.first() else { continue };
+            match miles.iter_mut().find(|(n, _)| n == name) {
+                Some((_, m)) => *m += s.miles,
+                None => miles.push((name.clone(), s.miles)),
+            }
+        }
+        miles.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).map(|(n, _)| n)
     }
 
     /// Its extent: (west, south, east, north).
@@ -139,13 +156,23 @@ pub fn decode_polyline(s: &str, digits: u32) -> Vec<(f64, f64)> {
     out
 }
 
-/// A route from Valhalla's `/route` answer.
-pub fn parse(text: &str, mode: Mode, avoided: usize) -> Result<Route> {
+/// The routes in Valhalla's `/route` answer: the best, then the alternates.
+pub fn parse(text: &str, mode: Mode, avoided: usize) -> Result<Vec<Route>> {
     let v: Json = serde_json::from_str(text).context("Valhalla")?;
     if let Some(e) = v.get("error") {
         bail!("{}", e.as_str().unwrap_or("no route"));
     }
     let trip = v.get("trip").context("Valhalla: no trip in the answer")?;
+    let mut routes = vec![parse_trip(trip, mode, avoided)?];
+    for a in v["alternates"].as_array().into_iter().flatten() {
+        if let Ok(r) = parse_trip(&a["trip"], mode, avoided) {
+            routes.push(r);
+        }
+    }
+    Ok(routes)
+}
+
+fn parse_trip(trip: &Json, mode: Mode, avoided: usize) -> Result<Route> {
     let mut line: Vec<(f64, f64)> = Vec::new();
     let mut steps = Vec::new();
     for leg in trip["legs"].as_array().into_iter().flatten() {
@@ -157,6 +184,7 @@ pub fn parse(text: &str, mode: Mode, avoided: usize) -> Result<Route> {
                 miles: m["length"].as_f64().unwrap_or(0.0),
                 seconds: m["time"].as_f64().unwrap_or(0.0),
                 at: base + m["begin_shape_index"].as_u64().unwrap_or(0) as usize,
+                streets: m["street_names"].as_array().into_iter().flatten().filter_map(|n| n.as_str()).take(4).map(|n| n.chars().take(80).collect()).collect(),
             });
         }
         line.extend(shape);
@@ -173,6 +201,7 @@ pub fn request(from: (f64, f64), to: (f64, f64), mode: Mode, avoid: &[(f64, f64)
     let mut r = json!({
         "locations": [loc(from), loc(to)],
         "costing": mode.costing(),
+        "alternates": ALTERNATES,
         "directions_options": {"units": "miles"},
     });
     if !avoid.is_empty() {
@@ -184,8 +213,9 @@ pub fn request(from: (f64, f64), to: (f64, f64), mode: Mode, avoid: &[(f64, f64)
 /// When the last request went to the public server.
 static LAST: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// A route from Valhalla at `server` (the public one, else yours).
-pub async fn route(server: &str, from: (f64, f64), to: (f64, f64), mode: Mode, avoid: &[(f64, f64)]) -> Result<Route> {
+/// Routes from Valhalla at `server` (the public one, else yours): the best, then up to
+/// [`ALTERNATES`] others.
+pub async fn route(server: &str, from: (f64, f64), to: (f64, f64), mode: Mode, avoid: &[(f64, f64)]) -> Result<Vec<Route>> {
     // At most one request a second to the public server.
     if server == PUBLIC {
         let wait = {
@@ -295,13 +325,16 @@ mod tests {
         let text = r#"{"trip":{"status":0,"units":"miles","summary":{"length":41.69,"time":2795.3},
           "legs":[{"shape":"_p~iF~ps|U_ulLnnqC_mqNvxq`@","maneuvers":[
             {"instruction":"Drive north on South Washington Street/VA 400.","length":0.0965,"time":13.7,"begin_shape_index":0},
-            {"instruction":"Turn right onto King Street/VA 7.","length":0.2367,"time":43.8,"begin_shape_index":1}]}]}}"#;
-        let r = parse(text, Mode::Car, 3).unwrap();
+            {"instruction":"Turn right onto King Street/VA 7.","street_names":["King Street","VA 7"],"length":0.2367,"time":43.8,"begin_shape_index":1}]}]},
+          "alternates":[{"trip":{"summary":{"length":50.0,"time":3600},"legs":[{"shape":"_p~iF~ps|U_ulLnnqC","maneuvers":[]}]}}]}"#;
+        assert_eq!(parse(text, Mode::Car, 0).unwrap().len(), 2, "the best and an alternate");
+        let r = parse(text, Mode::Car, 3).unwrap().remove(0);
         assert_eq!((r.miles, r.steps.len(), r.line.len(), r.avoided), (41.69, 2, 3, 3));
         assert_eq!(r.steps[1].instruction, "Turn right onto King Street/VA 7.");
         assert!((r.line[0].0 + 12.02).abs() < 1e-9 && (r.line[0].1 - 3.85).abs() < 1e-9, "read at precision 6: {:?}", r.line[0]);
         assert_eq!(r.geometry()["type"], "LineString");
         assert!(r.bounds().is_some());
+        assert_eq!(r.via().as_deref(), Some("King Street"));
         assert!(parse(r#"{"error_code":442,"error":"No path could be found for input"}"#, Mode::Car, 0).unwrap_err().to_string().contains("No path"));
         assert_eq!((distance(0.1), distance(3.25), distance(41.7)), ("528 ft".to_string(), "3.2 mi".to_string(), "42 mi".to_string()));
         assert_eq!((duration(2795.0), duration(3900.0)), ("47 min".to_string(), "1 h 05 min".to_string()));
@@ -322,7 +355,7 @@ mod tests {
         assert_eq!(a.len(), 3, "the closed line near the trip (middle and ends): {a:?}");
         assert!(a.contains(&(-76.9, 38.9)));
         let r = request((-77.05, 38.8), (-76.5, 39.0), Mode::Car, &a);
-        assert_eq!(r["costing"], "auto");
+        assert_eq!((r["costing"].as_str(), r["alternates"].as_u64()), (Some("auto"), Some(2)));
         assert_eq!(r["exclude_locations"].as_array().unwrap().len(), 3);
         assert_eq!(r["locations"][0]["lat"], 38.8);
         assert!(request((0.0, 0.0), (1.0, 1.0), Mode::Walk, &[]).get("exclude_locations").is_none());

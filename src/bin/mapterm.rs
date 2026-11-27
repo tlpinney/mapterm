@@ -147,7 +147,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 directions, each end `here`, LAT,LON or a place to search for: the
                 route drawn on the map, its distance and time (no traffic) on the status
                 line, and the turn-by-turn steps in a panel (esc hides it, x clears the
-                route). With --closures, it avoids the closed roads. From Valhalla over
+                route). Up to three routes, each with its time: the others dim, 1-3
+                picks one. With --closures, it avoids the closed roads. From Valhalla over
                 OpenStreetMap: FOSSGIS's public server, asked only when you ask, or
                 yours with --router URL (also MAPTERM_ROUTER). Or press d after a /
                 search: directions there from your location (else the map's center)
@@ -1027,6 +1028,7 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
             vec![
                 ("/", "search for a place"),
                 ("d", "directions to it (from you, else the center)"),
+                ("1-3", "pick one of the routes"),
                 ("x", "clear the route"),
                 ("i", "inspect: what's under the pointer"),
                 ("y", "copy the inspected feature (JSON)"),
@@ -1845,7 +1847,8 @@ async fn route_end(spec: &str, geo: &mapterm::geocode::Geocoder, location_cmd: O
 }
 
 /// The directions panel: the trip, then each step with its distance.
-fn draw_route(f: &mut ratatui::Frame, area: Rect, r: &mapterm::route::Route) {
+fn draw_route(f: &mut ratatui::Frame, area: Rect, routes: &[mapterm::route::Route], pick: usize) {
+    let Some(r) = routes.get(pick) else { return };
     use ratatui::style::Modifier;
     use ratatui::widgets::{Borders, Wrap};
     let dim = TStyle::new().fg(Color::DarkGray);
@@ -1859,6 +1862,17 @@ fn draw_route(f: &mut ratatui::Frame, area: Rect, r: &mapterm::route::Route) {
         cyan.add_modifier(Modifier::BOLD),
     ))];
     l.push(Line::from(Span::styled(" estimated, without traffic", dim)));
+    // The choices: each one's time, miles and main road; the picked one bright.
+    if routes.len() > 1 {
+        l.push(Line::default());
+        for (i, o) in routes.iter().enumerate() {
+            let via = o.via().map(|v| format!("  via {v}")).unwrap_or_default();
+            let text = format!(" {} {:>9} · {}{via}", i + 1, mapterm::route::duration(o.seconds), mapterm::route::distance(o.miles));
+            let st = if i == pick { cyan.add_modifier(Modifier::BOLD | Modifier::REVERSED) } else { TStyle::new().fg(Color::Gray) };
+            l.push(Line::from(Span::styled(text, st)));
+        }
+        l.push(Line::from(Span::styled(format!(" 1-{} picks a route", routes.len()), dim)));
+    }
     if r.avoided > 0 {
         l.push(Line::from(Span::styled(
             format!(" avoiding {} closed road point{}", r.avoided, if r.avoided == 1 { "" } else { "s" }),
@@ -2991,7 +3005,8 @@ async fn main() -> Result<()> {
             map.add_source(ROUTE_TILES, MapSource::raster(mapterm::areas::tile_source_to(route_tiles.clone(), "route", mapterm::route::CREDIT, 18)?))?;
             map.add_layer(mapterm::StyleLayer::raster(ROUTE_TILES, ROUTE_TILES))?;
         }
-        let line = serde_json::json!({"id": format!("{ROUTE}-line"), "type": "line", "source": ROUTE, "paint": {"line-color": "#22d3ee", "line-width": 3}});
+        let line =
+            serde_json::json!({"id": format!("{ROUTE}-line"), "type": "line", "source": ROUTE, "paint": {"line-color": ["get", "color"], "line-width": 3}});
         let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
         map.add_layers(vec![mapterm::StyleLayer::from_json(&line)?.0], above.as_deref())?;
         if mapterm::kitty::supported() {
@@ -3282,13 +3297,16 @@ async fn main() -> Result<()> {
     let router =
         a.router.clone().or_else(|| std::env::var("MAPTERM_ROUTER").ok().filter(|r| !r.is_empty())).unwrap_or_else(|| mapterm::route::PUBLIC.to_string());
     let mut route: Option<mapterm::route::Route> = None;
+    // All the routes Valhalla gave (the best, then alternates), and which one is picked.
+    let mut routes: Vec<mapterm::route::Route> = Vec::new();
+    let mut route_pick = 0usize;
     let mut route_new = false;
     let mut route_panel = true;
     let mut route_ends: Option<((f64, f64), (f64, f64))> = None;
     let mut route_asking = false;
     // Asked again once, with the closed roads to avoid, when they arrive after it.
     let mut route_avoid_pending = false;
-    let (routetx, mut routerx) = mpsc::unbounded_channel::<std::result::Result<(mapterm::route::Route, (f64, f64), (f64, f64)), String>>();
+    let (routetx, mut routerx) = mpsc::unbounded_channel::<std::result::Result<(Vec<mapterm::route::Route>, (f64, f64), (f64, f64)), String>>();
     if let Some((from, to)) = a.route.clone() {
         let (tx, geo, cmd, mode, server) = (routetx.clone(), geocoder.clone(), a.location_cmd.clone(), a.route_mode, router.clone());
         route_asking = true;
@@ -4070,7 +4088,7 @@ async fn main() -> Result<()> {
                 let outage = selected_outage.as_deref().and_then(|k| outages.find(k));
                 let quake = selected_quake.as_deref().and_then(|id| quakes.iter().find(|q| q.id == id));
                 let fire = selected_fire.as_deref().and_then(|id| fires.iter().find(|f| f.id == id));
-                let show_route = route.as_ref().filter(|_| route_panel);
+                let show_route = (route_panel && !routes.is_empty()).then_some(routes.as_slice());
                 let closure = selected_closure.as_deref().and_then(|k| closures.values().flatten().find(|c| c.key == k));
                 let tfr = selected_tfr.as_deref().and_then(|k| tfr_live.iter().chain(&tfr_standing).find(|r| r.key == k));
                 let gauge = selected_gauge.as_deref().and_then(|id| gauges.iter().find(|g| g.lid == id));
@@ -4182,7 +4200,7 @@ async fn main() -> Result<()> {
                         Vec::new()
                     }
                     _ if let Some(r) = show_route => {
-                        draw_route(f, panel, r);
+                        draw_route(f, panel, r, route_pick);
                         Vec::new()
                     }
                     _ => Vec::new(),
@@ -4784,16 +4802,22 @@ async fn main() -> Result<()> {
             }
             // The route: drawn when a new one comes (or it's cleared).
             if route_new {
-                let fc = match &route {
-                    Some(r) => serde_json::json!({"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": r.geometry(), "properties": {}}]}),
-                    None => serde_json::json!({"type": "FeatureCollection", "features": []}),
-                };
-                map.set_data(ROUTE, &fc)?;
-                let mut shape = mapterm::areas::Shape::lines((0x22, 0xd3, 0xee), 5.0, false);
-                if let Some(r) = &route {
-                    shape.add(&r.geometry());
-                }
-                route_tiles.set(if route.is_some() { vec![shape] } else { Vec::new() });
+                // The others dim, the picked one bright and on top.
+                let order: Vec<usize> = (0..routes.len()).filter(|i| *i != route_pick).chain((route_pick < routes.len()).then_some(route_pick)).collect();
+                let features: Vec<serde_json::Value> = order
+                    .iter()
+                    .map(|&i| serde_json::json!({"type": "Feature", "geometry": routes[i].geometry(), "properties": {"color": if i == route_pick { "#22d3ee" } else { "#64748b" }}}))
+                    .collect();
+                map.set_data(ROUTE, &serde_json::json!({"type": "FeatureCollection", "features": features}))?;
+                let shapes: Vec<mapterm::areas::Shape> = order
+                    .iter()
+                    .map(|&i| {
+                        let mut shape = if i == route_pick { mapterm::areas::Shape::lines((0x22, 0xd3, 0xee), 5.0, false) } else { mapterm::areas::Shape::lines((0x64, 0x74, 0x8b), 4.0, false) };
+                        shape.add(&routes[i].geometry());
+                        shape
+                    })
+                    .collect();
+                route_tiles.set(shapes);
                 map.put_raster_tile(ROUTE_TILES, None, true);
                 route_new = false;
             }
@@ -5113,8 +5137,12 @@ async fn main() -> Result<()> {
                 Some(r) = routerx.recv() => {
                     route_asking = false;
                     match r {
-                        Ok((r, f, t)) => {
-                            dlog(|| format!("route: {:.1} mi, {:.0} s, {} steps, avoiding {}", r.miles, r.seconds, r.steps.len(), r.avoided));
+                        Ok((all, f, t)) if !all.is_empty() => {
+                            for r in &all {
+                                dlog(|| format!("route: {:.1} mi, {:.0} s, {} steps, avoiding {}", r.miles, r.seconds, r.steps.len(), r.avoided));
+                            }
+                            // Fit the map to all of them.
+                            let r = mapterm::route::Route { line: all.iter().flat_map(|r| r.line.iter().copied()).collect(), ..Default::default() };
                             // Fit the map to it.
                             if let Some(b) = r.bounds() {
                                 let p = mapterm::geocode::Place {
@@ -5128,11 +5156,14 @@ async fn main() -> Result<()> {
                                 let (lon, lat, z) = p.view(map_area.width, map_area.height);
                                 ctl.fly_to(Camera::new(lon, lat, z));
                             }
-                            route = Some(r);
+                            route_pick = 0;
+                            route = Some(all[0].clone());
+                            routes = all;
                             route_ends = Some((f, t));
                             route_new = true;
                             route_panel = true;
                         }
+                        Ok(_) => note = Some((Instant::now(), "route: none found".into())),
                         Err(e) => {
                             dlog(|| format!("route: {e}"));
                             note = Some((Instant::now(), format!("route: {e}")));
@@ -5731,7 +5762,15 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(r);
                                         });
                                     }
+                                    KeyCode::Char(c @ '1'..='3') if (c as usize - '1' as usize) < routes.len() && routes.len() > 1 => {
+                                        route_pick = c as usize - '1' as usize;
+                                        route = Some(routes[route_pick].clone());
+                                        route_panel = true;
+                                        route_new = true;
+                                    }
                                     KeyCode::Char('x') if route.is_some() => {
+                                        routes.clear();
+                                        route_pick = 0;
                                         route = None;
                                         route_ends = None;
                                         route_new = true;

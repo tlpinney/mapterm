@@ -447,6 +447,8 @@ search with `/` and press `d`: directions there from your location (after `g` or
 here`), else from the map's center. The route is a bright cyan line (an image where the
 terminal shows images), the map fits it, the status line has its distance and time (⮕ 42
 mi · 46 min), and a panel lists the turns; `Esc` hides the panel, `x` clears the route.
+Valhalla gives up to three routes: the fastest is picked, the others are drawn dim, and the
+panel lists each with its time, distance and main road; `1`–`3` picks one.
 `--route-mode` is `car` (the default), `bike` or `walk`.
 
 With `--closures`, routes avoid the closed roads near the trip: once the closures are in,
