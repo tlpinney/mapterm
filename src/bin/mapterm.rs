@@ -230,17 +230,20 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · / search · i inspect · b layers · m/M next or
-      previous base map · ' the one before · t theme · c copy coordinates · v vector overlay ·
-      n labels · q quit
+      +/- zoom · sideways swipe pans · / search · i inspect · b base map · L layers ·
+      S sessions · m/M next or previous base map · ' the one before · t theme · c copy
+      coordinates · v vector overlay · n labels · q quit
 
-layers (b): the live layers running (on and off), the map styles and imagery (satellite and
-      aerial photos; keyed providers once their key is set) and imagery overlays, in the
-      middle of the map, fzf-style: typing filters
-      (matched letters lit, best first), up/down or ctrl-n/p preview the chosen one after a
-      moment, enter keeps it, esc goes back. Imagery goes
-      under the style's roads and names (v: all, names only, none). Space or click toggles
-      labels and the overlay without closing.
+pickers, in the middle of the map, fzf-style (typing filters, matched letters lit, best
+      first; up/down or ctrl-n/p choose; esc closes):
+  b   the base map, one of the map styles or imagery (satellite and aerial photos; keyed
+      providers once their key is set): space picks it, enter picks it and closes
+  L   what's over it, each on or off (enter or space): the live layers running, imagery
+      overlays (hillshade, Esri roads and places, NASA's daily picture), data layers,
+      labels, the vector map over imagery, legends
+  S   sessions saved and recent runs, with when each was made and opened: enter opens one;
+      the first row saves this view under what's typed
+      Imagery goes under the style's roads and names (v: all, names only, none).
 
 search (/): type a place and press enter; one match flies there, several open a list
       (up/down or tab, enter or click to fly); esc clears the marker. Uses Photon
@@ -456,7 +459,7 @@ fn args() -> Result<Args> {
             "--session" | "--resume" => match gi.peek() {
                 Some(n) if !n.starts_with('-') => {
                     let n = gi.next().expect("peeked");
-                    session = Some(mapterm::sessions::load(&n)?);
+                    session = Some(mapterm::sessions::open(&n, unix_now())?);
                 }
                 _ if x == "--resume" => a.resume = true,
                 _ => bail!("--session NAME (mapterm --sessions lists them)"),
@@ -733,7 +736,12 @@ fn live_images(key: &str) -> &'static [u32] {
 /// Take a live layer's style layers off the map, to put back with [`show_live`]: them, and
 /// the layer they were under.
 fn hide_live(map: &mut Map, key: &str) -> (Vec<StyleLayer>, Option<String>) {
-    let sources = live_sources(key);
+    hide_sources(map, live_sources(key))
+}
+
+/// Take the style layers drawing from `sources` off the map, to put back with [`show_live`]:
+/// them, and the layer they were under.
+fn hide_sources(map: &mut Map, sources: &[&str]) -> (Vec<StyleLayer>, Option<String>) {
     let ids: Vec<String> = map.layer_ids().into_iter().map(str::to_string).collect();
     let mine = |id: &str| map.layer(id).and_then(|l| l.source.as_deref()).is_some_and(|s| sources.contains(&s));
     let taken: Vec<StyleLayer> = ids.iter().filter(|id| mine(id)).filter_map(|id| map.layer(id).cloned()).collect();
@@ -1224,19 +1232,19 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
                 ("shift+drag", "zoom to a box"),
                 ("g", "go to your location"),
                 ("c", "copy the coordinates"),
-                ("S", "save as a named session (--session NAME)"),
+                ("S", "sessions: open one, or save this view"),
             ],
         ),
         (
             "look",
             vec![
-                ("b", "layers: base maps, imagery, live layers"),
+                ("b", "base map: one style or imagery"),
+                ("L", "layers: live, imagery overlays, data, legends"),
                 ("m M", "next or previous base map"),
                 ("'", "back to the base map before"),
                 ("t", "light or dark"),
                 ("n", "labels on or off"),
                 ("v", "vector overlay: all, labels, none"),
-                ("L", "legends on or off"),
             ],
         ),
         (
@@ -1634,15 +1642,18 @@ fn draw_switcher(
     vector: u8,
     overlays: &[(bool, bool)],
     live_on: &dyn Fn(usize) -> bool,
+    data_on: &dyn Fn(usize) -> bool,
+    legends: bool,
 ) -> (Rect, Vec<(u16, mapterm::basemaps::Row)>) {
-    use mapterm::basemaps::Row;
+    use mapterm::basemaps::{Picker, Row};
     use ratatui::style::Modifier;
     let dim = TStyle::new().fg(Color::Rgb(148, 163, 184));
     let accent = Color::Rgb(127, 178, 255);
     let head = TStyle::new().fg(accent).add_modifier(Modifier::BOLD);
     // Lines: section headings (while nothing is typed) and rows.
     let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
-    let width = 58u16.min(area.width.saturating_sub(4));
+    // Sessions say more (what, when made, when opened): wider.
+    let width = if sw.kind == Picker::Sessions { 84u16 } else { 58 }.min(area.width.saturating_sub(4));
     let w = width.saturating_sub(4) as usize;
     let mut section = "";
     for (n, row) in sw.rows.iter().enumerate() {
@@ -1650,9 +1661,10 @@ fn draw_switcher(
             Row::Base(i) if list[*i].base.is_imagery() => "imagery",
             Row::Base(_) => "maps",
             Row::Live(_) => "live layers",
-            Row::Session(_) => "sessions",
+            Row::Data(_) => "data",
+            Row::Labels | Row::Vector | Row::Legends => "map",
+            Row::Session(_) | Row::SaveAs => "",
             Row::Overlay(_) => "imagery overlays",
-            _ => "vector map",
         };
         if sw.query.is_empty() && name != section {
             if !section.is_empty() {
@@ -1682,6 +1694,9 @@ fn draw_switcher(
                 let (name, detail) = &sw.sessions[*i];
                 ("↺", name.clone(), detail.clone())
             }
+            Row::SaveAs => ("＋", sw.text(Row::SaveAs, list).0, "S".to_string()),
+            Row::Data(i) => (if data_on(*i) { "☑" } else { "☐" }, sw.data[*i].clone(), "data layer".to_string()),
+            Row::Legends => (if legends { "☑" } else { "☐" }, "legends".to_string(), "keys to the colors".to_string()),
             Row::Live(i) => {
                 let l = &mapterm::basemaps::LIVE[*i];
                 (if live_on(*i) { "☑" } else { "☐" }, l.label.to_string(), l.detail.to_string())
@@ -1716,8 +1731,18 @@ fn draw_switcher(
         .style(TStyle::new().bg(SWITCHER_BG).fg(Color::Rgb(226, 232, 240)))
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(TStyle::new().fg(accent))
-        .title(Span::styled(" layers ", head))
-        .title_bottom(Line::styled(" ↑↓ preview · enter keep · space toggle · esc back ", dim).right_aligned());
+        .title(Span::styled(format!(" {} ", sw.kind.title()), head))
+        .title_bottom(
+            Line::styled(
+                match sw.kind {
+                    Picker::Base => " ↑↓ choose · space pick · enter pick and close · esc close ",
+                    Picker::Layers => " ↑↓ choose · enter or space on/off · esc close ",
+                    Picker::Sessions => " ↑↓ choose · enter open or save · esc close ",
+                },
+                dim,
+            )
+            .right_aligned(),
+        );
     let outer = block.inner(rect);
     f.render_widget(ratatui::widgets::Clear, rect);
     f.render_widget(block, rect);
@@ -3747,13 +3772,16 @@ async fn main() -> Result<()> {
     let (itx, mut irx) = mpsc::unbounded_channel::<ImageryDone>();
     let mut imagery_loading: Option<String> = None;
     let mut switcher: Option<mapterm::basemaps::Switcher> = None;
-    let mut switcher_moved: Option<Instant> = None;
     // A row picked (enter, space or a click), handled with everything else in the loop.
     let mut switcher_picks: Vec<mapterm::basemaps::Row> = Vec::new();
     // Sessions: one to open in place (its layers are running) once nothing is loading, the
     // command line to start again with (one that needs other layers), and S's name prompt.
     let mut restart_with: Option<mapterm::sessions::Session> = None;
     let mut naming: Option<String> = None;
+    // Data layers (--geojson and the like) turned off in L: their style layers, to put back.
+    let mut data_off: std::collections::HashMap<String, (Vec<StyleLayer>, Option<String>)> = std::collections::HashMap::new();
+    // When this run started (a run in the history is created then).
+    let run_started = unix_now();
     let mut session_list: Vec<(mapterm::sessions::Session, bool)> = Vec::new();
     // Imagery overlays (by their place in mapterm::basemaps::OVERLAYS): on, loading.
     let mut overlay_on = vec![false; mapterm::basemaps::OVERLAYS.len()];
@@ -4306,7 +4334,7 @@ async fn main() -> Result<()> {
         if rows.is_empty() {
             note = Some((Instant::now(), "no sessions yet: S saves one, and each run is kept when it ends".into()));
         } else {
-            switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at, &live_running).with_sessions(&bases, rows, true));
+            switcher = Some(mapterm::basemaps::Switcher::sessions(rows, true));
         }
     }
     let result: Result<()> = async {
@@ -4903,7 +4931,8 @@ async fn main() -> Result<()> {
                             let key = mapterm::basemaps::LIVE[i].key;
                             if key == "radar" { radar_on } else { !live_off.contains_key(key) }
                         };
-                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, &live_on)
+                        let data_on = |i: usize| legend.get(i).is_none_or(|(id, _)| !data_off.contains_key(id));
+                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, &live_on, &data_on, show_legend)
                     }
                     None => (Rect::default(), Vec::new()),
                 };
@@ -5580,18 +5609,6 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // The switcher previews the chosen base map once it has rested there a moment
-            // (not keyed ones: those are billed or count against a quota, so only on enter).
-            if let Some(t) = switcher_moved
-                && t.elapsed() >= Duration::from_millis(300)
-            {
-                switcher_moved = None;
-                if let Some(mapterm::basemaps::Row::Base(i)) = switcher.as_ref().and_then(|s| s.row())
-                    && !bases[i].keyed
-                {
-                    want_base = Some(i);
-                }
-            }
             // A session opened in place: the view, then the rest as switcher picks.
             if let Some(sn) = session_open.take() {
                 use mapterm::basemaps::{OVERLAYS, Row};
@@ -5614,7 +5631,7 @@ async fn main() -> Result<()> {
                 }
                 vector = sn.vector;
                 apply_toggles(&mut map, &base, labels, vector, raster.is_some());
-                if switcher.as_ref().is_some_and(|s| s.sessions_first) {
+                if switcher.as_ref().is_some_and(|s| s.kind == mapterm::basemaps::Picker::Sessions) {
                     switcher = None;
                 }
                 note = Some((Instant::now(), format!("session {}", sn.name)));
@@ -5628,7 +5645,10 @@ async fn main() -> Result<()> {
                 use mapterm::basemaps::{OVERLAYS, Row};
                 match row {
                     Row::Session(i) => {
-                        if let Some((sn, _)) = session_list.get(i) {
+                        if let Some((sn, past)) = session_list.get(i) {
+                            if !past {
+                                let _ = mapterm::sessions::open(&sn.name, unix_now());
+                            }
                             if sn.args == a.kept {
                                 session_open = Some(sn.clone());
                             } else {
@@ -5638,6 +5658,23 @@ async fn main() -> Result<()> {
                         }
                     }
                     Row::Base(i) => want_base = Some(i),
+                    Row::SaveAs => {}
+                    Row::Legends => show_legend = !show_legend,
+                    Row::Data(i) => {
+                        if let Some((id, _)) = legend.get(i) {
+                            match data_off.remove(id) {
+                                Some(saved) => {
+                                    if let Err(e) = show_live(&mut map, saved) {
+                                        note = Some((Instant::now(), format!("{id}: {e:#}")));
+                                    }
+                                }
+                                None => {
+                                    let saved = hide_sources(&mut map, &[id.as_str()]);
+                                    data_off.insert(id.clone(), saved);
+                                }
+                            }
+                        }
+                    }
                     Row::Labels => labels = !labels,
                     Row::Vector => vector = (vector + 1) % 3,
                     Row::Live(i) if mapterm::basemaps::LIVE[i].key == "radar" => {
@@ -5754,9 +5791,7 @@ async fn main() -> Result<()> {
             }
 
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
-            let idle = if switcher_moved.is_some() {
-                Duration::from_millis(50)
-            } else if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() || stitching {
+            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() || stitching {
                 Duration::from_millis(16)
             } else if sat_dots {
                 // Satellite dots redraw up to 15 times a second (see sat_every).
@@ -6288,15 +6323,8 @@ async fn main() -> Result<()> {
                                         KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => name.clear(),
                                         KeyCode::Esc => naming = None,
                                         KeyCode::Enter => {
-                                            let sn = session_now(
-                                                name.trim(),
-                                                &a.kept,
-                                                &ctl.cam,
-                                                bases.get(base_at).map(|e| e.base.spec().to_string()),
-                                                &overlay_on,
-                                                &live_off,
-                                                vector,
-                                            );
+                                            let base_spec = bases.get(base_at).map(|e| e.base.spec().to_string());
+                                            let sn = session_now(name.trim(), &a.kept, &ctl.cam, base_spec, &overlay_on, &live_off, vector, unix_now());
                                             match sn.save() {
                                                 Ok(_) => {
                                                     note = Some((Instant::now(), format!("saved session {} · mapterm --session {:?}", sn.name, sn.name)));
@@ -6319,7 +6347,6 @@ async fn main() -> Result<()> {
                                 if let Some(sw) = switcher.as_mut() {
                                     use mapterm::basemaps::Row;
                                     let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-                                    let before = sw.row();
                                     let mut refilter = false;
                                     let mut close = false;
                                     match k.code {
@@ -6330,8 +6357,20 @@ async fn main() -> Result<()> {
                                         }
                                         KeyCode::Char('n' | 'j') if ctrl => sw.step(true),
                                         KeyCode::Char('p' | 'k') if ctrl => sw.step(false),
-                                        KeyCode::Esc => {
-                                            want_base = Some(sw.opened_on);
+                                        KeyCode::Esc => close = true,
+                                        KeyCode::Enter if sw.row() == Some(Row::SaveAs) => {
+                                            // Save under what's typed, or ask for a name.
+                                            let typed = sw.query.trim().to_string();
+                                            let base_spec = bases.get(base_at).map(|e| e.base.spec().to_string());
+                                            if mapterm::sessions::valid_name(&typed) {
+                                                let sn = session_now(&typed, &a.kept, &ctl.cam, base_spec, &overlay_on, &live_off, vector, unix_now());
+                                                note = Some((Instant::now(), match sn.save() {
+                                                    Ok(_) => format!("saved session {} · mapterm --session {:?}", sn.name, sn.name),
+                                                    Err(e) => format!("{e:#}"),
+                                                }));
+                                            } else {
+                                                naming = Some(a.session.as_ref().map(|s| s.name.clone()).filter(|n| n != "run" && typed.is_empty()).unwrap_or(typed));
+                                            }
                                             close = true;
                                         }
                                         KeyCode::Enter => {
@@ -6357,12 +6396,8 @@ async fn main() -> Result<()> {
                                     if refilter {
                                         sw.refilter(&bases);
                                     }
-                                    if sw.row() != before {
-                                        switcher_moved = Some(Instant::now());
-                                    }
                                     if close {
                                         switcher = None;
-                                        switcher_moved = None;
                                     }
                                     continue;
                                 }
@@ -6610,9 +6645,11 @@ async fn main() -> Result<()> {
                                         note = Some((Instant::now(), if off { "radar off · R shows it" } else { "radar on" }.into()));
                                     }
                                     KeyCode::Char('?') => show_help = true,
+                                    // L: what's over the base map, on and off.
                                     KeyCode::Char('L') => {
-                                        show_legend = !show_legend;
-                                        note = Some((Instant::now(), if show_legend { "legend on" } else { "legend off" }.into()));
+                                        finder = None;
+                                        let data: Vec<String> = legend.iter().map(|(id, _)| id.clone()).collect();
+                                        switcher = Some(mapterm::basemaps::Switcher::layers(&live_running, data));
                                     }
                                     KeyCode::Char('p') if !sats.is_empty() || !aircraft.is_empty() || !fleet.is_empty() => {
                                         finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &sats_hidden, &sat_filter, &aircraft, &fleet) });
@@ -6807,12 +6844,15 @@ async fn main() -> Result<()> {
                                         None => note = Some((Instant::now(), "' goes back to the base map before; there's none yet".into())),
                                     },
                                     // S: save what's shown as a named session (the one opened, by default).
-                                    KeyCode::Char('S') => naming = Some(a.session.as_ref().map(|s| s.name.clone()).filter(|n| n != "run").unwrap_or_default()),
-                                    KeyCode::Char('b') => {
+                                    // S: the sessions, to open one or save this.
+                                    KeyCode::Char('S') => {
                                         finder = None;
                                         session_list = mapterm::sessions::all();
-                                        let rows = session_rows(&session_list);
-                                        switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at, &live_running).with_sessions(&bases, rows, false));
+                                        switcher = Some(mapterm::basemaps::Switcher::sessions(session_rows(&session_list), false));
+                                    }
+                                    KeyCode::Char('b') => {
+                                        finder = None;
+                                        switcher = Some(mapterm::basemaps::Switcher::base(&bases, base_at));
                                     }
                                     KeyCode::Char('c') if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                                         // The pointer's position on the map, else the center.
@@ -6914,13 +6954,11 @@ async fn main() -> Result<()> {
                                                 && let Some(n) = sw.rows.iter().position(|r| *r == row)
                                             {
                                                 sw.sel = n;
-                                                switcher_moved = None;
                                                 switcher_picks.push(row);
                                             }
                                         }
                                         event::MouseEventKind::ScrollDown | event::MouseEventKind::ScrollUp => {
                                             sw.step(m.kind == event::MouseEventKind::ScrollDown);
-                                            switcher_moved = Some(Instant::now());
                                         }
                                         _ => {}
                                     }
@@ -7125,6 +7163,7 @@ async fn main() -> Result<()> {
         &overlay_on,
         &live_off,
         vector,
+        run_started,
     );
     if let Err(e) = sn.save_history() {
         dlog(|| format!("history: {e:#}"));
@@ -7143,6 +7182,7 @@ async fn main() -> Result<()> {
 }
 
 /// What the viewer shows now, as a session called `name`.
+#[allow(clippy::too_many_arguments)]
 fn session_now(
     name: &str,
     kept: &[String],
@@ -7151,6 +7191,7 @@ fn session_now(
     overlay_on: &[bool],
     live_off: &std::collections::HashMap<&'static str, (Vec<StyleLayer>, Option<String>)>,
     vector: u8,
+    created: f64,
 ) -> mapterm::sessions::Session {
     let mut off: Vec<String> = live_off.keys().map(|k| k.to_string()).collect();
     off.sort();
@@ -7165,6 +7206,8 @@ fn session_now(
         live_off: off,
         vector,
         saved_at: unix_now(),
+        created_at: created,
+        viewed_at: unix_now(),
     }
 }
 
@@ -7173,13 +7216,18 @@ fn session_rows(list: &[(mapterm::sessions::Session, bool)]) -> Vec<(String, Str
     let now = unix_now();
     list.iter()
         .map(|(s, past)| {
-            let when = mapterm::sessions::ago(s.saved_at, now);
+            use mapterm::sessions::ago;
             let name = match (*past, s.name.as_str()) {
-                (true, "run") => when.clone(),
-                (true, n) => format!("{when} · {n}"),
+                (true, "run") => format!("run {}", ago(s.saved_at, now)),
+                (true, n) => format!("{n} · run {}", ago(s.saved_at, now)),
                 (false, n) => n.to_string(),
             };
-            let detail = if *past { s.summary() } else { format!("{} · {when}", s.summary()) };
+            let opened = if s.viewed_at > 0.0 { ago(s.viewed_at, now) } else { "never".into() };
+            let detail = if *past {
+                format!("{} · started {}", s.summary(), ago(s.created_at, now))
+            } else {
+                format!("{} · made {} · opened {opened}", s.summary(), ago(s.created_at, now))
+            };
             (name, detail)
         })
         .collect()

@@ -40,6 +40,10 @@ pub struct Session {
     pub vector: u8,
     /// When it was saved (Unix seconds).
     pub saved_at: f64,
+    /// When it was first saved under its name (Unix seconds; for a run, when it started).
+    pub created_at: f64,
+    /// When it was last opened (Unix seconds; 0: never).
+    pub viewed_at: f64,
 }
 
 /// How many runs the history keeps.
@@ -98,6 +102,8 @@ impl Session {
             "live_off": self.live_off,
             "vector": self.vector,
             "saved_at": self.saved_at,
+            "created_at": self.created_at,
+            "viewed_at": self.viewed_at,
         })
     }
 
@@ -118,6 +124,8 @@ impl Session {
             live_off: strings("live_off"),
             vector: v["vector"].as_u64().unwrap_or(0).min(2) as u8,
             saved_at: v["saved_at"].as_f64().unwrap_or(0.0),
+            created_at: v["created_at"].as_f64().or(v["saved_at"].as_f64()).unwrap_or(0.0),
+            viewed_at: v["viewed_at"].as_f64().unwrap_or(0.0),
         })
     }
 
@@ -141,7 +149,9 @@ impl Session {
             }
         }
         if let Some(b) = &self.base {
-            words.push(format!("on {b}"));
+            // Styles by the name the base map picker shows (mapterm-weather is "weather").
+            let name = if crate::raster::preset(b).is_some() { b.clone() } else { crate::basemaps::style_entry(b).label };
+            words.push(format!("on {name}"));
         }
         if words.is_empty() { "map".to_string() } else { words.join(" ") }
     }
@@ -157,9 +167,15 @@ impl Session {
         Ok(path)
     }
 
-    /// Save it in [`dir`], replacing one of the same name. Returns the file.
+    /// Save it in [`dir`], replacing one of the same name (keeping when that was created).
+    /// Returns the file.
     pub fn save(&self) -> Result<PathBuf> {
-        self.save_in(&dir())
+        let mut s = self.clone();
+        if let Ok(old) = load_in(&dir(), &self.name) {
+            s.created_at = old.created_at;
+            s.viewed_at = old.viewed_at;
+        }
+        s.save_in(&dir())
     }
 
     /// Save it in `dir`.
@@ -185,6 +201,15 @@ impl Session {
 /// The session called `name`.
 pub fn load(name: &str) -> Result<Session> {
     load_in(&dir(), name)
+}
+
+/// The session called `name`, noted as opened now (`now`, Unix seconds).
+pub fn open(name: &str, now: f64) -> Result<Session> {
+    let mut s = load(name)?;
+    s.viewed_at = now;
+    // Noting it is a nicety: a session that can't be written still opens.
+    let _ = s.save_in(&dir());
+    Ok(s)
 }
 
 /// The session called `name` in `dir`.
@@ -292,6 +317,8 @@ mod tests {
             live_off: s(&["traffic"]),
             vector: 1,
             saved_at: 1_800_000_000.0,
+            created_at: 1_799_000_000.0,
+            viewed_at: 0.0,
         };
         a.save_in(&dir).unwrap();
         assert_eq!(load_in(&dir, "frederick").unwrap(), a);

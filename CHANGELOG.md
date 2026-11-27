@@ -8,30 +8,29 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
-- Base map switcher: `b` opens a list of the map styles and imagery (satellite and aerial
-  photos; keyed providers once their key is set) in the middle of the map. Up/down (or ctrl-n/p)
-  preview after a moment, typing filters fzf-style (matched letters lit, best first, a count
-  of matches), Enter keeps, Esc goes back; labels and the overlay
-  over imagery toggle there too. Imagery can now be picked while the viewer runs. `m`/`M`
-  step through the whole list, `'` flips back to the base map before. `mapterm::basemaps`.
+- Pickers in the middle of the map, filtered fzf-style as you type (matched letters lit,
+  best first, a count of matches):
+  - `b`, the base map: one of the map styles or imagery (satellite and aerial photos; keyed
+    providers once their key is set). Space picks, Enter picks and closes. Imagery can now
+    be switched while the viewer runs; `m`/`M` step through the list, `'` flips back to the
+    one before.
+  - `L`, what's over it, each on or off: the live layers running (aircraft, ships,
+    satellites, balloons, radar, alerts, quakes, fires, river levels, outages, TFRs,
+    closures, traffic), imagery overlays (hillshade drawn as shading, Esri roads and places,
+    NASA GIBS's daily picture half transparent), data layers, labels, the vector map over
+    imagery, legends (`L` used to toggle the legends alone). Off takes a layer off the map,
+    its legend and the status line; its data keeps coming.
+  - `S`, sessions: saved ones and recent runs, with when each was made and last opened;
+    Enter opens one, and the first row saves this view under what's typed.
+  The status line names the imagery and overlays on (`◧ usgs + hillshade`).
+  `mapterm::basemaps`; `RasterSource::opacity` and `shade`; `--raster esri-hillshade`,
+  `esri-roads`, `esri-places`.
 
-- Imagery overlays, in the `b` switcher, any number at once over the base map: hillshade
-  (Esri World Hillshade, drawn as shading), roads and places (Esri's reference layers on a
-  clear background) and NASA GIBS's daily satellite picture, half transparent; radar too when
-  it's loaded. The status line names the imagery and overlays on (`◧ usgs + hillshade`).
-  `RasterSource::opacity` and `shade`; `--raster esri-hillshade`, `esri-roads`, `esri-places`.
-
-- Live layers on and off in the `b` switcher (now "layers"): each live layer running
-  (aircraft, ships, satellites, balloons, radar, alerts, quakes, fires, river levels, outages,
-  TFRs, closures, traffic) has a row, first in the list, found by typing like the rest. Off
-  takes it off the map, its legend and the status line; its data keeps coming.
-
-- Sessions: `S` saves what's shown under a name (the options it started with, the view, base
-  map, imagery overlays, layers turned off); `--session NAME` opens it again. Each run is
-  kept when it ends (the last 50): `--continue` (`-c`) reopens the last, `--resume` lists
-  saved sessions and recent runs to pick from, as the `b` switcher does too. Opening one
-  that needs other layers starts mapterm again with them. `--sessions` lists them.
-  `mapterm::sessions`.
+- Sessions: a saved session keeps the options mapterm started with, the view, base map,
+  imagery overlays and layers turned off; `--session NAME` opens it again. Each run is kept
+  when it ends (the last 50): `--continue` (`-c`) reopens the last, `--resume` opens the
+  sessions picker. Opening one that needs other layers starts mapterm again with them.
+  `--sessions` lists them. `mapterm::sessions`.
 
 - Traffic speeds (`--traffic`): Maryland CHART's speed sensors, a dot per sensor colored by
   its slowest direction, speeds labeled from zoom 10. With a route, each choice shows its
