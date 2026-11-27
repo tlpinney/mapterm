@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Road closures: `--closures` draws closures and work zones from Maryland's road closure
+  system (counties and cities: construction, accidents, parades, special events; planned
+  ones a week ahead), Montgomery County, Prince William County, Fairfax County, and the
+  WZDx work-zone feeds of MDOT SHA, DelDOT and NJDOT, as lines or points colored by impact.
+  Click one for its road, reason, times and source. Every 5 minutes. `mapterm::closures`.
+
 - River and creek levels: `--floods` draws every NOAA National Water Prediction Service
   gauge in view (from zoom 8; public, no key) in its NWS flood category, with ↑ where the
   forecast is worse. Click one for its stage and flow, flood stages, the last three days and

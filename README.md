@@ -37,8 +37,9 @@ https://github.com/user-attachments/assets/8bf59b7f-3156-4820-aeeb-2b138fc5bc2b
   weather radar you can play back over the last two hours and US weather alerts;
   earthquakes worldwide from USGS; US wildfires and their perimeters (NIFC); river and
   creek levels with flood stages (NOAA); FAA flight restrictions (TFRs, the DC SFRA,
-  prohibited areas); power outages by county across the US (ODIN), and by town and ZIP
-  code in Pennsylvania and Maryland; and your own location.
+  prohibited areas); county road closures and work zones (MD, VA, DE, NJ); power outages
+  by county across the US (ODIN), and by town and ZIP code in Pennsylvania and Maryland;
+  and your own location.
 - **Search and inspect:** find a place and fly there; point at anything to see its
   features and properties, and copy them as JSON.
 - **Scriptable:** `--snapshot` prints a frame as text, ANSI or HTML, and `--pick` prints
@@ -141,7 +142,7 @@ with the keys for whatever layers are on (radar, alerts, live aircraft and satel
 - [Live layers](docs/live-layers.md): your location, weather radar (`--radar`) and alerts (`--alerts`), aircraft (`--adsb`), ships
   (`--ais`), weather balloons (`--sondes`), satellites (`--sats`), earthquakes
   (`--quakes`), wildfires (`--fires`), river levels (`--floods`), flight restrictions
-  (`--tfrs`), power outages (`--outages`)
+  (`--tfrs`), road closures (`--closures`), power outages (`--outages`)
 - [Use it in your own app](docs/library.md): the library API
 - [Network and proxies](docs/network.md): `--proxy` (SOCKS5 or HTTP) for everything
   mapterm fetches
