@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Weather balloon launch sites (with `--sondes`): NOAA's upper-air stations still
+  launching (~800 worldwide, from the IGRA station list, public domain, cached 30 days) as
+  ⊙. Click one for its WMO number, how long it's launched, its usual launch times and the
+  next one, and the balloons followed that went up from it; a balloon's panel says which
+  site it was launched from. `mapterm::upperair`.
+
 - The lines from a selected weather balloon to the stations hearing it are violet, apart
   from the stations' green and the predicted path's blue, and drawn as smooth image lines
   where the terminal shows images. The predicted landing's label has a solid background, so
