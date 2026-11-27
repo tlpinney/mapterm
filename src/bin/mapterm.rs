@@ -993,6 +993,83 @@ fn beside_panel(target: Camera, map: Rect, panel: Rect) -> Camera {
     Camera::new(target.lon + (lon1 - lon0), target.lat, target.zoom)
 }
 
+/// The cells (GeoJSON features, as read for the view) drawn within `within` dots of `dot`.
+fn cells_near(cells: &[serde_json::Value], vp: &Viewport, dot: (f64, f64), within: f64) -> Vec<serde_json::Value> {
+    cells
+        .iter()
+        .filter(|f| {
+            let c = &f["geometry"]["coordinates"];
+            let (Some(lon), Some(lat)) = (c[0].as_f64(), c[1].as_f64()) else { return false };
+            let (x, y) = vp.dot_ll(lon, lat);
+            ((x - dot.0).powi(2) + ((y - dot.1) / 2.0).powi(2)).sqrt() <= within
+        })
+        .cloned()
+        .collect()
+}
+
+/// The panel for cells clicked: how many, then each carrier's, newest radio first, with ids,
+/// estimated range, how many measurements and when last seen.
+fn draw_cells(f: &mut ratatui::Frame, area: Rect, cells: &[serde_json::Value], now: f64) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" mobile cells ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let prop = |c: &serde_json::Value, k: &str| c["properties"][k].clone();
+    let text = |c: &serde_json::Value, k: &str| prop(c, k).as_str().unwrap_or("").to_string();
+    let num = |c: &serde_json::Value, k: &str| prop(c, k).as_i64().unwrap_or(0);
+    // Newest radio first: 5G, LTE, 3G, 2G.
+    let rank = |r: &str| match r {
+        "NR" => 0,
+        "LTE" => 1,
+        "UMTS" | "CDMA" => 2,
+        _ => 3,
+    };
+    let mut by_net: std::collections::BTreeMap<String, Vec<&serde_json::Value>> = std::collections::BTreeMap::new();
+    for c in cells {
+        by_net.entry(text(c, "network")).or_default().push(c);
+    }
+    let mut l = vec![
+        Line::from(Span::styled(
+            format!(" ▴ {} cell{} here", cells.len(), if cells.len() == 1 { "" } else { "s" }),
+            TStyle::new().fg(Color::Rgb(0x60, 0xa5, 0xfa)).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(" positions are estimates from phones' measurements, not the mast", dim)),
+    ];
+    for (net, mut list) in by_net {
+        list.sort_by_key(|c| (rank(&text(c, "radio")), std::cmp::Reverse(num(c, "samples"))));
+        l.push(Line::default());
+        l.push(Line::from(Span::styled(format!(" {net}"), TStyle::new().add_modifier(Modifier::BOLD))));
+        for c in list.iter().take(12) {
+            let radio = text(c, "radio");
+            let color = match radio.as_str() {
+                "NR" => Color::Rgb(0xe8, 0x79, 0xf9),
+                "LTE" => Color::Rgb(0x60, 0xa5, 0xfa),
+                "UMTS" | "CDMA" => Color::Rgb(0x4a, 0xde, 0x80),
+                _ => Color::Rgb(0x9c, 0xa3, 0xaf),
+            };
+            let name = if radio == "NR" { "5G".to_string() } else { radio.clone() };
+            let range = num(c, "range_m");
+            let range = if range >= 1000 { format!("~{:.1} km", range as f64 / 1000.0) } else { format!("~{range} m") };
+            let seen = num(c, "updated");
+            let seen = if seen > 0 { format!(" · seen {}", mapterm::sessions::ago(seen as f64, now)) } else { String::new() };
+            l.push(Line::from(vec![
+                Span::styled(format!("   {name:<4}"), TStyle::new().fg(color)),
+                Span::raw(format!(" cell {} · area {}", num(c, "cell"), num(c, "area"))),
+            ]));
+            l.push(Line::from(Span::styled(format!("        range {range} · {} samples{seen}", num(c, "samples")), dim)));
+        }
+        if list.len() > 12 {
+            l.push(Line::from(Span::styled(format!("   and {} more", list.len() - 12), dim)));
+        }
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(" OpenCelliD, CC BY-SA 4.0 · esc close", dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
 /// The launch site balloon `b` went up from: the nearest to where it was first heard, if that
 /// was low and near one.
 fn launch_site<'a>(sites: &'a [mapterm::upperair::Site], b: &mapterm::sondehub::Balloon) -> Option<&'a mapterm::upperair::Site> {
@@ -4807,6 +4884,10 @@ async fn main() -> Result<()> {
     // Where balloons are launched (NOAA's list, kept 30 days), and the one clicked.
     let mut launch_sites: Vec<mapterm::upperair::Site> = Vec::new();
     let mut selected_site: Option<String> = None;
+    // --cells: the cells last read for the view (to click), and those clicked: all within a
+    // few dots of the click, as a mast often has several.
+    let mut cells_data: Vec<serde_json::Value> = Vec::new();
+    let mut selected_cells: Vec<serde_json::Value> = Vec::new();
     let (sitetx, mut siterx) = mpsc::unbounded_channel::<Result<Vec<mapterm::upperair::Site>>>();
     let load_sites = |tx: mpsc::UnboundedSender<Result<Vec<mapterm::upperair::Site>>>| {
         tokio::spawn(async move {
@@ -5225,7 +5306,7 @@ async fn main() -> Result<()> {
                 let gauge = selected_gauge.as_deref().and_then(|id| gauges.iter().find(|g| g.lid == id));
                 let site = selected_site.as_deref().and_then(|id| launch_sites.iter().find(|s| s.id == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() || site.is_some() {
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() || site.is_some() || !selected_cells.is_empty() {
                         52.min(main.width / 2)
                     } else {
                         0
@@ -5303,6 +5384,10 @@ async fn main() -> Result<()> {
                         let heard = balloons.heard_by(&b.0.latest.serial, unix_now());
                         let from = launch_site(&launch_sites, b.0);
                         station_rows = draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), &heard, from, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if !selected_cells.is_empty() => {
+                        draw_cells(f, panel, &selected_cells, unix_now());
                         Vec::new()
                     }
                     _ if let Some(s) = site => {
@@ -7125,6 +7210,7 @@ async fn main() -> Result<()> {
                             status.entry("cells").or_default().heard(unix_now(), Some(n));
                             cells_shown = Some(n);
                             map.set_data(CELLS, &v)?;
+                            cells_data = v["features"].as_array().cloned().unwrap_or_default();
                         }
                         Err(e) => {
                             status.entry("cells").or_default().fail(unix_now(), format!("{e:#}"));
@@ -7837,6 +7923,7 @@ async fn main() -> Result<()> {
                                         route_new = true;
                                     }
                                     KeyCode::Esc if selected_site.is_some() && !inspect => selected_site = None,
+                                    KeyCode::Esc if !selected_cells.is_empty() && !inspect => selected_cells.clear(),
                                     KeyCode::Esc if route.is_some() && route_panel && selected.is_none() && selected_ship.is_none() && selected_sat.is_none() && selected_alert.is_none() && selected_outage.is_none() && selected_quake.is_none() && selected_fire.is_none() && selected_gauge.is_none() && selected_tfr.is_none() && selected_closure.is_none() && selected_balloon.is_none() && !inspect && !matches!(search, Search::Results { .. }) => {
                                         route_panel = false;
                                     }
@@ -8190,12 +8277,13 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires || a.floods || a.tfrs || a.closures {
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires || a.floods || a.tfrs || a.closures || a.cells {
                                         // A click on (or next to) an aircraft, else a balloon, else a
                                         // ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
                                         let dot = vp.dot_ll(k.lon, k.lat);
                                         selected_site = None;
+                                        selected_cells.clear();
                                         // Layers turned off in L don't catch clicks.
                                         let off = |k: &str| live_off.contains_key(k);
                                         if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, dot, 6.0).filter(|_| !off("aircraft")) {
@@ -8261,6 +8349,15 @@ async fn main() -> Result<()> {
                                         {
                                             // A weather balloon launch site.
                                             selected_site = Some(id);
+                                            (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake, selected_fire) =
+                                                (None, None, None, None, None, None, None, None);
+                                            follow = false;
+                                        } else if let Some(near) = (a.cells && !off("cells") && cam.zoom >= CELLS_MIN_ZOOM)
+                                            .then(|| cells_near(&cells_data, &vp, dot, 4.0))
+                                            .filter(|v| !v.is_empty())
+                                        {
+                                            // The cells there (a mast often carries several).
+                                            selected_cells = near;
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake, selected_fire) =
                                                 (None, None, None, None, None, None, None, None);
                                             follow = false;

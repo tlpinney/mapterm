@@ -432,7 +432,7 @@ pub fn read_view(files: &[PathBuf], bounds: (f64, f64, f64, f64), max: usize) ->
     let (w, s, e, n) = bounds;
     let mut features: Vec<Value> = Vec::new();
     for f in files {
-        let fc = crate::geoparquet::read_file(&f.to_string_lossy(), Some([w, s, e, n])).with_context(|| format!("reading {}", f.display()))?;
+        let fc = crate::geoparquet::read_file_all(&f.to_string_lossy(), Some([w, s, e, n])).with_context(|| format!("reading {}", f.display()))?;
         if let Some(Value::Array(v)) = fc.get("features").cloned() {
             features.extend(v);
         }
