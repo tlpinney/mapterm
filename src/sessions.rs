@@ -75,10 +75,7 @@ pub fn keep_args(args: &[String]) -> Vec<String> {
 /// Whether `name` can name a session (a file name: letters, digits, `-`, `_`, `.` and spaces,
 /// not starting with a dot).
 pub fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 64
-        && !name.starts_with('.')
-        && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
+    !name.is_empty() && name.len() <= 64 && !name.starts_with('.') && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
 }
 
 /// Where sessions are kept.
@@ -109,7 +106,8 @@ impl Session {
 
     /// From JSON (what [`Session::to_json`] wrote; missing parts take defaults).
     pub fn from_json(name: &str, v: &Value) -> Result<Session> {
-        let strings = |k: &str| -> Vec<String> { v[k].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default() };
+        let strings =
+            |k: &str| -> Vec<String> { v[k].as_array().map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default() };
         let view = &v["view"];
         let num = |k: &str| view[k].as_f64().with_context(|| format!("session {name}: no view {k}"));
         Ok(Session {
@@ -283,7 +281,20 @@ mod tests {
 
     #[test]
     fn keeps_the_layers_not_the_view_or_headers() {
-        let args = s(&["--quakes", "--at", "39,-77", "-z", "9", "--raster-header", "Authorization: Bearer x", "--fires", "--session", "a", "--adsb-key-cmd", "pass x"]);
+        let args = s(&[
+            "--quakes",
+            "--at",
+            "39,-77",
+            "-z",
+            "9",
+            "--raster-header",
+            "Authorization: Bearer x",
+            "--fires",
+            "--session",
+            "a",
+            "--adsb-key-cmd",
+            "pass x",
+        ]);
         assert_eq!(keep_args(&args), s(&["--quakes", "--fires", "--adsb-key-cmd", "pass x"]));
     }
 

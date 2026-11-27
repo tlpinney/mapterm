@@ -1676,7 +1676,13 @@ fn draw_switcher(
         let (mark, label, detail) = match row {
             Row::Base(i) => {
                 let e = &list[*i];
-                let mark = if *i == current && loading { "◌" } else if *i == current { "●" } else { "○" };
+                let mark = if *i == current && loading {
+                    "◌"
+                } else if *i == current {
+                    "●"
+                } else {
+                    "○"
+                };
                 let detail = if e.keyed { format!("{} · key", e.detail) } else { e.detail.clone() };
                 (mark, e.label.clone(), detail)
             }
@@ -1688,7 +1694,17 @@ fn draw_switcher(
             Row::Overlay(i) => {
                 let o = &mapterm::basemaps::OVERLAYS[*i];
                 let (on, loading) = overlays.get(*i).copied().unwrap_or_default();
-                (if loading { "◌" } else if on { "☑" } else { "☐" }, o.label.to_string(), o.detail.to_string())
+                (
+                    if loading {
+                        "◌"
+                    } else if on {
+                        "☑"
+                    } else {
+                        "☐"
+                    },
+                    o.label.to_string(),
+                    o.detail.to_string(),
+                )
             }
             Row::Session(i) => {
                 let (name, detail) = &sw.sessions[*i];
@@ -1714,7 +1730,8 @@ fn draw_switcher(
         }
         let left = 3 + mark.chars().count() + label.chars().count();
         let room = w.saturating_sub(left + 2);
-        let detail: String = if detail.chars().count() > room { format!("{}…", detail.chars().take(room.saturating_sub(1)).collect::<String>()) } else { detail };
+        let detail: String =
+            if detail.chars().count() > room { format!("{}…", detail.chars().take(room.saturating_sub(1)).collect::<String>()) } else { detail };
         let pad = " ".repeat(w.saturating_sub(left + detail.chars().count()));
         spans.push(Span::styled(format!("{pad}{detail} "), dst));
         lines.push((Some(n), Line::from(spans)));
