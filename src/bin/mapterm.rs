@@ -34,8 +34,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
   --style       a MapLibre style instead: liberty, positron, bright, dark or fiord
-                (OpenFreeMap), a style URL, a style.json file, or a Mapbox style such
-                as mapbox://styles/mapbox/streets-v12 (needs a Mapbox token)
+                (OpenFreeMap); mapterm's own mapterm-dark, mapterm-light,
+                mapterm-aviation, mapterm-weather or mapterm-roads; a style URL, a
+                style.json file, or a Mapbox style such as
+                mapbox://styles/mapbox/streets-v12 (needs a Mapbox token)
   --mapbox-token-cmd CMD
                 print the Mapbox access token with a command (else MAPBOX_ACCESS_TOKEN);
                 used for mapbox:// styles and --raster mapbox
@@ -561,6 +563,8 @@ const BUILTIN: &str = "built-in";
 const AVIATION: &str = "mapterm-aviation";
 /// The weather style's entry in the `m` style cycle (and its --style name).
 const WEATHER: &str = "mapterm-weather";
+/// The roads style's entry in the `m` style cycle (and its --style name).
+const ROADS: &str = "mapterm-roads";
 
 type StyleDone = (String, Result<(Map, Option<(Schema, bool)>, String)>);
 
@@ -2523,6 +2527,8 @@ async fn main() -> Result<()> {
         // satellites alone, the aviation style; unless --light.
         if (a.radar || a.alerts || a.outages || a.fires || a.floods) && a.source.is_none() && !a.light {
             map = Map::weather(src, schema)?;
+        } else if a.closures && a.source.is_none() && !a.light {
+            map = Map::roads(src, schema)?;
         } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some() || a.tfrs) && a.source.is_none() && !a.light {
             map = Map::aviation(src, schema)?;
         } else {
@@ -2543,10 +2549,12 @@ async fn main() -> Result<()> {
     let default_dark = a.style.is_none() && a.source.is_none() && !a.light;
     if (a.radar || a.alerts || a.outages || a.fires || a.floods) && default_dark {
         styles.push(WEATHER.to_string());
+    } else if a.closures && default_dark {
+        styles.push(ROADS.to_string());
     } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some() || a.tfrs) && default_dark {
         styles.push(AVIATION.to_string());
     }
-    for s in [BUILTIN, AVIATION, WEATHER].into_iter().chain(stylejson::OPENFREEMAP_STYLES) {
+    for s in [BUILTIN, AVIATION, WEATHER, ROADS].into_iter().chain(stylejson::OPENFREEMAP_STYLES) {
         if !styles.iter().any(|x| x == s) {
             styles.push(s.to_string());
         }
