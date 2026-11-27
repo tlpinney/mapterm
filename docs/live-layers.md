@@ -328,6 +328,7 @@ Road closures and work zones from county, city and state feeds (public, no key):
 | Prince William County, VA | its road closures and incidents |
 | Fairfax County, VA | its emergency management office's road hazards and restrictions (the service has been failing its queries; mapterm tries it each time, and says once if it fails) |
 | MDOT SHA, DelDOT, NJDOT / TRANSCOM | work zones in the national WZDx format |
+| VDOT (Virginia), with your own token | its WZDx work zones, from SmarterRoads |
 
 Each is a line along the road where the source gives one, else a point. Red is a road
 closed, orange restricted access (emergency or local only), amber lanes closed, yellow
@@ -339,6 +340,18 @@ wins.
 Click one for the road and cross streets, how much is closed, why (construction, accident,
 parade...), the direction, when, the county or city, the text given, and the source. Every
 feed is asked every 5 minutes.
+
+Virginia's work zones need your own SmarterRoads token: register (free) at
+smarterroads.vdot.virginia.gov, subscribe to the "WorkZone Data eXchange (WZDx)" dataset,
+and its Details page shows your token. Keep it in your password manager and give mapterm a
+command that prints it (or set `VDOT_SMARTERROADS_TOKEN`):
+
+```sh
+mapterm --closures --vdot-key-cmd 'pass show vdot/smarterroads-token'
+```
+
+VDOT's agreement doesn't allow sharing a token, so each user registers; mapterm sends it
+only to VDOT's feed and never prints it.
 
 With `--closures` (and no other map asked for) the roads are rendered: Esri's Dark Gray
 Canvas goes underneath as an image (quiet greys made for overlays; Esri's terms apply), and

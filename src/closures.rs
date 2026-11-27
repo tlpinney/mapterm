@@ -7,7 +7,9 @@
 //! - Fairfax County, VA: its emergency management office's road hazards and restrictions
 //!   (the service has been failing its queries; it's tried each time all the same).
 //! - Work zones in the national WZDx format from Maryland (MDOT SHA), Delaware (DelDOT) and
-//!   New Jersey (NJDOT / TRANSCOM).
+//!   New Jersey (NJDOT / TRANSCOM); and Virginia's (VDOT) with your own SmarterRoads token
+//!   (free registration at smarterroads.vdot.virginia.gov; VDOT's agreement doesn't allow
+//!   sharing one), from `--vdot-key-cmd` or `VDOT_SMARTERROADS_TOKEN`.
 //!
 //! Each source is read into [`Closure`]s: a road, what's happening, how much of it is closed,
 //! when, and where (a line along the road, or points). Every 5 minutes.
@@ -347,59 +349,75 @@ pub struct Feed {
     pub url: &'static str,
     /// How to read it.
     pub reader: Reader,
+    /// It needs a VDOT SmarterRoads token (sent as the `token` query parameter).
+    pub vdot: bool,
 }
 
 /// The feeds mapterm reads.
-pub const FEEDS: [Feed; 10] = [
+pub const FEEDS: [Feed; 11] = [
     Feed {
         id: "md",
         source: "Maryland road closures (MD iMAP / MDOT SHA)",
         url: "https://mdgeodata.md.gov/appdata/rest/services/SHA_RoadClosure/RoadClosureActive/MapServer/1/query?where=1%3D1&outFields=*&outSR=4326&f=geojson",
         reader: Reader::Maryland,
+        vdot: false,
     },
     Feed {
         id: "md-p",
         source: "Maryland road closures (MD iMAP / MDOT SHA)",
         url: "https://mdgeodata.md.gov/appdata/rest/services/SHA_RoadClosure/RoadClosurePlanned/MapServer/1/query?where=1%3D1&outFields=*&outSR=4326&f=geojson",
         reader: Reader::Maryland,
+        vdot: false,
     },
     Feed {
         id: "moco",
         source: "Montgomery County DOT",
         url: "https://www7.montgomerycountymd.gov/arcgis/rest/services/DOT/Road_Closure_lines/MapServer/0/query?where=1%3D1&outFields=*&outSR=4326&f=geojson",
         reader: Reader::Maryland,
+        vdot: false,
     },
     Feed {
         id: "pwc-p",
         source: "Prince William County",
         url: "https://gisweb.pwcva.gov/arcgis/rest/services/RoadClosures/RoadClosures/FeatureServer/0/query?where=1%3D1&outFields=*&outSR=4326&f=json",
         reader: Reader::PrinceWilliam(false),
+        vdot: false,
     },
     Feed {
         id: "pwc-s",
         source: "Prince William County",
         url: "https://gisweb.pwcva.gov/arcgis/rest/services/RoadClosures/RoadClosures/FeatureServer/2/query?where=1%3D1&outFields=*&outSR=4326&f=json",
         reader: Reader::PrinceWilliam(true),
+        vdot: false,
     },
     Feed {
         id: "ffx-h",
         source: "Fairfax County",
         url: "https://www.fairfaxcounty.gov/gispubsf1/rest/services/DEMS/RoadHazardsPublic/MapServer/0/query?where=1%3D1&outFields=*&outSR=4326&f=json",
         reader: Reader::Fairfax(false),
+        vdot: false,
     },
     Feed {
         id: "ffx-r",
         source: "Fairfax County",
         url: "https://www.fairfaxcounty.gov/gispubsf1/rest/services/DEMS/RoadHazardsPublic/MapServer/1/query?where=1%3D1&outFields=*&outSR=4326&f=json",
         reader: Reader::Fairfax(true),
+        vdot: false,
     },
-    Feed { id: "wz-md", source: "MDOT SHA work zones (WZDx)", url: "https://filter.ritis.org/wzdx_v4.1/mdot.geojson", reader: Reader::Wzdx },
-    Feed { id: "wz-de", source: "DelDOT work zones (WZDx)", url: "https://wzdx.e-dot.com/del_dot_feed_wzdx_v4.1.geojson", reader: Reader::Wzdx },
-    Feed { id: "wz-nj", source: "NJDOT / TRANSCOM work zones (WZDx)", url: "https://smartworkzones.njit.edu/nj/wzdx", reader: Reader::Wzdx },
+    Feed { id: "wz-md", source: "MDOT SHA work zones (WZDx)", url: "https://filter.ritis.org/wzdx_v4.1/mdot.geojson", reader: Reader::Wzdx, vdot: false },
+    Feed { id: "wz-de", source: "DelDOT work zones (WZDx)", url: "https://wzdx.e-dot.com/del_dot_feed_wzdx_v4.1.geojson", reader: Reader::Wzdx, vdot: false },
+    Feed { id: "wz-nj", source: "NJDOT / TRANSCOM work zones (WZDx)", url: "https://smartworkzones.njit.edu/nj/wzdx", reader: Reader::Wzdx, vdot: false },
+    Feed {
+        id: "wz-va",
+        source: "VDOT work zones (WZDx, SmarterRoads)",
+        url: "https://data.511-atis-ttrip-prod.iteriscloud.com/smarterRoads/workzone/workZoneJSON/current/workZone.json",
+        reader: Reader::Wzdx,
+        vdot: true,
+    },
 ];
 
 /// The credit shown while closures are on.
-pub const CREDIT: &str = "Road closures: MD iMAP / MDOT SHA, Montgomery Co., Prince William Co., Fairfax Co., DelDOT, NJDOT / TRANSCOM";
+pub const CREDIT: &str = "Road closures: MD iMAP / MDOT SHA, Montgomery Co., Prince William Co., Fairfax Co., DelDOT, NJDOT / TRANSCOM, VDOT";
 
 /// Read a feed's answer.
 pub fn parse(feed: &Feed, text: &str) -> Result<Vec<Closure>> {
@@ -411,13 +429,21 @@ pub fn parse(feed: &Feed, text: &str) -> Result<Vec<Closure>> {
     }
 }
 
-/// Ask a feed.
-pub async fn fetch(feed: &Feed) -> Result<Vec<Closure>> {
-    let resp = crate::source::http_client().get(feed.url).send().await.with_context(|| feed.source.to_string())?;
+/// Ask a feed; a VDOT one with `vdot_token` (None: it's skipped, with nothing). The token
+/// never appears in an error: reqwest's errors carry the URL, so it's taken off.
+pub async fn fetch(feed: &Feed, vdot_token: Option<&str>) -> Result<Vec<Closure>> {
+    let url = if feed.vdot {
+        let Some(t) = vdot_token else { return Ok(Vec::new()) };
+        // Encoded: the token has characters such as $ and /.
+        reqwest::Url::parse_with_params(feed.url, &[("token", t)]).context("the VDOT feed URL")?
+    } else {
+        reqwest::Url::parse(feed.url).context("a feed URL")?
+    };
+    let resp = crate::source::http_client().get(url).send().await.map_err(reqwest::Error::without_url).with_context(|| feed.source.to_string())?;
     if !resp.status().is_success() {
         bail!("{}: HTTP {}", feed.source, resp.status());
     }
-    parse(feed, &resp.text().await.with_context(|| feed.source.to_string())?)
+    parse(feed, &resp.text().await.map_err(reqwest::Error::without_url).with_context(|| feed.source.to_string())?)
 }
 
 /// The color of a closure at `now`: planned ones apart.
@@ -579,6 +605,9 @@ mod tests {
         let l = legend(&m, now);
         assert_eq!(l.entries.len(), 5);
         assert_eq!(impact_of("Curb Lane Closure", ""), Impact::Lanes);
-        assert_eq!(FEEDS.iter().filter(|f| matches!(f.reader, Reader::Wzdx)).count(), 3);
+        assert_eq!(FEEDS.iter().filter(|f| matches!(f.reader, Reader::Wzdx)).count(), 4);
+        assert_eq!(FEEDS.iter().filter(|f| f.vdot).map(|f| f.id).collect::<Vec<_>>(), vec!["wz-va"]);
+        let u = reqwest::Url::parse_with_params(FEEDS[10].url, &[("token", "a$b/c+d")]).unwrap();
+        assert!(u.as_str().ends_with("workZone.json?token=a%24b%2Fc%2Bd"), "{u}");
     }
 }
