@@ -689,6 +689,8 @@ const QUAKES: &str = "quakes";
 const FIRES: &str = "fires";
 const GAUGES: &str = "gauges";
 const CLOSURES: &str = "closures";
+/// The closures' lines as image tiles drawn here (where the terminal shows images).
+const CLOSURE_TILES: &str = "closure-tiles";
 const FIRE_AREAS: &str = "fire-areas";
 const TFRS: &str = "tfrs";
 /// The flight restrictions' style layers (braille, where the terminal doesn't show images).
@@ -2410,7 +2412,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
         // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
         // it is the clearest view of them.
         // So do the other live layers: closures, gauges, fires, quakes.
-        let live = [CLOSURES, GAUGES, FIRES, QUAKES].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')));
+        let live = id == CLOSURE_TILES || [CLOSURES, GAUGES, FIRES, QUAKES].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')));
         if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
         }
@@ -2800,12 +2802,25 @@ async fn main() -> Result<()> {
         map.add_layers(vec![mapterm::quakes::layer(QUAKES, QUAKES)], above.as_deref())?;
     }
     // Road closures (--closures): under the live layers.
+    let closure_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
     if a.closures {
         let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
         map.add_source(CLOSURES, MapSource::geojson(&empty)?)?;
         map.set_attribution(CLOSURES, mapterm::closures::CREDIT)?;
+        // Where the terminal shows images, the lines are tiles drawn here, smooth and as wide
+        // as a road; the braille lines stay for clicking (the lookup covers hidden layers).
+        if mapterm::kitty::supported() {
+            map.add_source(
+                CLOSURE_TILES,
+                MapSource::raster(mapterm::areas::tile_source_to(closure_tiles.clone(), "closures", mapterm::closures::CREDIT, 18)?),
+            )?;
+            map.add_layer(mapterm::StyleLayer::raster(CLOSURE_TILES, CLOSURE_TILES))?;
+        }
         let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
         map.add_layers(mapterm::closures::layers(CLOSURES)?, above.as_deref())?;
+        if mapterm::kitty::supported() {
+            map.set_visibility(&format!("{CLOSURES}-line"), false)?;
+        }
     }
     // River gauges (--floods), with the quakes.
     if a.floods {
@@ -4545,6 +4560,8 @@ async fn main() -> Result<()> {
             if a.closures && (closures_new || selected_closure != closures_shown_selected || closures_drawn.elapsed() >= Duration::from_secs(60)) {
                 let all: Vec<mapterm::closures::Closure> = closures.values().flatten().cloned().collect();
                 map.set_data(CLOSURES, &mapterm::closures::features(&all, unix_now(), selected_closure.as_deref()))?;
+                closure_tiles.set(mapterm::closures::shapes(&all, unix_now(), selected_closure.as_deref()));
+                map.put_raster_tile(CLOSURE_TILES, None, true);
                 (closures_new, closures_drawn, closures_shown_selected) = (false, Instant::now(), selected_closure.clone());
             }
             // Gauges: again when new ones come or another is selected.

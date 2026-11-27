@@ -380,6 +380,8 @@ mod tests {
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("mapterm-tilecache-{}-{name}", std::process::id()));
+        // A process id comes round again: a folder left by an earlier run would hold its data.
+        let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::create_dir_all(&d);
         d
     }

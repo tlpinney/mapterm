@@ -446,6 +446,20 @@ pub fn features(all: &[Closure], now: f64, selected: Option<&str>) -> Json {
     json!({"type": "FeatureCollection", "features": feats})
 }
 
+/// The closures shown at `now` drawn along their roads as image tiles: lines in their colors
+/// (points stay symbols), the worse on top, the selected one highlighted.
+pub fn shapes(all: &[Closure], now: f64, selected: Option<&str>) -> Vec<crate::areas::Shape> {
+    let mut v: Vec<&Closure> = all.iter().filter(|c| c.shown(now) && matches!(c.geometry["type"].as_str(), Some("LineString" | "MultiLineString"))).collect();
+    v.sort_by_key(|c| (Some(c.key.as_str()) == selected, !c.planned(now), c.impact));
+    v.into_iter()
+        .map(|c| {
+            let mut s = crate::areas::Shape::lines(rgb(c, now), if c.impact == Impact::Closed { 4.0 } else { 3.0 }, Some(c.key.as_str()) == selected);
+            s.add(&c.geometry);
+            s
+        })
+        .collect()
+}
+
 /// The map layers from GeoJSON source `source`: lines along the roads, and a glyph at points.
 pub fn layers(source: &str) -> Result<Vec<crate::StyleLayer>> {
     let line = json!({"id": format!("{source}-line"), "type": "line", "source": source,
@@ -555,6 +569,13 @@ mod tests {
         assert_eq!(f.last().unwrap()["properties"]["key"], "md:2", "the selected one last");
         assert_eq!(f.last().unwrap()["properties"]["color"], "#ffffff");
         assert_eq!(layers("closures").unwrap().len(), 2);
+        // As image tiles: the lines, drawn along the road.
+        let tiles = crate::areas::AreaTiles::default();
+        tiles.set(shapes(&m, now, None));
+        let (wx, wy) = crate::areas::world(-76.6, 39.3);
+        let n = 4096.0;
+        let (x, y) = ((wx * n) as u32, (wy * n) as u32);
+        assert!(tiles.draw(12, x, y, 512).is_some(), "York Rd's line is drawn");
         let l = legend(&m, now);
         assert_eq!(l.entries.len(), 5);
         assert_eq!(impact_of("Curb Lane Closure", ""), Impact::Lanes);
