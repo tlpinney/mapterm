@@ -1096,6 +1096,7 @@ fn draw_photo(
     photos: &[mapterm::mapillary::Photo],
     at: usize,
     dims: Option<(u32, u32)>,
+    loading: bool,
     images: bool,
     cell_px: (f64, f64),
     now: f64,
@@ -1108,18 +1109,23 @@ fn draw_photo(
     f.render_widget(ratatui::widgets::Clear, area);
     f.render_widget(block, area);
     let Some(p) = photos.get(at) else { return Rect::default() };
-    // The image: the panel's width, as tall as its shape needs (at most half the panel).
+    // The image box: the panel's width and the height a 4:3 photo needs there (at most half
+    // the panel), the same whatever the photo, so the text under it never moves; the photo
+    // fits inside it, its shape kept, centered.
     let width = inner.width.saturating_sub(1);
-    let rows = match dims {
-        Some((w, h)) if images && w > 0 => {
-            let px_w = width as f64 * cell_px.0;
-            ((px_w * h as f64 / w as f64) / cell_px.1).round().clamp(3.0, (inner.height / 2).max(3) as f64) as u16
+    let rows = if images { ((width as f64 * cell_px.0 * 0.75) / cell_px.1).round().clamp(3.0, (inner.height / 2).max(3) as f64) as u16 } else { 0 };
+    let boxed = Rect { x: inner.x, y: inner.y, width, height: rows.min(inner.height) };
+    let image = match dims {
+        Some((w, h)) if w > 0 && h > 0 && boxed.width > 0 && boxed.height > 0 => {
+            let (bw, bh) = (boxed.width as f64 * cell_px.0, boxed.height as f64 * cell_px.1);
+            let scale = (bw / w as f64).min(bh / h as f64);
+            let cols = ((w as f64 * scale / cell_px.0).round() as u16).clamp(1, boxed.width);
+            let rws = ((h as f64 * scale / cell_px.1).round() as u16).clamp(1, boxed.height);
+            Rect { x: boxed.x + (boxed.width - cols) / 2, y: boxed.y + (boxed.height - rws) / 2, width: cols, height: rws }
         }
-        _ if images => 8,
-        _ => 0,
+        _ => boxed,
     };
-    let image = Rect { x: inner.x, y: inner.y, width, height: rows.min(inner.height) };
-    let mut l: Vec<Line> = vec![Line::default(); image.height as usize];
+    let mut l: Vec<Line> = vec![Line::default(); boxed.height as usize];
     if images
         && dims.is_none()
         && let Some(first) = l.first_mut()
@@ -1131,6 +1137,7 @@ fn draw_photo(
     l.push(Line::from(vec![
         Span::styled(format!(" {what}"), TStyle::new().fg(Color::Rgb(0x05, 0xcb, 0x63)).add_modifier(Modifier::BOLD)),
         Span::styled(format!("  {} of {} within {} m", at + 1, photos.len(), mapterm::mapillary::RADIUS), dim),
+        Span::styled(if loading { "  ⟳ loading" } else { "" }, TStyle::new().fg(Color::Yellow)),
     ]));
     if p.taken > 0.0 {
         let date = mapterm::clock::Zone::Local.hhmm_zone(p.taken);
@@ -5542,8 +5549,10 @@ async fn main() -> Result<()> {
                         Vec::new()
                     }
                     _ if !photos.is_empty() => {
+                        // The image held (the last photo's, until the new one is in).
                         let dims = photo_img.as_ref().map(|(_, w, h, _)| (*w, *h));
-                        photo_rect = draw_photo(f, panel, &photos, photo_at, dims, kitty, cpx, unix_now());
+                        let loading = photos.get(photo_at).is_some_and(|p| photo_img.as_ref().is_none_or(|(id, ..)| *id != p.id));
+                        photo_rect = draw_photo(f, panel, &photos, photo_at, dims, loading, kitty, cpx, unix_now());
                         Vec::new()
                     }
                     _ if !selected_cells.is_empty() => {
@@ -6029,7 +6038,9 @@ async fn main() -> Result<()> {
                 // The street-level photo, in the panel (taken down when it closes or changes).
                 let want = photo_img.as_ref().filter(|_| photo_rect.width > 0 && kitty).map(|(id, ..)| (id.clone(), photo_rect));
                 if want != photo_placed {
-                    if photo_placed.is_some() {
+                    // A new photo replaces the old one in place (same image id): taking it
+                    // down first would flash. Only taken down when there's none to show.
+                    if photo_placed.is_some() && want.is_none() {
                         out.write_all(mapterm::kitty::free(PHOTO_IMAGE).as_bytes())?;
                     }
                     if let (Some((_, w, h, rgba)), Some((_, r))) = (photo_img.as_ref(), want.as_ref()) {
@@ -7396,8 +7407,9 @@ async fn main() -> Result<()> {
                             if let Some((lon, lat)) = p.at {
                                 ctl.fly_to(beside_panel(Camera::new(lon, lat, ctl.cam.zoom.max(18.0)), map_area, panel_area));
                             }
+                            // The last photo stays up until this one's in: no gap, no jump.
                             photos = vec![p];
-                            (photo_at, photo_img) = (0, None);
+                            photo_at = 0;
                             fetch_image(photos[0].clone(), imgtx.clone());
                         }
                         Ok(None) => note = Some((Instant::now(), "no photo that way".into())),
@@ -8186,7 +8198,6 @@ async fn main() -> Result<()> {
                                     KeyCode::Tab | KeyCode::BackTab if photos.len() > 1 && !inspect => {
                                         let n = photos.len();
                                         photo_at = if k.code == KeyCode::Tab { (photo_at + 1) % n } else { (photo_at + n - 1) % n };
-                                        photo_img = None;
                                         fetch_image(photos[photo_at].clone(), imgtx.clone());
                                     }
                                     KeyCode::Esc if route.is_some() && route_panel && selected.is_none() && selected_ship.is_none() && selected_sat.is_none() && selected_alert.is_none() && selected_outage.is_none() && selected_quake.is_none() && selected_fire.is_none() && selected_gauge.is_none() && selected_tfr.is_none() && selected_closure.is_none() && selected_balloon.is_none() && !inspect && !matches!(search, Search::Results { .. }) => {
