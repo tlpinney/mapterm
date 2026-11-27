@@ -223,12 +223,13 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · / search · i inspect · b base maps · m/M next or
+      +/- zoom · sideways swipe pans · / search · i inspect · b layers · m/M next or
       previous base map · ' the one before · t theme · c copy coordinates · v vector overlay ·
       n labels · q quit
 
-base maps (b): a list of the map styles and imagery (satellite and aerial photos; keyed
-      providers once their key is set) in the middle of the map, fzf-style: typing filters
+layers (b): the live layers running (on and off), the map styles and imagery (satellite and
+      aerial photos; keyed providers once their key is set) and imagery overlays, in the
+      middle of the map, fzf-style: typing filters
       (matched letters lit, best first), up/down or ctrl-n/p preview the chosen one after a
       moment, enter keeps it, esc goes back. Imagery goes
       under the style's roads and names (v: all, names only, none). Space or click toggles
@@ -640,6 +641,58 @@ async fn load_basemap(spec: &str, source: &str, dark: bool, cam: Camera) -> Resu
     } else {
         Ok((Map::from_style(spec).await?, None, spec.to_string()))
     }
+}
+
+/// The map sources of a live layer (mapterm::basemaps::LIVE's keys): its style layers are
+/// the ones drawing from them.
+fn live_sources(key: &str) -> &'static [&'static str] {
+    match key {
+        "aircraft" => &[AIRCRAFT, TRAILS],
+        "ships" => &[SHIPS],
+        "satellites" => &[SATS],
+        "balloons" => &[BALLOONS],
+        "alerts" => &[ALERTS, ALERT_TILES],
+        "quakes" => &[QUAKES],
+        "fires" => &[FIRES, FIRE_AREAS, FIRE_TILES],
+        "gauges" => &[GAUGES],
+        "outages" => &[OUTAGES, OUTAGE_TILES],
+        "tfrs" => &[TFRS, TFR_TILES],
+        "closures" => &[CLOSURES, CLOSURE_TILES],
+        "traffic" => &[TRAFFIC],
+        _ => &[],
+    }
+}
+
+/// The images a live layer draws outside the map's layers (trails, satellite dots).
+fn live_images(key: &str) -> &'static [u32] {
+    match key {
+        "aircraft" => &[TRAIL_IMAGE],
+        "ships" => &[SHIP_TRAIL_IMAGE],
+        "satellites" => &[SAT_IMAGE, PATH_IMAGE],
+        "balloons" => &[BALLOON_TRAIL_IMAGE],
+        _ => &[],
+    }
+}
+
+/// Take a live layer's style layers off the map, to put back with [`show_live`]: them, and
+/// the layer they were under.
+fn hide_live(map: &mut Map, key: &str) -> (Vec<StyleLayer>, Option<String>) {
+    let sources = live_sources(key);
+    let ids: Vec<String> = map.layer_ids().into_iter().map(str::to_string).collect();
+    let mine = |id: &str| map.layer(id).and_then(|l| l.source.as_deref()).is_some_and(|s| sources.contains(&s));
+    let taken: Vec<StyleLayer> = ids.iter().filter(|id| mine(id)).filter_map(|id| map.layer(id).cloned()).collect();
+    // The first layer above the last of them that stays: they go back under it.
+    let last = ids.iter().rposition(|id| mine(id));
+    let before = last.and_then(|at| ids[at + 1..].iter().find(|id| !mine(id)).cloned());
+    let refs: Vec<&str> = taken.iter().map(|l| l.id.as_str()).collect();
+    map.remove_layers(&refs);
+    (taken, before)
+}
+
+/// Put back a live layer's style layers that [`hide_live`] took.
+fn show_live(map: &mut Map, (layers, before): (Vec<StyleLayer>, Option<String>)) -> Result<()> {
+    let before = before.filter(|b| map.layer_ids().contains(&b.as_str()));
+    map.add_layers(layers, before.as_deref())
 }
 
 /// Ids of the imagery overlays' sources and layers start with this.
@@ -1120,7 +1173,7 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
         (
             "look",
             vec![
-                ("b", "base maps: styles and imagery"),
+                ("b", "layers: base maps, imagery, live layers"),
                 ("m M", "next or previous base map"),
                 ("'", "back to the base map before"),
                 ("t", "light or dark"),
@@ -1523,7 +1576,7 @@ fn draw_switcher(
     labels: bool,
     vector: u8,
     overlays: &[(bool, bool)],
-    radar_on: bool,
+    live_on: &dyn Fn(usize) -> bool,
 ) -> (Rect, Vec<(u16, mapterm::basemaps::Row)>) {
     use mapterm::basemaps::Row;
     use ratatui::style::Modifier;
@@ -1539,7 +1592,8 @@ fn draw_switcher(
         let name = match row {
             Row::Base(i) if list[*i].base.is_imagery() => "imagery",
             Row::Base(_) => "maps",
-            Row::Overlay(_) | Row::Radar => "imagery overlays",
+            Row::Live(_) => "live layers",
+            Row::Overlay(_) => "imagery overlays",
             _ => "vector map",
         };
         if sw.query.is_empty() && name != section {
@@ -1566,7 +1620,10 @@ fn draw_switcher(
                 let (on, loading) = overlays.get(*i).copied().unwrap_or_default();
                 (if loading { "◌" } else if on { "☑" } else { "☐" }, o.label.to_string(), o.detail.to_string())
             }
-            Row::Radar => (if radar_on { "☑" } else { "☐" }, "radar".to_string(), "rain and snow · R".to_string()),
+            Row::Live(i) => {
+                let l = &mapterm::basemaps::LIVE[*i];
+                (if live_on(*i) { "☑" } else { "☐" }, l.label.to_string(), l.detail.to_string())
+            }
         };
         let chosen = n == sw.sel;
         let st = if chosen { TStyle::new().add_modifier(Modifier::REVERSED) } else { TStyle::new() };
@@ -1597,7 +1654,7 @@ fn draw_switcher(
         .style(TStyle::new().bg(SWITCHER_BG).fg(Color::Rgb(226, 232, 240)))
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(TStyle::new().fg(accent))
-        .title(Span::styled(" base maps ", head))
+        .title(Span::styled(" layers ", head))
         .title_bottom(Line::styled(" ↑↓ preview · enter keep · space toggle · esc back ", dim).right_aligned());
     let outer = block.inner(rect);
     f.render_widget(ratatui::widgets::Clear, rect);
@@ -3634,6 +3691,10 @@ async fn main() -> Result<()> {
     // Imagery overlays (by their place in mapterm::basemaps::OVERLAYS): on, loading.
     let mut overlay_on = vec![false; mapterm::basemaps::OVERLAYS.len()];
     let mut overlay_loading: HashSet<usize> = HashSet::new();
+    // Live layers turned off in the switcher: their style layers, kept to put back. Their data
+    // keeps coming; their images (trails, satellite dots) are freed and not drawn.
+    let mut live_off: std::collections::HashMap<&'static str, (Vec<StyleLayer>, Option<String>)> = std::collections::HashMap::new();
+    let mut free_images: Vec<u32> = Vec::new();
     let (ovtx, mut ovrx) = mpsc::unbounded_channel::<(usize, Result<Arc<mapterm::raster::RasterSource>>)>();
     let mut switcher_rows: Vec<(u16, mapterm::basemaps::Row)> = Vec::new();
     let mut switcher_rect = Rect::default();
@@ -4421,34 +4482,34 @@ async fn main() -> Result<()> {
                 legend_rects.clear();
                 if show_legend {
                     let mut legends: Vec<mapterm::legend::Legend> = Vec::new();
-                    legends.extend(sat_legend.clone().filter(|_| !sats.is_empty()));
-                    if adsb_feed.is_some() && !aircraft.is_empty() {
+                    legends.extend(sat_legend.clone().filter(|_| !sats.is_empty() && !live_off.contains_key("satellites")));
+                    if adsb_feed.is_some() && !aircraft.is_empty() && !live_off.contains_key("aircraft") {
                         legends.push(mapterm::adsb::legend(&aircraft));
                     }
-                    if ais_key.is_some() && !fleet.is_empty() {
+                    if ais_key.is_some() && !fleet.is_empty() && !live_off.contains_key("ships") {
                         legends.push(mapterm::ais::legend(&fleet));
                     }
-                    if a.outages {
+                    if a.outages && !live_off.contains_key("outages") {
                         legends.extend(outages.legends(mapterm::outages::Level::at(cam.zoom)));
                     }
-                    if a.floods && !gauges.is_empty() {
+                    if a.floods && !gauges.is_empty() && !live_off.contains_key("gauges") {
                         legends.push(mapterm::floods::legend(&gauges));
                     }
-                    if a.closures && !closures.is_empty() {
+                    if a.closures && !closures.is_empty() && !live_off.contains_key("closures") {
                         let all: Vec<mapterm::closures::Closure> = closures.values().flatten().cloned().collect();
                         legends.push(mapterm::closures::legend(&all, unix_now()));
                     }
-                    if a.tfrs && !(tfr_live.is_empty() && tfr_standing.is_empty()) {
+                    if a.tfrs && !(tfr_live.is_empty() && tfr_standing.is_empty()) && !live_off.contains_key("tfrs") {
                         let all: Vec<mapterm::tfrs::Restriction> = tfr_standing.iter().chain(&tfr_live).cloned().collect();
                         legends.push(mapterm::tfrs::legend(&all));
                     }
-                    if a.fires && !fires.is_empty() {
+                    if a.fires && !fires.is_empty() && !live_off.contains_key("fires") {
                         legends.push(mapterm::fires::legend(&fires));
                     }
-                    if a.quakes.is_some() && !quakes.is_empty() {
+                    if a.quakes.is_some() && !quakes.is_empty() && !live_off.contains_key("quakes") {
                         legends.push(mapterm::quakes::legend(&quakes, unix_now()));
                     }
-                    if a.traffic && !sensors.is_empty() {
+                    if a.traffic && !sensors.is_empty() && !live_off.contains_key("traffic") {
                         legends.push(mapterm::traffic::legend(&sensors));
                     }
                     let mut room = m;
@@ -4617,21 +4678,21 @@ async fn main() -> Result<()> {
                         None => spans.push(Span::styled(format!("{name} "), dim)),
                     }
                 }
-                if a.sats.is_some() {
+                if a.sats.is_some() && !live_off.contains_key("satellites") {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let of = sat_filter.describe();
                     spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
                 }
-                if a.sondes {
+                if a.sondes && !live_off.contains_key("balloons") {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     spans.push(Span::styled(format!("▲ {} sondes{} ", balloons.len(), sonde_state), st));
                 }
-                if ais_key.is_some() {
+                if ais_key.is_some() && !live_off.contains_key("ships") {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let text = if cam.zoom < AIS_MIN_ZOOM { "⛴ zoom in for ships ".to_string() } else { format!("⛴ {}{} ", fleet.len(), ais_state) };
                     spans.push(Span::styled(text, st));
                 }
-                if adsb_feed.is_some() {
+                if adsb_feed.is_some() && !live_off.contains_key("aircraft") {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let text = match aircraft_retry.map(|t| t.saturating_duration_since(Instant::now())) {
                         _ if cam.zoom < ADSB_MIN_ZOOM => "✈ zoom in for aircraft ".to_string(),
@@ -4669,12 +4730,12 @@ async fn main() -> Result<()> {
                 } else if route_asking {
                     spans.push(Span::styled("⮕ routing… ", TStyle::new().fg(Color::Rgb(0x22, 0xd3, 0xee))));
                 }
-                if a.traffic {
+                if a.traffic && !live_off.contains_key("traffic") {
                     let slow = sensors.iter().filter(|s| s.level() >= mapterm::traffic::Level::Heavy).count();
                     let text = if sensors.is_empty() { "● traffic … ".to_string() } else { format!("● {} speed sensors · {slow} under 35 mph ", sensors.len()) };
                     spans.push(Span::styled(text, TStyle::new().fg(Color::Rgb(0x22, 0xc5, 0x5e))));
                 }
-                if a.closures {
+                if a.closures && !live_off.contains_key("closures") {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x7a, 0x32));
                     let now = unix_now();
                     let shown = closures.values().flatten().filter(|c| c.shown(now));
@@ -4682,18 +4743,18 @@ async fn main() -> Result<()> {
                     let text = if closures.is_empty() { "━ … ".to_string() } else { format!("━ {} closures · {} planned ", current.len(), planned.len()) };
                     spans.push(Span::styled(text, st));
                 }
-                if a.tfrs {
+                if a.tfrs && !live_off.contains_key("tfrs") {
                     let st = TStyle::new().fg(Color::Rgb(0xc8, 0x4d, 0xe8));
                     let text = if tfr_live.is_empty() { "⛔ … ".to_string() } else { format!("⛔ {} TFRs ", tfr_live.len()) };
                     spans.push(Span::styled(text, st));
                 }
-                if a.fires {
+                if a.fires && !live_off.contains_key("fires") {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x45, 0x3a));
                     let wild = fires.iter().filter(|f| f.kind != "RX").count();
                     let text = if fires.is_empty() { "✹ … ".to_string() } else { format!("✹ {wild} wildfires · {} perimeters ", fire_perimeters.len()) };
                     spans.push(Span::styled(text, st));
                 }
-                if let Some(period) = a.quakes {
+                if let Some(period) = a.quakes.filter(|_| !live_off.contains_key("quakes")) {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x9f, 0x0a));
                     let biggest = quakes.iter().filter(|q| q.mag.is_some()).max_by(|a, b| a.mag.unwrap_or(0.0).total_cmp(&b.mag.unwrap_or(0.0)));
                     let text = match biggest {
@@ -4702,7 +4763,7 @@ async fn main() -> Result<()> {
                     };
                     spans.push(Span::styled(text, st));
                 }
-                if a.outages {
+                if a.outages && !live_off.contains_key("outages") {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0xb4, 0x46));
                     let totals = outages.totals();
                     let text = if totals.is_empty() {
@@ -4737,7 +4798,11 @@ async fn main() -> Result<()> {
                         let loading = style_loading.is_some() || imagery_loading.is_some() || want_base.is_some();
                         let ov: Vec<(bool, bool)> = overlay_on.iter().enumerate().map(|(i, on)| (*on, overlay_loading.contains(&i))).collect();
                         let radar_on = radar.as_ref().is_some_and(|r| !r.is_off());
-                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, radar_on)
+                        let live_on = |i: usize| {
+                            let key = mapterm::basemaps::LIVE[i].key;
+                            if key == "radar" { radar_on } else { !live_off.contains_key(key) }
+                        };
+                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, &live_on)
                     }
                     None => (Rect::default(), Vec::new()),
                 };
@@ -4832,6 +4897,10 @@ async fn main() -> Result<()> {
             frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
             if sync {
                 let mut out = std::io::stdout();
+                // Images of live layers just turned off.
+                for id in free_images.drain(..) {
+                    out.write_all(mapterm::kitty::free(id).as_bytes())?;
+                }
                 // What's drawn over the map (legends, the panel, the base map switcher): images
                 // keep clear of it.
                 let holes: Vec<Rect> = legend_rects
@@ -4889,9 +4958,9 @@ async fn main() -> Result<()> {
                         let vp = Viewport::new(&cam, map_area);
                         let now = unix_now();
                         let sets: [TrailSet; 3] = [
-                            (a.sondes, balloons.trail_paths().collect(), now - SONDE_DELAY, SONDE_TRAIL, BALLOON_TRAIL_IMAGE, -12, &mut trails_shown.3),
+                            (a.sondes && !live_off.contains_key("balloons"), balloons.trail_paths().collect(), now - SONDE_DELAY, SONDE_TRAIL, BALLOON_TRAIL_IMAGE, -12, &mut trails_shown.3),
                             (
-                                adsb_feed.is_some(),
+                                adsb_feed.is_some() && !live_off.contains_key("aircraft"),
                                 mapterm::adsb::trail_paths(&aircraft).collect(),
                                 now - adsb_delay,
                                 ADSB_TRAIL,
@@ -4899,7 +4968,7 @@ async fn main() -> Result<()> {
                                 -10,
                                 &mut trails_shown.0,
                             ),
-                            (ais_key.is_some(), fleet.trail_paths().collect(), now - AIS_DELAY, AIS_TRAIL, SHIP_TRAIL_IMAGE, -11, &mut trails_shown.1),
+                            (ais_key.is_some() && !live_off.contains_key("ships"), fleet.trail_paths().collect(), now - AIS_DELAY, AIS_TRAIL, SHIP_TRAIL_IMAGE, -11, &mut trails_shown.1),
                         ];
                         for (on, paths, t, secs, id, z, shown) in sets {
                             let any = paths.iter().any(|(p, _)| p.trail_samples(t, secs).len() >= 2);
@@ -4936,7 +5005,7 @@ async fn main() -> Result<()> {
                     // still; the cell glyphs and text names stand in while it moves. Full
                     // resolution when there are names to draw (text needs it), else half,
                     // scaled up by the terminal (dots don't).
-                    let want_dots = !sats.is_empty() && settled;
+                    let want_dots = !sats.is_empty() && settled && !live_off.contains_key("satellites");
                     if want_dots && sat_dots_drawn.elapsed() >= sat_every {
                         sat_dots_drawn = Instant::now();
                         // Full resolution when there's text to draw: names, or the selected one's.
@@ -5420,7 +5489,7 @@ async fn main() -> Result<()> {
                     Row::Base(i) => want_base = Some(i),
                     Row::Labels => labels = !labels,
                     Row::Vector => vector = (vector + 1) % 3,
-                    Row::Radar => {
+                    Row::Live(i) if mapterm::basemaps::LIVE[i].key == "radar" => {
                         if let Some(r) = radar.as_mut() {
                             let off = !r.is_off();
                             r.set_off(&mut map, off);
@@ -5428,6 +5497,37 @@ async fn main() -> Result<()> {
                                 clock.go_live(unix_now());
                             }
                         }
+                    }
+                    Row::Live(i) => {
+                        let key = mapterm::basemaps::LIVE[i].key;
+                        match live_off.remove(key) {
+                            Some(saved) => {
+                                if let Err(e) = show_live(&mut map, saved) {
+                                    note = Some((Instant::now(), format!("{key}: {e:#}")));
+                                }
+                            }
+                            None => {
+                                live_off.insert(key, hide_live(&mut map, key));
+                                free_images.extend(live_images(key));
+                                // Nothing hidden stays chosen.
+                                match key {
+                                    "aircraft" => selected = None,
+                                    "ships" => selected_ship = None,
+                                    "satellites" => selected_sat = None,
+                                    "balloons" => selected_balloon = None,
+                                    "alerts" => selected_alert = None,
+                                    "quakes" => selected_quake = None,
+                                    "fires" => selected_fire = None,
+                                    "gauges" => selected_gauge = None,
+                                    "outages" => selected_outage = None,
+                                    "tfrs" => selected_tfr = None,
+                                    "closures" => selected_closure = None,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        trails_dirty = true;
+                        sat_dots_drawn = Instant::now() - Duration::from_secs(10);
                     }
                     Row::Overlay(i) if overlay_on[i] => {
                         let id = overlay_id(i);
@@ -6525,7 +6625,29 @@ async fn main() -> Result<()> {
                                     },
                                     KeyCode::Char('b') => {
                                         finder = None;
-                                        switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at, radar.is_some()));
+                                        // The live layers running: each can be turned off and on.
+                                        let running: Vec<usize> = mapterm::basemaps::LIVE
+                                            .iter()
+                                            .enumerate()
+                                            .filter(|(_, l)| match l.key {
+                                                "aircraft" => adsb_feed.is_some(),
+                                                "ships" => ais_key.is_some(),
+                                                "satellites" => a.sats.is_some(),
+                                                "balloons" => a.sondes,
+                                                "radar" => radar.is_some(),
+                                                "alerts" => a.alerts,
+                                                "quakes" => a.quakes.is_some(),
+                                                "fires" => a.fires,
+                                                "gauges" => a.floods,
+                                                "outages" => a.outages,
+                                                "tfrs" => a.tfrs,
+                                                "closures" => a.closures,
+                                                "traffic" => a.traffic,
+                                                _ => false,
+                                            })
+                                            .map(|(i, _)| i)
+                                            .collect();
+                                        switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at, &running));
                                     }
                                     KeyCode::Char('c') if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                                         // The pointer's position on the map, else the center.

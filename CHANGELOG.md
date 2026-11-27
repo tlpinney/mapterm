@@ -21,6 +21,11 @@ All notable changes to mapterm are listed here. The format follows
   it's loaded. The status line names the imagery and overlays on (`◧ usgs + hillshade`).
   `RasterSource::opacity` and `shade`; `--raster esri-hillshade`, `esri-roads`, `esri-places`.
 
+- Live layers on and off in the `b` switcher (now "layers"): each live layer running
+  (aircraft, ships, satellites, balloons, radar, alerts, quakes, fires, river levels, outages,
+  TFRs, closures, traffic) has a row, first in the list, found by typing like the rest. Off
+  takes it off the map, its legend and the status line; its data keeps coming.
+
 - Traffic speeds (`--traffic`): Maryland CHART's speed sensors, a dot per sensor colored by
   its slowest direction, speeds labeled from zoom 10. With a route, each choice shows its
   time with traffic beside the free-flow time. `mapterm::traffic`.

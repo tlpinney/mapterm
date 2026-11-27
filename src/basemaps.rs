@@ -131,6 +131,39 @@ pub const OVERLAYS: &[Overlay] = &[
     Overlay { preset: "gibs", label: "today from space", detail: "yesterday's MODIS, clouds and smoke (NASA)", opacity: 0.55, shade: false },
 ];
 
+/// A live layer the switcher turns on and off (when it was started).
+#[derive(Clone, Copy, Debug)]
+pub struct Live {
+    /// Its name in the viewer (`aircraft`, `radar`, ...).
+    pub key: &'static str,
+    /// Its name in the switcher.
+    pub label: &'static str,
+    /// A few words about it.
+    pub detail: &'static str,
+}
+
+/// The live layers, in the switcher's order.
+pub const LIVE: &[Live] = &[
+    Live { key: "aircraft", label: "aircraft", detail: "ADS-B, live" },
+    Live { key: "ships", label: "ships", detail: "AIS, live" },
+    Live { key: "satellites", label: "satellites", detail: "orbits from CelesTrak" },
+    Live { key: "balloons", label: "weather balloons", detail: "radiosondes, SondeHub" },
+    Live { key: "radar", label: "radar", detail: "rain and snow · R" },
+    Live { key: "alerts", label: "weather alerts", detail: "NWS warnings and watches" },
+    Live { key: "quakes", label: "earthquakes", detail: "USGS" },
+    Live { key: "fires", label: "wildfires", detail: "NIFC incidents and perimeters" },
+    Live { key: "gauges", label: "river levels", detail: "NWS gauges, flooding" },
+    Live { key: "outages", label: "power outages", detail: "by county" },
+    Live { key: "tfrs", label: "flight restrictions", detail: "FAA TFRs" },
+    Live { key: "closures", label: "road closures", detail: "closures and work zones" },
+    Live { key: "traffic", label: "traffic speeds", detail: "speed sensors" },
+];
+
+/// The index in [`LIVE`] of the layer called `key`.
+pub fn live_index(key: &str) -> Option<usize> {
+    LIVE.iter().position(|l| l.key == key)
+}
+
 /// One row of the switcher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
@@ -142,8 +175,8 @@ pub enum Row {
     Vector,
     /// An imagery overlay on or off (its index in [`OVERLAYS`]).
     Overlay(usize),
-    /// Weather radar on or off (`R`), when it's loaded.
-    Radar,
+    /// A live layer on or off (its index in [`LIVE`]), when it was started.
+    Live(usize),
 }
 
 /// The overlay rows' names and the words they're found by.
@@ -161,7 +194,7 @@ impl Row {
             Row::Labels => (LABELS_ROW.0.into(), LABELS_ROW.1.into()),
             Row::Vector => (VECTOR_ROW.0.into(), VECTOR_ROW.1.into()),
             Row::Overlay(i) => (OVERLAYS[i].label.into(), format!("{} overlay", OVERLAYS[i].detail)),
-            Row::Radar => ("radar".into(), "weather radar rain snow overlay".into()),
+            Row::Live(i) => (LIVE[i].label.into(), format!("{} {} live layer", LIVE[i].detail, LIVE[i].key)),
         }
     }
 }
@@ -183,15 +216,16 @@ pub struct Switcher {
     pub sel: usize,
     /// The base map shown when it opened (an index into the list).
     pub opened_on: usize,
-    /// Radar is loaded, so it has a row.
-    pub radar: bool,
+    /// The live layers running, which have rows (indices in [`LIVE`]).
+    pub live: Vec<usize>,
 }
 
 impl Switcher {
-    /// Open on the list with the current base map chosen (and a radar row if `radar`).
-    pub fn open(list: &[Entry], current: usize, radar: bool) -> Self {
-        let total = list.len() + OVERLAYS.len() + 2 + radar as usize;
-        let mut s = Switcher { query: String::new(), rows: Vec::new(), marks: Vec::new(), total, sel: 0, opened_on: current, radar };
+    /// Open on the list with the current base map chosen, and rows for the `live` layers
+    /// running (indices in [`LIVE`]).
+    pub fn open(list: &[Entry], current: usize, live: &[usize]) -> Self {
+        let total = list.len() + OVERLAYS.len() + 2 + live.len();
+        let mut s = Switcher { query: String::new(), rows: Vec::new(), marks: Vec::new(), total, sel: 0, opened_on: current, live: live.to_vec() };
         s.refilter(list);
         s.sel = s.rows.iter().position(|r| *r == Row::Base(current)).unwrap_or(0);
         s
@@ -200,11 +234,14 @@ impl Switcher {
     /// The rows matching the query: in list order while it's empty, best first once typed.
     pub fn refilter(&mut self, list: &[Entry]) {
         let keep = self.row().filter(|_| self.query.is_empty());
-        // Base maps, then what's over them: imagery overlays, radar, and the vector map's parts.
-        let all = (0..list.len())
-            .map(Row::Base)
+        // Live layers first (what's turned on and off most), then base maps, imagery
+        // overlays, and the vector map's parts.
+        let all = self
+            .live
+            .iter()
+            .map(|&i| Row::Live(i))
+            .chain((0..list.len()).map(Row::Base))
             .chain((0..OVERLAYS.len()).map(Row::Overlay))
-            .chain(self.radar.then_some(Row::Radar))
             .chain([Row::Labels, Row::Vector]);
         let mut scored: Vec<(i32, usize, Row, Vec<usize>)> = all
             .enumerate()
@@ -290,7 +327,7 @@ mod tests {
     #[test]
     fn switcher_filters_and_wraps() {
         let l = list();
-        let mut s = Switcher::open(&l, 1, false);
+        let mut s = Switcher::open(&l, 1, &[]);
         assert_eq!(s.row(), Some(Row::Base(1)));
         assert_eq!(*s.rows.last().unwrap(), Row::Vector);
         s.step(false);
@@ -316,11 +353,15 @@ mod tests {
         s.query = "hillsh".into();
         s.refilter(&l);
         assert_eq!(s.row(), Some(Row::Overlay(0)));
-        assert!(!s.rows.contains(&Row::Radar));
-        let mut r = Switcher::open(&l, 0, true);
-        r.query = "radar".into();
+        assert!(!s.rows.iter().any(|r| matches!(r, Row::Live(_))));
+        let radar = live_index("radar").unwrap();
+        let fires = live_index("fires").unwrap();
+        let mut r = Switcher::open(&l, 0, &[radar, fires]);
+        assert_eq!(r.rows[0], Row::Live(radar), "live layers first");
+        assert_eq!(r.row(), Some(Row::Base(0)), "opens on the current base map");
+        r.query = "wildf".into();
         r.refilter(&l);
-        assert_eq!(r.row(), Some(Row::Radar));
+        assert_eq!(r.row(), Some(Row::Live(fires)));
     }
 
     #[test]
