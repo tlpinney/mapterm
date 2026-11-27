@@ -8184,7 +8184,9 @@ async fn main() -> Result<()> {
                                         let vp = Viewport::new(&last_cam, map_area);
                                         let dot = vp.dot_ll(k.lon, k.lat);
                                         selected_site = None;
-                                        if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, dot, 6.0) {
+                                        // Layers turned off in L don't catch clicks.
+                                        let off = |k: &str| live_off.contains_key(k);
+                                        if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, dot, 6.0).filter(|_| !off("aircraft")) {
                                             if selected.as_deref() != Some(hex.as_str()) {
                                                 follow = false;
                                             }
@@ -8192,7 +8194,7 @@ async fn main() -> Result<()> {
                                             selected_ship = None;
                                             selected_sat = None;
                                             selected_balloon = None;
-                                        } else if let Some(serial) = balloons.nearest(unix_now() - SONDE_DELAY, &vp, dot, 6.0) {
+                                        } else if let Some(serial) = balloons.nearest(unix_now() - SONDE_DELAY, &vp, dot, 6.0).filter(|_| !off("balloons")) {
                                             if selected_balloon.as_deref() != Some(serial.as_str()) {
                                                 follow = false;
                                             }
@@ -8200,7 +8202,7 @@ async fn main() -> Result<()> {
                                             selected = None;
                                             selected_ship = None;
                                             selected_sat = None;
-                                        } else if let Some((_, mmsi)) = fleet.nearest(unix_now() - AIS_DELAY, &vp, dot, 6.0) {
+                                        } else if let Some((_, mmsi)) = fleet.nearest(unix_now() - AIS_DELAY, &vp, dot, 6.0).filter(|_| !off("ships")) {
                                             if selected_ship != Some(mmsi) {
                                                 follow = false;
                                             }
@@ -8208,7 +8210,7 @@ async fn main() -> Result<()> {
                                             selected_sat = None;
                                             selected = None;
                                             selected_balloon = None;
-                                        } else if let Some(norad) = mapterm::satellites::nearest(&sats, unix_now(), &vp, dot, 6.0) {
+                                        } else if let Some(norad) = mapterm::satellites::nearest(&sats, unix_now(), &vp, dot, 6.0).filter(|_| !off("satellites")) {
                                             if selected_sat != Some(norad) {
                                                 follow = false;
                                             }
@@ -8216,30 +8218,32 @@ async fn main() -> Result<()> {
                                             selected = None;
                                             selected_ship = None;
                                             selected_alert = None;
-                                        } else if let Some(id) = mapterm::floods::nearest(&gauges, &vp, dot, 4.0) {
+                                        } else if let Some(id) = mapterm::floods::nearest(&gauges, &vp, dot, 4.0).filter(|_| !off("gauges")) {
                                             selected_gauge = Some(id);
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake, selected_fire) =
                                                 (None, None, None, None, None, None, None, None);
                                             follow = false;
-                                        } else if let Some(id) = mapterm::fires::nearest(&fires, &vp, dot, 4.0).or_else(|| {
-                                            // Or the perimeter under the click.
-                                            map.query_features(&last_cam, map_area, dot)
-                                                .iter()
-                                                .filter(|p| p.source.as_deref() == Some(FIRE_AREAS))
-                                                .find_map(|p| p.prop("id").and_then(|v| v.as_str()).map(str::to_string))
-                                        }) {
+                                        } else if let Some(id) = mapterm::fires::nearest(&fires, &vp, dot, 4.0)
+                                            .or_else(|| {
+                                                // Or the perimeter under the click.
+                                                map.query_features(&last_cam, map_area, dot)
+                                                    .iter()
+                                                    .filter(|p| p.source.as_deref() == Some(FIRE_AREAS))
+                                                    .find_map(|p| p.prop("id").and_then(|v| v.as_str()).map(str::to_string))
+                                            })
+                                            .filter(|_| !off("fires"))
+                                        {
                                             selected_fire = Some(id);
                                             selected_gauge = None;
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake) =
                                                 (None, None, None, None, None, None, None);
                                             follow = false;
-                                        } else if let Some(id) = mapterm::quakes::nearest(&quakes, unix_now(), &vp, dot, 4.0) {
+                                        } else if let Some(id) = mapterm::quakes::nearest(&quakes, unix_now(), &vp, dot, 4.0).filter(|_| !off("quakes")) {
                                             selected_fire = None;
                                             selected_quake = Some(id);
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage) = (None, None, None, None, None, None);
                                             follow = false;
-                                        } else if let Some(id) = a
-                                            .sondes
+                                        } else if let Some(id) = (a.sondes && !off("balloons"))
                                             .then(|| mapterm::upperair::nearest(&launch_sites, &vp, dot, 4.0).map(|s| s.id.clone()))
                                             .flatten()
                                         {
@@ -8248,8 +8252,7 @@ async fn main() -> Result<()> {
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake, selected_fire) =
                                                 (None, None, None, None, None, None, None, None);
                                             follow = false;
-                                        } else if let Some(k) = a
-                                            .closures
+                                        } else if let Some(k) = (a.closures && !off("closures"))
                                             .then(|| map.query_features(&last_cam, map_area, dot))
                                             .and_then(|hits| hits.iter().filter(|p| p.source.as_deref() == Some(CLOSURES)).find_map(|p| p.prop("key").and_then(|v| v.as_str()).map(str::to_string)))
                                         {
@@ -8266,6 +8269,7 @@ async fn main() -> Result<()> {
                                             // its outline, braille or not, is what's picked).
                                             selected_tfr = hits
                                                 .iter()
+                                                .filter(|_| !off("tfrs"))
                                                 .filter(|p| p.source.as_deref() == Some(TFRS))
                                                 .filter_map(|p| p.prop("key").and_then(|v| v.as_str()))
                                                 .max_by_key(|k| !k.starts_with("stadium:") && !k.starts_with("rules:"))
@@ -8277,6 +8281,7 @@ async fn main() -> Result<()> {
                                                     tfr_live
                                                         .iter()
                                                         .chain(&tfr_standing)
+                                                        .filter(|_| !off("tfrs"))
                                                         .filter(|r| mapterm::tfrs::contains(&r.geometry, lon, lat))
                                                         .min_by(|a, b| mapterm::tfrs::extent(&a.geometry).total_cmp(&mapterm::tfrs::extent(&b.geometry)))
                                                         .map(|r| r.key.clone())
@@ -8284,6 +8289,7 @@ async fn main() -> Result<()> {
                                             // An alert area under the click: the most severe.
                                             selected_alert = hits
                                                 .iter()
+                                                .filter(|_| !off("alerts"))
                                                 .filter(|p| p.source.as_deref() == Some(ALERTS))
                                                 .filter_map(|p| p.prop("id").and_then(|v| v.as_str()))
                                                 .filter_map(|id| alerts.iter().find(|a| a.id == id))
@@ -8295,6 +8301,7 @@ async fn main() -> Result<()> {
                                                 None
                                             } else {
                                                 hits.iter()
+                                                    .filter(|_| !off("outages"))
                                                     .filter(|p| p.source.as_deref() == Some(OUTAGES))
                                                     .filter(|p| p.prop("level").and_then(|v| v.as_str()) == Some(level.name()))
                                                     .filter_map(|p| p.prop("key").and_then(|v| v.as_str()))

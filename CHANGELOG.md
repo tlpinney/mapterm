@@ -136,6 +136,8 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- Layers turned off in `L` no longer catch clicks (an outage area, a restriction, a quake...
+  under the pointer was still picked).
 - Weather balloon receiving stations and NASA balloons no longer disappear with the map's
   names (`n`) or the overlay over imagery (`v`); like the other live layers, they stay.
 
