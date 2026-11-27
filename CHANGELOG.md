@@ -15,6 +15,12 @@ All notable changes to mapterm are listed here. The format follows
   over imagery toggle there too. Imagery can now be picked while the viewer runs. `m`/`M`
   step through the whole list, `'` flips back to the base map before. `mapterm::basemaps`.
 
+- Imagery overlays, in the `b` switcher, any number at once over the base map: hillshade
+  (Esri World Hillshade, drawn as shading), roads and places (Esri's reference layers on a
+  clear background) and NASA GIBS's daily satellite picture, half transparent; radar too when
+  it's loaded. The status line names the imagery and overlays on (`◧ usgs + hillshade`).
+  `RasterSource::opacity` and `shade`; `--raster esri-hillshade`, `esri-roads`, `esri-places`.
+
 - Traffic speeds (`--traffic`): Maryland CHART's speed sensors, a dot per sensor colored by
   its slowest direction, speeds labeled from zoom 10. With a route, each choice shows its
   time with traffic beside the free-flow time. `mapterm::traffic`.

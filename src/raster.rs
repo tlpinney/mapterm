@@ -61,6 +61,12 @@ pub struct RasterSource {
     /// Tiles must have transparency to count: an opaque one is the service's error image
     /// (RainViewer sends one instead of an error) and is treated as empty. Off by default.
     pub require_alpha: bool,
+    /// How opaque its tiles are drawn, 0 to 1 (1, the default: as they come). Applied to each
+    /// tile as it loads, so it shows the same in kitty images, cell colors and snapshots.
+    pub opacity: f32,
+    /// Turn each tile into shading: dark where it's dark, clear where it's light (a hillshade
+    /// as an overlay, darkening the slopes of whatever is under it). Off by default.
+    pub shade: bool,
     /// Keep tiles in this store instead of the disk cache ([`RasterSource::cache`], one
     /// database a source for the life of the program): for tiles that never change once
     /// published and come from many short-lived sources, such as radar scans, all kept in one
@@ -299,6 +305,42 @@ pub const PRESETS: &[Preset] = &[
         cache: true,
     },
     Preset {
+        name: "esri-hillshade",
+        about: "Esri World Hillshade, relief shading (an overlay in the b switcher; Esri's terms apply)",
+        template: "https://server.arcgisonline.com/ArcGIS/rest/services/Elevation/World_Hillshade/MapServer/tile/{z}/{y}/{x}",
+        headers: &[],
+        key_env: &[],
+        params: &[],
+        attribution: "Esri, Vantor, Airbus DS, USGS, NGA, NASA, CGIAR, N Robinson, NCEAS, NLS, OS, NMA, Geodatastyrelsen, Rijkswaterstaat, GSA, Geoland, FEMA, Intermap, and the GIS user community",
+        tile_px: 256,
+        max_zoom: 16,
+        cache: true,
+    },
+    Preset {
+        name: "esri-places",
+        about: "Esri World Boundaries and Places, borders and place names on a clear background (an overlay; Esri's terms apply)",
+        template: "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}",
+        headers: &[],
+        key_env: &[],
+        params: &[],
+        attribution: "Esri, HERE, Garmin, © OpenStreetMap contributors, and the GIS user community",
+        tile_px: 256,
+        max_zoom: 19,
+        cache: true,
+    },
+    Preset {
+        name: "esri-roads",
+        about: "Esri World Transportation, roads and rail on a clear background (an overlay; Esri's terms apply)",
+        template: "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+        headers: &[],
+        key_env: &[],
+        params: &[],
+        attribution: "Esri, HERE, Garmin, © OpenStreetMap contributors",
+        tile_px: 256,
+        max_zoom: 19,
+        cache: true,
+    },
+    Preset {
         name: "google-terrain",
         about: "Google Maps terrain (Map Tiles API 2D tiles), needs an API key; billed per tile",
         template: GOOGLE_2D,
@@ -438,6 +480,8 @@ impl RasterSource {
             attribution: known_attribution(template).unwrap_or_default().to_string(),
             overlay: false,
             require_alpha: false,
+            opacity: 1.0,
+            shade: false,
             store: None,
             render: None,
             bleed: 0,
@@ -508,6 +552,8 @@ impl RasterSource {
             attribution,
             overlay: false,
             require_alpha: false,
+            opacity: 1.0,
+            shade: false,
             store: None,
             render: None,
             bleed: 0,
@@ -542,6 +588,8 @@ impl RasterSource {
             attribution,
             overlay: false,
             require_alpha: false,
+            opacity: 1.0,
+            shade: false,
             store: None,
             render: None,
             bleed: 0,
@@ -853,6 +901,25 @@ pub fn blend(a: &RasterTile, b: &RasterTile, f: f64) -> Result<RasterTile> {
     Ok(RasterTile { bleed: 0, id: NEXT_IMAGE_ID.fetch_add(1, Ordering::Relaxed), png, rgba: out })
 }
 
+/// A tile drawn at `opacity` (0 to 1), and as shading if `shade`: black, as opaque as the
+/// pixel is dark (white goes clear). Encoded as PNG, quickly.
+pub fn fade(t: RasterTile, opacity: f32, shade: bool) -> Result<RasterTile> {
+    let opacity = opacity.clamp(0.0, 1.0);
+    let mut rgba = t.rgba;
+    for p in rgba.pixels_mut() {
+        let mut a = p[3] as f32 / 255.0;
+        if shade {
+            let lum = (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) / 255.0;
+            a *= 1.0 - lum;
+            *p = image::Rgba([0, 0, 0, p[3]]);
+        }
+        p[3] = (a * opacity * 255.0).round() as u8;
+    }
+    let (w, h) = rgba.dimensions();
+    let png = encode_png(rgba.as_raw(), w, h)?;
+    Ok(RasterTile { bleed: t.bleed, id: t.id, png, rgba })
+}
+
 /// Whether PNG `bytes` can be transparent: RGBA or gray with alpha, or a palette with a
 /// transparency chunk. False for anything else (JPEG, opaque PNG).
 pub fn png_has_alpha(bytes: &[u8]) -> bool {
@@ -1145,6 +1212,22 @@ impl Widget for RasterCells<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fade_and_shade() {
+        use super::{RasterTile, fade};
+        let mut rgba = image::RgbaImage::new(2, 1);
+        rgba.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
+        rgba.put_pixel(1, 0, image::Rgba([0, 0, 0, 255]));
+        let t = || RasterTile { bleed: 0, id: 1, png: Vec::new(), rgba: rgba.clone() };
+        let half = fade(t(), 0.5, false).unwrap();
+        assert_eq!(half.rgba.get_pixel(0, 0)[3], 128);
+        assert!(!half.png.is_empty());
+        // Shading: white goes clear, black stays as dark as the opacity allows.
+        let shade = fade(t(), 0.5, true).unwrap();
+        assert_eq!(shade.rgba.get_pixel(0, 0)[3], 0);
+        assert_eq!(*shade.rgba.get_pixel(1, 0), image::Rgba([0, 0, 0, 128]));
+    }
+
     #[test]
     fn cuts_blocks_around_a_hole() {
         let tile = Arc::new(RasterTile { bleed: 0, id: 1, png: Vec::new(), rgba: image::RgbaImage::new(512, 512) });

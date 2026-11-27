@@ -225,8 +225,12 @@ impl TileRequest {
                 // An opaque tile from a source that's always transparent is its error image.
                 Some(b) if src.require_alpha && !crate::raster::png_has_alpha(&b) => LoadedTile::Raster(None),
                 Some(b) => {
-                    let bleed = src.bleed;
-                    let mut t = tokio::task::spawn_blocking(move || crate::raster::decode(&b)).await??;
+                    let (bleed, opacity, shade) = (src.bleed, src.opacity, src.shade);
+                    let mut t = tokio::task::spawn_blocking(move || {
+                        let t = crate::raster::decode(&b)?;
+                        if opacity < 1.0 || shade { crate::raster::fade(t, opacity, shade) } else { Ok(t) }
+                    })
+                    .await??;
                     t.bleed = bleed;
                     LoadedTile::Raster(Some(t))
                 }

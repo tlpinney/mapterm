@@ -99,12 +99,37 @@ pub fn entries(styles: &[String], start: Option<&str>, has_key: impl Fn(&Preset)
         v.push(custom_imagery_entry(s));
     }
     for p in crate::raster::PRESETS {
-        if Some(p.name) == start || usable(p, &has_key) {
+        // Overlays (clear but for their names or shading) aren't base maps, unless asked for.
+        let overlay = OVERLAYS.iter().any(|o| o.preset == p.name);
+        if Some(p.name) == start || (usable(p, &has_key) && !overlay) {
             v.push(imagery_entry(p));
         }
     }
     v
 }
+
+/// Imagery drawn over the base map, any number at once: a provider and how it's drawn.
+#[derive(Clone, Copy, Debug)]
+pub struct Overlay {
+    /// The provider ([`crate::raster::preset`]).
+    pub preset: &'static str,
+    /// Its name in the switcher.
+    pub label: &'static str,
+    /// A few words about it.
+    pub detail: &'static str,
+    /// How opaque it's drawn.
+    pub opacity: f32,
+    /// Drawn as shading (see [`crate::raster::RasterSource::shade`]).
+    pub shade: bool,
+}
+
+/// The imagery overlays the switcher offers.
+pub const OVERLAYS: &[Overlay] = &[
+    Overlay { preset: "esri-hillshade", label: "hillshade", detail: "relief shading (Esri)", opacity: 0.6, shade: true },
+    Overlay { preset: "esri-roads", label: "roads", detail: "roads and rail (Esri)", opacity: 1.0, shade: false },
+    Overlay { preset: "esri-places", label: "places", detail: "borders and place names (Esri)", opacity: 1.0, shade: false },
+    Overlay { preset: "gibs", label: "today from space", detail: "yesterday's MODIS, clouds and smoke (NASA)", opacity: 0.55, shade: false },
+];
 
 /// One row of the switcher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +140,10 @@ pub enum Row {
     Labels,
     /// The vector map over imagery: all of it, names only, or none (`v`).
     Vector,
+    /// An imagery overlay on or off (its index in [`OVERLAYS`]).
+    Overlay(usize),
+    /// Weather radar on or off (`R`), when it's loaded.
+    Radar,
 }
 
 /// The overlay rows' names and the words they're found by.
@@ -131,6 +160,8 @@ impl Row {
             }
             Row::Labels => (LABELS_ROW.0.into(), LABELS_ROW.1.into()),
             Row::Vector => (VECTOR_ROW.0.into(), VECTOR_ROW.1.into()),
+            Row::Overlay(i) => (OVERLAYS[i].label.into(), format!("{} overlay", OVERLAYS[i].detail)),
+            Row::Radar => ("radar".into(), "weather radar rain snow overlay".into()),
         }
     }
 }
@@ -152,12 +183,15 @@ pub struct Switcher {
     pub sel: usize,
     /// The base map shown when it opened (an index into the list).
     pub opened_on: usize,
+    /// Radar is loaded, so it has a row.
+    pub radar: bool,
 }
 
 impl Switcher {
-    /// Open on the list with the current base map chosen.
-    pub fn open(list: &[Entry], current: usize) -> Self {
-        let mut s = Switcher { query: String::new(), rows: Vec::new(), marks: Vec::new(), total: list.len() + 2, sel: 0, opened_on: current };
+    /// Open on the list with the current base map chosen (and a radar row if `radar`).
+    pub fn open(list: &[Entry], current: usize, radar: bool) -> Self {
+        let total = list.len() + OVERLAYS.len() + 2 + radar as usize;
+        let mut s = Switcher { query: String::new(), rows: Vec::new(), marks: Vec::new(), total, sel: 0, opened_on: current, radar };
         s.refilter(list);
         s.sel = s.rows.iter().position(|r| *r == Row::Base(current)).unwrap_or(0);
         s
@@ -166,7 +200,12 @@ impl Switcher {
     /// The rows matching the query: in list order while it's empty, best first once typed.
     pub fn refilter(&mut self, list: &[Entry]) {
         let keep = self.row().filter(|_| self.query.is_empty());
-        let all = (0..list.len()).map(Row::Base).chain([Row::Labels, Row::Vector]);
+        // Base maps, then what's over them: imagery overlays, radar, and the vector map's parts.
+        let all = (0..list.len())
+            .map(Row::Base)
+            .chain((0..OVERLAYS.len()).map(Row::Overlay))
+            .chain(self.radar.then_some(Row::Radar))
+            .chain([Row::Labels, Row::Vector]);
         let mut scored: Vec<(i32, usize, Row, Vec<usize>)> = all
             .enumerate()
             .filter_map(|(n, row)| {
@@ -228,6 +267,9 @@ mod tests {
         assert!(names.contains(&"esri") && names.contains(&"usgs"));
         // Keyed and mosaic-needing providers stay out without a key.
         assert!(!names.contains(&"google") && !names.contains(&"planet"));
+        // Overlays aren't base maps, and each names a provider.
+        assert!(!names.contains(&"esri-hillshade") && !names.contains(&"esri-places"));
+        assert!(OVERLAYS.iter().all(|o| crate::raster::preset(o.preset).is_some()));
         assert_eq!(l.iter().find(|e| e.base.spec() == "esri").unwrap().detail, "Esri World Imagery");
     }
 
@@ -248,7 +290,7 @@ mod tests {
     #[test]
     fn switcher_filters_and_wraps() {
         let l = list();
-        let mut s = Switcher::open(&l, 1);
+        let mut s = Switcher::open(&l, 1, false);
         assert_eq!(s.row(), Some(Row::Base(1)));
         assert_eq!(*s.rows.last().unwrap(), Row::Vector);
         s.step(false);
@@ -270,7 +312,15 @@ mod tests {
         s.query = "usg".into();
         s.refilter(&l);
         assert_eq!(s.marks[0], vec![0, 1, 2]);
-        assert_eq!(s.total, l.len() + 2);
+        assert_eq!(s.total, l.len() + OVERLAYS.len() + 2);
+        s.query = "hillsh".into();
+        s.refilter(&l);
+        assert_eq!(s.row(), Some(Row::Overlay(0)));
+        assert!(!s.rows.contains(&Row::Radar));
+        let mut r = Switcher::open(&l, 0, true);
+        r.query = "radar".into();
+        r.refilter(&l);
+        assert_eq!(r.row(), Some(Row::Radar));
     }
 
     #[test]

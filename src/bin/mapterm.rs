@@ -642,6 +642,14 @@ async fn load_basemap(spec: &str, source: &str, dark: bool, cam: Camera) -> Resu
     }
 }
 
+/// Ids of the imagery overlays' sources and layers start with this.
+const OVERLAY_PREFIX: &str = "mapterm-imagery-overlay-";
+
+/// The source and layer id of imagery overlay `i` (of mapterm::basemaps::OVERLAYS).
+fn overlay_id(i: usize) -> String {
+    format!("{OVERLAY_PREFIX}{}", mapterm::basemaps::OVERLAYS[i].preset)
+}
+
 /// Imagery layers: source and layer id, the provider, and the zoom it shows from (bottom first;
 /// the last is "the" imagery for credits and billing).
 type ImageryLayers = Vec<(String, Arc<mapterm::raster::RasterSource>, f64)>;
@@ -1514,6 +1522,8 @@ fn draw_switcher(
     loading: bool,
     labels: bool,
     vector: u8,
+    overlays: &[(bool, bool)],
+    radar_on: bool,
 ) -> (Rect, Vec<(u16, mapterm::basemaps::Row)>) {
     use mapterm::basemaps::Row;
     use ratatui::style::Modifier;
@@ -1529,7 +1539,8 @@ fn draw_switcher(
         let name = match row {
             Row::Base(i) if list[*i].base.is_imagery() => "imagery",
             Row::Base(_) => "maps",
-            _ => "over the map",
+            Row::Overlay(_) | Row::Radar => "imagery overlays",
+            _ => "vector map",
         };
         if sw.query.is_empty() && name != section {
             if !section.is_empty() {
@@ -1550,6 +1561,12 @@ fn draw_switcher(
                 let state = ["roads and names", "names only", "nothing"][vector.min(2) as usize];
                 ("▤", "over imagery".to_string(), format!("{state} · v"))
             }
+            Row::Overlay(i) => {
+                let o = &mapterm::basemaps::OVERLAYS[*i];
+                let (on, loading) = overlays.get(*i).copied().unwrap_or_default();
+                (if loading { "◌" } else if on { "☑" } else { "☐" }, o.label.to_string(), o.detail.to_string())
+            }
+            Row::Radar => (if radar_on { "☑" } else { "☐" }, "radar".to_string(), "rain and snow · R".to_string()),
         };
         let chosen = n == sw.sel;
         let st = if chosen { TStyle::new().add_modifier(Modifier::REVERSED) } else { TStyle::new() };
@@ -3612,6 +3629,12 @@ async fn main() -> Result<()> {
     let mut imagery_loading: Option<String> = None;
     let mut switcher: Option<mapterm::basemaps::Switcher> = None;
     let mut switcher_moved: Option<Instant> = None;
+    // A row picked (enter, space or a click), handled with everything else in the loop.
+    let mut switcher_pick: Option<mapterm::basemaps::Row> = None;
+    // Imagery overlays (by their place in mapterm::basemaps::OVERLAYS): on, loading.
+    let mut overlay_on = vec![false; mapterm::basemaps::OVERLAYS.len()];
+    let mut overlay_loading: HashSet<usize> = HashSet::new();
+    let (ovtx, mut ovrx) = mpsc::unbounded_channel::<(usize, Result<Arc<mapterm::raster::RasterSource>>)>();
     let mut switcher_rows: Vec<(u16, mapterm::basemaps::Row)> = Vec::new();
     let mut switcher_rect = Rect::default();
     let mut imagery_kept: std::collections::HashMap<String, ImageryLayers> = std::collections::HashMap::new();
@@ -4567,12 +4590,24 @@ async fn main() -> Result<()> {
                     };
                     spans.push(Span::styled(tag, TStyle::new().fg(Color::Cyan)));
                 }
-                if let Some(r) = &raster {
-                    // Its credit is with the others at the end; this says how it draws.
-                    let mode = ["", "· labels ", "· raster only "][vector as usize];
-                    let how = if kitty { "" } else { "(cells) " };
-                    let name = if r.attribution.is_empty() { format!("{} ", r.name) } else { String::new() };
-                    spans.push(Span::styled(format!("imagery {name}{how}{mode}"), TStyle::new().fg(Color::LightBlue)));
+                // The imagery and overlays by name (their credits are with the others at the
+                // end), and how they draw.
+                let on: Vec<&str> = overlay_on.iter().zip(mapterm::basemaps::OVERLAYS).filter(|(on, _)| **on).map(|(_, o)| o.label).collect();
+                if raster.is_some() || !on.is_empty() {
+                    let mut parts: Vec<String> = Vec::new();
+                    if raster.is_some() {
+                        parts.push(bases.get(base_at).map_or("imagery".into(), |e| e.label.clone()));
+                    }
+                    if !on.is_empty() {
+                        parts.push(format!("+ {}", on.join(", ")));
+                    }
+                    if !kitty {
+                        parts.push("(cells)".into());
+                    }
+                    if raster.is_some() && vector > 0 {
+                        parts.push(["", "· labels", "· raster only"][vector as usize].into());
+                    }
+                    spans.push(Span::styled(format!("◧ {} ", parts.join(" ")), TStyle::new().fg(Color::LightBlue)));
                 }
                 // Each data layer with how many of its features are in view (to compare layers).
                 for (name, color) in &legend {
@@ -4700,7 +4735,9 @@ async fn main() -> Result<()> {
                 (switcher_rect, switcher_rows) = match &switcher {
                     Some(sw) => {
                         let loading = style_loading.is_some() || imagery_loading.is_some() || want_base.is_some();
-                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector)
+                        let ov: Vec<(bool, bool)> = overlay_on.iter().enumerate().map(|(i, on)| (*on, overlay_loading.contains(&i))).collect();
+                        let radar_on = radar.as_ref().is_some_and(|r| !r.is_off());
+                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, radar_on)
                     }
                     None => (Rect::default(), Vec::new()),
                 };
@@ -5376,6 +5413,47 @@ async fn main() -> Result<()> {
                     want_base = Some(i);
                 }
             }
+            // What was picked in the switcher.
+            if let Some(row) = switcher_pick.take() {
+                use mapterm::basemaps::{OVERLAYS, Row};
+                match row {
+                    Row::Base(i) => want_base = Some(i),
+                    Row::Labels => labels = !labels,
+                    Row::Vector => vector = (vector + 1) % 3,
+                    Row::Radar => {
+                        if let Some(r) = radar.as_mut() {
+                            let off = !r.is_off();
+                            r.set_off(&mut map, off);
+                            if off {
+                                clock.go_live(unix_now());
+                            }
+                        }
+                    }
+                    Row::Overlay(i) if overlay_on[i] => {
+                        let id = overlay_id(i);
+                        map.remove_layers(&[id.as_str()]);
+                        map.remove_source(&id);
+                        overlay_on[i] = false;
+                    }
+                    Row::Overlay(i) => {
+                        if overlay_loading.insert(i) {
+                            let (ovtx, cache, o) = (ovtx.clone(), a.raster_cache, OVERLAYS[i]);
+                            note = Some((Instant::now(), format!("loading {}…", o.label)));
+                            tokio::spawn(async move {
+                                let r = open_preset(o.preset, None, cache).await.map(|mut r| {
+                                    r.overlay = true;
+                                    r.opacity = o.opacity;
+                                    r.shade = o.shade;
+                                    Arc::new(r)
+                                });
+                                let _ = ovtx.send((i, r));
+                            });
+                        }
+                    }
+                }
+                base = base_visibility(&map);
+                apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+            }
             // Switch base maps, one at a time: a style swaps the vector map (and takes away any
             // imagery); imagery goes under the style's roads and names.
             if let Some(i) = want_base.filter(|_| style_loading.is_none() && imagery_loading.is_none()) {
@@ -5827,6 +5905,32 @@ async fn main() -> Result<()> {
                         let _ = map.set_attribution(&raster_id, &text);
                     }
                 }
+                Some((i, r)) = ovrx.recv() => {
+                    overlay_loading.remove(&i);
+                    let id = overlay_id(i);
+                    let added = r.and_then(|src| {
+                        map.add_source(&id, MapSource::raster(src))?;
+                        // Over the imagery and the overlays before it, under everything else.
+                        let before = map.layer_ids().into_iter().find(|l| !is_imagery(l) && !l.starts_with(OVERLAY_PREFIX)).map(str::to_string);
+                        map.add_layers(vec![StyleLayer::raster(&id, &id)], before.as_deref())
+                    });
+                    match added {
+                        Ok(()) => {
+                            overlay_on[i] = true;
+                            if !kitty && mapterm::kitty::supported() {
+                                kitty = true;
+                                map.raster_mode = RasterMode::Kitty { cell_px: cpx };
+                                kstate.shm = shm;
+                            }
+                            base = base_visibility(&map);
+                            apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                        }
+                        Err(e) => {
+                            map.remove_source(&id);
+                            note = Some((Instant::now(), format!("{} failed: {e:#}", mapterm::basemaps::OVERLAYS[i].label)));
+                        }
+                    }
+                }
                 Some((spec, r)) = irx.recv() => {
                     imagery_loading = None;
                     let r = r.and_then(|layers| set_imagery(&mut map, &layers).map(|_| layers));
@@ -5935,12 +6039,6 @@ async fn main() -> Result<()> {
                                     let before = sw.row();
                                     let mut refilter = false;
                                     let mut close = false;
-                                    let pick = |row: Option<Row>, want_base: &mut Option<usize>, labels: &mut bool, vector: &mut u8| match row {
-                                        Some(Row::Base(i)) => *want_base = Some(i),
-                                        Some(Row::Labels) => *labels = !*labels,
-                                        Some(Row::Vector) => *vector = (*vector + 1) % 3,
-                                        None => {}
-                                    };
                                     match k.code {
                                         KeyCode::Char('c') if ctrl => return Ok(()),
                                         KeyCode::Char('u') if ctrl => {
@@ -5958,9 +6056,9 @@ async fn main() -> Result<()> {
                                             if matches!(row, Some(Row::Base(_))) {
                                                 close = true;
                                             }
-                                            pick(row, &mut want_base, &mut labels, &mut vector);
+                                            switcher_pick = row;
                                         }
-                                        KeyCode::Char(' ') => pick(sw.row(), &mut want_base, &mut labels, &mut vector),
+                                        KeyCode::Char(' ') => switcher_pick = sw.row(),
                                         KeyCode::Down | KeyCode::Tab => sw.step(true),
                                         KeyCode::Up | KeyCode::BackTab => sw.step(false),
                                         KeyCode::Char(c) if !ctrl => {
@@ -5979,7 +6077,6 @@ async fn main() -> Result<()> {
                                     if sw.row() != before {
                                         switcher_moved = Some(Instant::now());
                                     }
-                                    apply_toggles(&mut map, &base, labels, vector, raster.is_some());
                                     if close {
                                         switcher = None;
                                         switcher_moved = None;
@@ -6428,7 +6525,7 @@ async fn main() -> Result<()> {
                                     },
                                     KeyCode::Char('b') => {
                                         finder = None;
-                                        switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at));
+                                        switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at, radar.is_some()));
                                     }
                                     KeyCode::Char('c') if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                                         // The pointer's position on the map, else the center.
@@ -6524,7 +6621,6 @@ async fn main() -> Result<()> {
                                 if let Some(sw) = switcher.as_mut()
                                     && switcher_rect.contains(pos)
                                 {
-                                    use mapterm::basemaps::Row;
                                     match m.kind {
                                         event::MouseEventKind::Down(event::MouseButton::Left) => {
                                             if let Some(&(_, row)) = switcher_rows.iter().find(|(r, _)| *r == cell.1)
@@ -6532,12 +6628,7 @@ async fn main() -> Result<()> {
                                             {
                                                 sw.sel = n;
                                                 switcher_moved = None;
-                                                match row {
-                                                    Row::Base(i) => want_base = Some(i),
-                                                    Row::Labels => labels = !labels,
-                                                    Row::Vector => vector = (vector + 1) % 3,
-                                                }
-                                                apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                                                switcher_pick = Some(row);
                                             }
                                         }
                                         event::MouseEventKind::ScrollDown | event::MouseEventKind::ScrollUp => {
