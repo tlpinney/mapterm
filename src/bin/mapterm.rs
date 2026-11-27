@@ -1499,6 +1499,9 @@ fn draw_finder(f: &mut ratatui::Frame, area: Rect, fd: &Finder) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// The base map switcher's background.
+const SWITCHER_BG: Color = Color::Rgb(17, 24, 39);
+
 /// The base map switcher (b): a box in the middle of the map with the styles, the imagery and
 /// what's drawn over it. Returns the box and each row's screen line, for clicks.
 #[allow(clippy::too_many_arguments)]
@@ -1514,7 +1517,7 @@ fn draw_switcher(
 ) -> (Rect, Vec<(u16, mapterm::basemaps::Row)>) {
     use mapterm::basemaps::Row;
     use ratatui::style::Modifier;
-    let dim = TStyle::new().fg(Color::DarkGray);
+    let dim = TStyle::new().fg(Color::Rgb(148, 163, 184));
     let accent = Color::Rgb(127, 178, 255);
     let head = TStyle::new().fg(accent).add_modifier(Modifier::BOLD);
     // Lines: section headings (while nothing is typed) and rows.
@@ -1571,7 +1574,10 @@ fn draw_switcher(
     // Rows, then a rule and the prompt line.
     let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(2)).max(5);
     let rect = Rect { x: area.x + (area.width.saturating_sub(width)) / 2, y: area.y + (area.height.saturating_sub(height)) / 2, width, height };
+    // Opaque: its own colors (whatever the terminal's), over the map and its images (which
+    // kitty puts under cells with a background; see mapterm::kitty::under_cells).
     let block = Block::bordered()
+        .style(TStyle::new().bg(SWITCHER_BG).fg(Color::Rgb(226, 232, 240)))
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(TStyle::new().fg(accent))
         .title(Span::styled(" base maps ", head))
