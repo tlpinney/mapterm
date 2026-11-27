@@ -326,6 +326,62 @@ pub fn parse_wzdx(text: &str, source: &'static str, id: &str) -> Result<Vec<Clos
         .collect())
 }
 
+/// A GML position, "lat lon", as [lon, lat].
+fn gml_pos(v: &Json) -> Option<[f64; 2]> {
+    let pos = v.pointer("/gml:Point/gml:pos")?.as_str()?;
+    let mut it = pos.split_whitespace().filter_map(|n| n.parse::<f64>().ok());
+    let (lat, lon) = (it.next()?, it.next()?);
+    ((-90.0..=90.0).contains(&lat) && (-180.0..=180.0).contains(&lon)).then_some([lon, lat])
+}
+
+/// Virginia's road closures (VDOT's VaTraffic events from SmarterRoads, JSON keyed by event
+/// id): type, category, location, direction, jurisdiction, `road_closure`, lane conditions,
+/// times, the 511 text, and start, mid and end points (a line from start to end).
+pub fn parse_vdot(text: &str) -> Result<Vec<Closure>> {
+    let v: Json = serde_json::from_str(text).context("VDOT road closures")?;
+    let events = v.as_object().context("VDOT road closures: not an object of events")?;
+    let o = |e: &Json, k: &str| s(e, &format!("orci:{k}"));
+    let t = |e: &Json, k: &str| e.get(format!("orci:{k}")).and_then(Json::as_str).and_then(crate::nws::unix_time);
+    Ok(events
+        .iter()
+        .filter_map(|(id, e)| {
+            let pts: Vec<[f64; 2]> = ["start_point", "end_point"].iter().filter_map(|k| gml_pos(e.get(format!("orci:{k}"))?)).collect();
+            let geometry = match pts.as_slice() {
+                [a, b] if a != b => json!({"type": "LineString", "coordinates": [a, b]}),
+                [a, ..] => json!({"type": "Point", "coordinates": a}),
+                [] => json!({"type": "Point", "coordinates": gml_pos(e.get("orci:mid_point")?)?}),
+            };
+            if o(e, "status").eq_ignore_ascii_case("closed") {
+                // The event itself is over.
+                return None;
+            }
+            let lanes = o(e, "lanes_condition");
+            let impact = if e.get("road_closure").and_then(Json::as_bool) == Some(true) {
+                Impact::Closed
+            } else if lanes.split('|').any(|c| c == "closed") {
+                Impact::Lanes
+            } else {
+                impact_of("", &o(e, "template_511_text"))
+            };
+            let sub = o(e, "event_subcategory");
+            Some(Closure {
+                key: format!("va:{}", id.chars().take(60).collect::<String>()),
+                source: "VDOT road closures (SmarterRoads)",
+                road: o(e, "special_facility"),
+                event: [o(e, "type_event"), sub].into_iter().filter(|x| !x.is_empty()).collect::<Vec<_>>().join(" · "),
+                impact,
+                direction: o(e, "travel_direction"),
+                text: o(e, "template_511_text"),
+                jurisdiction: o(e, "containing_jurisdiction"),
+                start: t(e, "segment_start_time").or_else(|| t(e, "scheduled_start_time")),
+                end: t(e, "segment_stop_time").or_else(|| t(e, "scheduled_stop_time")),
+                geometry,
+                ..Closure::default()
+            })
+        })
+        .collect())
+}
+
 /// Where a source is and how to read it.
 #[derive(Clone, Copy, Debug)]
 pub enum Reader {
@@ -337,6 +393,8 @@ pub enum Reader {
     Fairfax(bool),
     /// A WZDx or CWZ feed.
     Wzdx,
+    /// VDOT's road closures.
+    Vdot,
 }
 
 /// One feed.
@@ -354,7 +412,7 @@ pub struct Feed {
 }
 
 /// The feeds mapterm reads.
-pub const FEEDS: [Feed; 11] = [
+pub const FEEDS: [Feed; 12] = [
     Feed {
         id: "md",
         source: "Maryland road closures (MD iMAP / MDOT SHA)",
@@ -414,6 +472,13 @@ pub const FEEDS: [Feed; 11] = [
         reader: Reader::Wzdx,
         vdot: true,
     },
+    Feed {
+        id: "va",
+        source: "VDOT road closures (SmarterRoads)",
+        url: "https://data.511-atis-ttrip-prod.iteriscloud.com/smarterRoads/other/vDOTRoadClosures/current/RoadClosures_current.json",
+        reader: Reader::Vdot,
+        vdot: true,
+    },
 ];
 
 /// The credit shown while closures are on.
@@ -426,6 +491,7 @@ pub fn parse(feed: &Feed, text: &str) -> Result<Vec<Closure>> {
         Reader::PrinceWilliam(seg) => parse_prince_william(text, seg),
         Reader::Fairfax(r) => parse_fairfax(text, r),
         Reader::Wzdx => parse_wzdx(text, feed.source, feed.id),
+        Reader::Vdot => parse_vdot(text),
     }
 }
 
@@ -584,6 +650,29 @@ mod tests {
     }
 
     #[test]
+    fn reads_virginia() {
+        let va = r#"{"WZNO4295656-10052023-2": {"gml:id": "vat_event_line.VATRAFFIC-WZNO4295656-10052023-2",
+            "orci:type_event": "Road Widening Project Activities", "orci:status": "Open", "orci:special_facility": "On I-66W on the ramp to VA-286S",
+            "orci:travel_direction": "West", "orci:containing_jurisdiction": "Fairfax (County)", "orci:event_subcategory": "WZ - Construction",
+            "orci:lanes_condition": "open|open|open|closed|closed|closed|", "orci:template_511_text": "On I-66W on the ramp to VA-286S, motorists can expect delays.",
+            "road_closure": true, "orci:scheduled_start_time": "2023-10-06T02:00:00Z", "orci:scheduled_stop_time": "2023-10-06T09:00:00Z",
+            "orci:segment_start_time": "2023-10-06T04:00:00Z", "orci:segment_stop_time": "2023-10-06T08:00:00Z",
+            "orci:start_point": {"gml:Point": {"srsName": "urn:x-ogc:def:crs:EPSG:4326", "gml:pos": "38.854679 -77.389861"}},
+            "orci:end_point": {"gml:Point": {"gml:pos": "38.855366 -77.38909"}}},
+          "OLD-1": {"orci:status": "Closed", "orci:start_point": {"gml:Point": {"gml:pos": "38 -77"}}},
+          "LANES-1": {"orci:status": "Open", "road_closure": false, "orci:lanes_condition": "open|closed|",
+            "orci:mid_point": {"gml:Point": {"gml:pos": "37.5 -77.4"}}}}"#;
+        let c = parse_vdot(va).unwrap();
+        assert_eq!(c.len(), 2, "a closed event is left out");
+        let a = c.iter().find(|c| c.key == "va:WZNO4295656-10052023-2").unwrap();
+        assert_eq!((a.impact, a.road.as_str(), a.jurisdiction.as_str(), a.event.as_str()), (Impact::Closed, "On I-66W on the ramp to VA-286S", "Fairfax (County)", "Road Widening Project Activities · WZ - Construction"));
+        assert_eq!(a.geometry["coordinates"][0][0].as_f64(), Some(-77.389861), "lon first");
+        assert_eq!(a.start, crate::nws::unix_time("2023-10-06T04:00:00Z"), "the segment's time first");
+        let b = c.iter().find(|c| c.key == "va:LANES-1").unwrap();
+        assert_eq!((b.impact, b.geometry["type"].as_str()), (Impact::Lanes, Some("Point")));
+    }
+
+    #[test]
     fn shows_what_matters_now() {
         let m = parse_maryland(MD, "Maryland road closures", "md").unwrap();
         let now = 1_796_100_000.0;
@@ -606,7 +695,7 @@ mod tests {
         assert_eq!(l.entries.len(), 5);
         assert_eq!(impact_of("Curb Lane Closure", ""), Impact::Lanes);
         assert_eq!(FEEDS.iter().filter(|f| matches!(f.reader, Reader::Wzdx)).count(), 4);
-        assert_eq!(FEEDS.iter().filter(|f| f.vdot).map(|f| f.id).collect::<Vec<_>>(), vec!["wz-va"]);
+        assert_eq!(FEEDS.iter().filter(|f| f.vdot).map(|f| f.id).collect::<Vec<_>>(), vec!["wz-va", "va"]);
         let u = reqwest::Url::parse_with_params(FEEDS[10].url, &[("token", "a$b/c+d")]).unwrap();
         assert!(u.as_str().ends_with("workZone.json?token=a%24b%2Fc%2Bd"), "{u}");
     }

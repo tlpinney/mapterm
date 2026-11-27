@@ -328,7 +328,7 @@ Road closures and work zones from county, city and state feeds (public, no key):
 | Prince William County, VA | its road closures and incidents |
 | Fairfax County, VA | its emergency management office's road hazards and restrictions (the service has been failing its queries; mapterm tries it each time, and says once if it fails) |
 | MDOT SHA, DelDOT, NJDOT / TRANSCOM | work zones in the national WZDx format |
-| VDOT (Virginia), with your own token | its WZDx work zones, from SmarterRoads |
+| VDOT (Virginia), with your own token | its WZDx work zones and its road closures (VaTraffic: construction, incidents, events, with the 511 text), from SmarterRoads |
 
 Each is a line along the road where the source gives one, else a point. Red is a road
 closed, orange restricted access (emergency or local only), amber lanes closed, yellow
@@ -342,8 +342,8 @@ parade...), the direction, when, the county or city, the text given, and the sou
 feed is asked every 5 minutes.
 
 Virginia's work zones need your own SmarterRoads token: register (free) at
-smarterroads.vdot.virginia.gov, subscribe to the "WorkZone Data eXchange (WZDx)" dataset,
-and its Details page shows your token. Keep it in your password manager and give mapterm a
+smarterroads.vdot.virginia.gov, subscribe to the "WorkZone Data eXchange (WZDx)" and "VDOT
+Road Closures" datasets, and either one's Details page shows your token. Keep it in your password manager and give mapterm a
 command that prints it (or set `VDOT_SMARTERROADS_TOKEN`):
 
 ```sh
