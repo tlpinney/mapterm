@@ -2409,7 +2409,9 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
     for id in ids {
         // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
         // it is the clearest view of them.
-        if id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
+        // So do the other live layers: closures, gauges, fires, quakes.
+        let live = [CLOSURES, GAUGES, FIRES, QUAKES].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')));
+        if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
         }
         let Some(l) = map.layer(&id) else { continue };
@@ -2439,6 +2441,13 @@ fn base_visibility(map: &Map) -> std::collections::HashMap<String, bool> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut a = args()?;
+    // Road closures over rendered roads: Esri's Dark Gray Canvas underneath (quiet greys,
+    // made for overlays, no labels of its own), with mapterm's road and place names on top;
+    // unless another map was asked for.
+    let closures_raster = a.closures && a.raster.is_none() && a.source.is_none() && a.style.is_none() && !a.light;
+    if closures_raster {
+        a.raster = Some("esri-dark".into());
+    }
     let _ = ZONE.set(if a.utc { mapterm::clock::Zone::Utc } else { mapterm::clock::Zone::Local });
     // --at here: ask the location helper before anything depends on the start view.
     let mut me: Option<mapterm::locate::Fix> = None;
@@ -2826,7 +2835,7 @@ async fn main() -> Result<()> {
     let mut base = base_visibility(&map);
     let mut labels = !a.no_labels;
     // Vector overlay: 0 = everything (no fills over a raster), 1 = labels only, 2 = off.
-    let mut vector: u8 = 0;
+    let mut vector: u8 = if closures_raster { 1 } else { 0 };
     apply_toggles(&mut map, &base, labels, vector, raster.is_some());
 
     let sem = Arc::new(Semaphore::new(VECTOR_SLOTS));
