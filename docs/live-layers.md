@@ -292,6 +292,28 @@ A state with a public feed of its own can be added as a few lines in `src/outage
 (`FEEDS`): its layers' URLs and which fields hold what. Its counties then come from it rather
 than from ODIN.
 
+## Earthquakes
+
+```
+mapterm --quakes --at 20,-150 -z 2          # the past day, worldwide
+mapterm --quakes week                       # the past week, M2.5 and up
+```
+
+Earthquakes from the USGS real-time feeds (public domain, no key): `hour` or `day` (the
+default) has every magnitude, `week` M2.5 and up, `month` M4.5 and up. As on USGS's own map,
+the symbol grows with the magnitude (· under 2.5, • from 2.5, ● from 4.5, ⬤ from 6) and the
+color goes by age: red the past hour, orange the past day, yellow the past week. Quakes from
+M4.5 show their magnitude. The status line has how many and the largest (◉ 254 quakes (past
+day) · M5.7), and the legend counts them by age.
+
+Click one for its magnitude and type, where, when, depth, "Did You Feel It?" reports, USGS's
+PAGER alert level, the tsunami flag (a large quake in an oceanic region, not a warning),
+whether it's reviewed or automatic, and its USGS event page. The feeds also list quarry
+blasts and ice quakes; their panel says so.
+
+USGS updates the feeds every minute, and mapterm asks once a minute with
+`If-Modified-Since`.
+
 ## Legends
 
 Whatever is colored gets a legend in the map's lower left, with how many of each:

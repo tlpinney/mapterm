@@ -6,6 +6,15 @@ All notable changes to mapterm are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Earthquakes: `--quakes [hour|day|week|month]` draws earthquakes worldwide from the USGS
+  real-time feeds (public domain, no key; all magnitudes for the past hour or day, M2.5+ for
+  the week, M4.5+ for the month), sized by magnitude and colored by age as on USGS's map,
+  with the larger ones' magnitudes. Click one for its magnitude, place, time, depth, felt
+  reports, PAGER alert, tsunami flag, status and USGS page. Asked for once a minute with
+  `If-Modified-Since`. `mapterm::quakes`.
+
 ## [0.6.0] - 2026-11-26
 
 Power outages: customers without power by county across the US from ODIN, and by town and
