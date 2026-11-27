@@ -292,6 +292,25 @@ A state with a public feed of its own can be added as a few lines in `src/outage
 (`FEEDS`): its layers' URLs and which fields hold what. Its counties then come from it rather
 than from ODIN.
 
+## Wildfires
+
+```
+mapterm --fires --at 40,-112 -z 4
+```
+
+US wildfires from the National Interagency Fire Center's WFIGS service (public, no key):
+every current incident as a point, and the perimeter of each fire still burning. Wildfires
+are ✹, red under 50% contained, orange to 99%, grey once contained; prescribed burns are a
+green ◇. Fires of 1,000 acres or more show their names. Perimeters are translucent areas in
+the fire's color (image tiles where the terminal shows images, braille elsewhere). The status
+line has the count (✹ 153 wildfires · 45 perimeters), and the legend counts them by
+containment.
+
+Click a fire, or its perimeter, for its size, containment, fire behavior, cause, when it was
+discovered and last updated, the people assigned, and whether its perimeter is mapped. For
+evacuations, follow local officials. NIFC caches the layers for 5 minutes, and mapterm asks
+every 5 minutes with each layer's ETag. With `--fires` the map switches to `mapterm-weather`.
+
 ## Earthquakes
 
 ```

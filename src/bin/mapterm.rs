@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--fires] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -120,6 +120,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 grows with the magnitude; red the past hour, orange the past day, yellow
                 the past week. Click one for its magnitude, depth, time, felt reports,
                 PAGER alert and USGS page. Asked for once a minute
+  --fires       US wildfires from NIFC's WFIGS service (no key): current incidents, ✹
+                colored by containment (◇ prescribed burns), and the perimeters of those
+                still burning; click one for its size, containment, cause and dates.
+                Asked for every 5 minutes
   --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
                 this computer's time zone
   --sondes      live weather balloons (radiosondes) from SondeHub, tracked by amateur
@@ -231,6 +235,8 @@ struct Args {
     sondes: bool,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
+    /// --fires: US wildfires from NIFC.
+    fires: bool,
     /// --quakes: earthquakes from USGS, for this period.
     quakes: Option<mapterm::quakes::Period>,
     /// --outages: power outages (Pennsylvania, Maryland).
@@ -292,6 +298,7 @@ fn args() -> Result<Args> {
         alerts: false,
         outages: false,
         quakes: None,
+        fires: false,
         utc: false,
         sats: None,
         sats_country: Vec::new(),
@@ -405,6 +412,7 @@ fn args() -> Result<Args> {
             "--radar" => a.radar = true,
             "--alerts" => a.alerts = true,
             "--outages" => a.outages = true,
+            "--fires" | "--wildfires" => a.fires = true,
             "--quakes" | "--earthquakes" => {
                 // The period is optional: take the next argument only if it's one.
                 let p = it.next_if(|n| mapterm::quakes::Period::parse(n).is_some());
@@ -645,6 +653,12 @@ const SHIPS: &str = "ships";
 /// The --sondes source and layer, and its trail image.
 const BALLOONS: &str = "balloons";
 const QUAKES: &str = "quakes";
+const FIRES: &str = "fires";
+const FIRE_AREAS: &str = "fire-areas";
+/// The fire perimeters' style layers (braille, where the terminal doesn't show images).
+const FIRE_LAYERS: [&str; 3] = ["fire-areas-fill", "fire-areas-line", "fire-areas-selected"];
+/// The fire perimeters as image tiles drawn here (where it does).
+const FIRE_TILES: &str = "fire-tiles";
 const BALLOON_TRAIL_IMAGE: u32 = 4_000_000_004;
 /// --sondes draws balloons this many seconds in the past (they report about once a second).
 const SONDE_DELAY: f64 = 5.0;
@@ -1534,6 +1548,64 @@ fn draw_alert(f: &mut ratatui::Frame, area: Rect, al: &mapterm::nws::Alert) {
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
 }
 
+/// What the --fires task sends.
+enum FireMsg {
+    /// The current incidents.
+    Incidents(Vec<mapterm::fires::Fire>),
+    /// The current perimeters, by incident.
+    Perimeters(std::collections::HashMap<String, serde_json::Value>),
+    /// Why a request failed.
+    Error(String),
+}
+
+/// The --fires panel for the selected incident.
+fn draw_fire(f: &mut ratatui::Frame, area: Rect, fi: &mapterm::fires::Fire, has_perimeter: bool) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(format!(" {} ", fi.kind_name()));
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let (r, g, b) = mapterm::fires::rgb(fi);
+    let key = |k: &str| Span::styled(format!(" {k:<10}"), dim);
+    let mut l = vec![Line::from(Span::styled(format!(" {}", fi.title()), TStyle::new().fg(Color::Rgb(r, g, b)).add_modifier(Modifier::BOLD)))];
+    let place = [fi.county.as_str(), fi.state.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(", ");
+    if !place.is_empty() {
+        l.push(Line::from(Span::styled(format!(" {place}"), dim)));
+    }
+    l.push(Line::default());
+    if let Some(a) = fi.acres {
+        l.push(Line::from(vec![key("size"), Span::raw(format!("{} acres ({:.1} km²)", thousands(a.round() as usize), a * 0.004_046_86))]));
+    }
+    if let Some(c) = fi.contained {
+        l.push(Line::from(vec![key("contained"), Span::styled(format!("{c:.0}%"), TStyle::new().fg(Color::Rgb(r, g, b)))]));
+    }
+    if !fi.behavior.is_empty() {
+        l.push(Line::from(vec![key("behavior"), Span::raw(fi.behavior.clone())]));
+    }
+    if !fi.cause.is_empty() {
+        l.push(Line::from(vec![key("cause"), Span::raw(fi.cause.clone())]));
+    }
+    if let Some(t) = fi.discovered {
+        l.push(Line::from(vec![key("discovered"), Span::raw(day_hhmm(t))]));
+    }
+    if let Some(n) = fi.personnel.filter(|n| *n > 0) {
+        l.push(Line::from(vec![key("personnel"), Span::raw(thousands(n as usize))]));
+    }
+    if let Some(t) = fi.modified {
+        l.push(Line::from(vec![key("updated"), Span::raw(day_hhmm(t))]));
+    }
+    l.push(Line::from(vec![key("perimeter"), Span::styled(if has_perimeter { "mapped" } else { "not mapped" }, dim)]));
+    if !fi.unique.is_empty() {
+        l.push(Line::from(vec![key("id"), Span::styled(fi.unique.clone(), dim)]));
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(" From NIFC (WFIGS). For evacuations, follow local officials.", dim)));
+    l.push(Line::from(Span::styled(" esc close", dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
 /// The --quakes panel for the selected earthquake.
 fn draw_quake(f: &mut ratatui::Frame, area: Rect, q: &mapterm::quakes::Quake) {
     use ratatui::style::Modifier;
@@ -2191,7 +2263,7 @@ async fn main() -> Result<()> {
         let schema = detect_schema(&src, &cam).await;
         // Watching weather over the default basemap: the weather style; aircraft, ships or
         // satellites alone, the aviation style; unless --light.
-        if (a.radar || a.alerts || a.outages) && a.source.is_none() && !a.light {
+        if (a.radar || a.alerts || a.outages || a.fires) && a.source.is_none() && !a.light {
             map = Map::weather(src, schema)?;
         } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some()) && a.source.is_none() && !a.light {
             map = Map::aviation(src, schema)?;
@@ -2211,7 +2283,7 @@ async fn main() -> Result<()> {
     let builtin_source = a.source.clone().unwrap_or_else(|| OPENFREEMAP.to_string());
     let mut styles: Vec<String> = a.style.iter().cloned().collect();
     let default_dark = a.style.is_none() && a.source.is_none() && !a.light;
-    if (a.radar || a.alerts || a.outages) && default_dark {
+    if (a.radar || a.alerts || a.outages || a.fires) && default_dark {
         styles.push(WEATHER.to_string());
     } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some()) && default_dark {
         styles.push(AVIATION.to_string());
@@ -2361,6 +2433,20 @@ async fn main() -> Result<()> {
             }
         }
     }
+    // Wildfire perimeters (--fires): over the outages, under the alerts.
+    let fire_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
+    if a.fires {
+        map.add_source(FIRE_AREAS, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
+        map.set_attribution(FIRE_AREAS, mapterm::fires::CREDIT)?;
+        map.add_layers(mapterm::fires::perimeter_layers(FIRE_AREAS)?, None)?;
+        if mapterm::kitty::supported() {
+            map.add_source(FIRE_TILES, MapSource::raster(mapterm::areas::tile_source(fire_tiles.clone(), "fires", mapterm::fires::CREDIT)?))?;
+            map.add_layer(mapterm::StyleLayer::raster(FIRE_TILES, FIRE_TILES))?;
+            for id in FIRE_LAYERS {
+                map.set_visibility(id, false)?;
+            }
+        }
+    }
     // Weather alerts (--alerts): under everything that moves.
     let alert_tiles = std::sync::Arc::new(mapterm::nws::AlertTiles::default());
     if a.alerts {
@@ -2423,6 +2509,14 @@ async fn main() -> Result<()> {
         map.set_attribution(QUAKES, mapterm::quakes::CREDIT)?;
         let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
         map.add_layers(vec![mapterm::quakes::layer(QUAKES, QUAKES)], above.as_deref())?;
+    }
+    // Wildfire incidents (--fires), with the quakes.
+    if a.fires {
+        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
+        map.add_source(FIRES, MapSource::geojson(&empty)?)?;
+        map.set_attribution(FIRES, mapterm::fires::CREDIT)?;
+        let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
+        map.add_layers(vec![mapterm::fires::layer(FIRES, FIRES)], above.as_deref())?;
     }
     // Satellites (--sats), over everything else that moves.
     if a.sats.is_some() {
@@ -3048,6 +3142,54 @@ async fn main() -> Result<()> {
     // --quakes: the USGS feed once a minute (with If-Modified-Since).
     let mut quakes: Vec<mapterm::quakes::Quake> = Vec::new();
     let mut selected_quake: Option<String> = None;
+    // --fires: incidents and perimeters every 5 minutes (each with its ETag).
+    let mut fires: Vec<mapterm::fires::Fire> = Vec::new();
+    let mut fire_perimeters: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let mut selected_fire: Option<String> = None;
+    let mut fires_new = false;
+    let mut fires_shown_selected: Option<String> = None;
+    let (ftx, mut frx) = mpsc::unbounded_channel::<FireMsg>();
+    if a.fires {
+        tokio::spawn(async move {
+            let (mut inc_tag, mut per_tag) = (None::<String>, None::<String>);
+            loop {
+                let mut failed = false;
+                let m = match mapterm::fires::incidents(inc_tag.as_deref()).await {
+                    Ok(Some((f, t))) => {
+                        inc_tag = t;
+                        Some(FireMsg::Incidents(f))
+                    }
+                    Ok(None) => None,
+                    Err(e) => {
+                        failed = true;
+                        Some(FireMsg::Error(format!("{e:#}")))
+                    }
+                };
+                if let Some(m) = m
+                    && ftx.send(m).is_err()
+                {
+                    return;
+                }
+                let m = match mapterm::fires::perimeters(per_tag.as_deref()).await {
+                    Ok(Some((p, t))) => {
+                        per_tag = t;
+                        Some(FireMsg::Perimeters(p))
+                    }
+                    Ok(None) => None,
+                    Err(e) => {
+                        failed = true;
+                        Some(FireMsg::Error(format!("{e:#}")))
+                    }
+                };
+                if let Some(m) = m
+                    && ftx.send(m).is_err()
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(if failed { 600 } else { 300 })).await;
+            }
+        });
+    }
     let mut quakes_new = false;
     let mut quakes_drawn = Instant::now();
     let mut quakes_shown_selected: Option<String> = None;
@@ -3333,8 +3475,9 @@ async fn main() -> Result<()> {
                 let alert = selected_alert.as_ref().and_then(|id| alerts.iter().find(|a| &a.id == id));
                 let outage = selected_outage.as_deref().and_then(|k| outages.find(k));
                 let quake = selected_quake.as_deref().and_then(|id| quakes.iter().find(|q| q.id == id));
+                let fire = selected_fire.as_deref().and_then(|id| fires.iter().find(|f| f.id == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || balloon.is_some() {
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || balloon.is_some() {
                         52.min(main.width / 2)
                     } else {
                         0
@@ -3359,6 +3502,9 @@ async fn main() -> Result<()> {
                     }
                     if a.outages {
                         legends.extend(outages.legends(mapterm::outages::Level::at(cam.zoom)));
+                    }
+                    if a.fires && !fires.is_empty() {
+                        legends.push(mapterm::fires::legend(&fires));
                     }
                     if a.quakes.is_some() && !quakes.is_empty() {
                         legends.push(mapterm::quakes::legend(&quakes, unix_now()));
@@ -3396,6 +3542,10 @@ async fn main() -> Result<()> {
                     }
                     _ if let Some(s) = ship => {
                         draw_ship(f, panel, s, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if let Some(fi) = fire => {
+                        draw_fire(f, panel, fi, fire_perimeters.contains_key(&fi.id));
                         Vec::new()
                     }
                     _ if let Some(q) = quake => {
@@ -3529,6 +3679,12 @@ async fn main() -> Result<()> {
                     let have = want.iter().filter(|z| alert_zones.contains_key(**z)).count();
                     let more = if have < want.len() { format!(" (areas {have}/{})", want.len()) } else { String::new() };
                     spans.push(Span::styled(format!("⚠ {now_in}{more} "), TStyle::new().fg(Color::Rgb(0xff, 0xa6, 0x4d))));
+                }
+                if a.fires {
+                    let st = TStyle::new().fg(Color::Rgb(0xff, 0x45, 0x3a));
+                    let wild = fires.iter().filter(|f| f.kind != "RX").count();
+                    let text = if fires.is_empty() { "✹ … ".to_string() } else { format!("✹ {wild} wildfires · {} perimeters ", fire_perimeters.len()) };
+                    spans.push(Span::styled(text, st));
                 }
                 if let Some(period) = a.quakes {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x9f, 0x0a));
@@ -3963,6 +4119,14 @@ async fn main() -> Result<()> {
                 map.set_data(QUAKES, &mapterm::quakes::points(&quakes, unix_now(), selected_quake.as_deref()))?;
                 (quakes_new, quakes_drawn, quakes_shown_selected) = (false, Instant::now(), selected_quake.clone());
             }
+            // Fires: again when new data comes or another is selected.
+            if a.fires && (fires_new || selected_fire != fires_shown_selected) {
+                map.set_data(FIRES, &mapterm::fires::points(&fires, selected_fire.as_deref()))?;
+                map.set_data(FIRE_AREAS, &mapterm::fires::perimeter_features(&fires, &fire_perimeters, selected_fire.as_deref()))?;
+                fire_tiles.set(mapterm::fires::shapes(&fires, &fire_perimeters, selected_fire.as_deref()));
+                map.put_raster_tile(FIRE_TILES, None, true);
+                (fires_new, fires_shown_selected) = (false, selected_fire.clone());
+            }
             if a.sondes && !balloons.is_empty() && balloons_drawn.elapsed() >= Duration::from_millis(250) {
                 balloons_drawn = Instant::now();
                 balloons.prune(unix_now());
@@ -4169,6 +4333,26 @@ async fn main() -> Result<()> {
                             note = Some((Instant::now(), format!("alerts: {e:#}")));
                         }
                     }
+                }
+                Some(m) = frx.recv() => {
+                    match m {
+                        FireMsg::Incidents(f) => {
+                            dlog(|| format!("fires: {} incidents", f.len()));
+                            fires = f;
+                            if selected_fire.as_ref().is_some_and(|id| !fires.iter().any(|f| &f.id == id)) {
+                                selected_fire = None;
+                            }
+                        }
+                        FireMsg::Perimeters(p) => {
+                            dlog(|| format!("fires: {} perimeters", p.len()));
+                            fire_perimeters = p;
+                        }
+                        FireMsg::Error(e) => {
+                            dlog(|| format!("fires: {e}"));
+                            note = Some((Instant::now(), format!("fires: {e}")));
+                        }
+                    }
+                    fires_new = true;
                 }
                 Some(r) = qrx.recv() => {
                     match r {
@@ -4681,7 +4865,8 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
                                         });
                                     }
-                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some() || selected_outage.is_some() || selected_quake.is_some() || selected_balloon.is_some()) && !inspect => {
+                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some() || selected_outage.is_some() || selected_quake.is_some() || selected_fire.is_some() || selected_balloon.is_some()) && !inspect => {
+                                        selected_fire = None;
                                         selected_quake = None;
                                         selected_alert = None;
                                         selected_outage = None;
@@ -4966,7 +5151,7 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() {
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires {
                                         // A click on (or next to) an aircraft, else a balloon, else a
                                         // ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
@@ -5003,12 +5188,25 @@ async fn main() -> Result<()> {
                                             selected = None;
                                             selected_ship = None;
                                             selected_alert = None;
+                                        } else if let Some(id) = mapterm::fires::nearest(&fires, &vp, dot, 4.0).or_else(|| {
+                                            // Or the perimeter under the click.
+                                            map.query_features(&last_cam, map_area, dot)
+                                                .iter()
+                                                .filter(|p| p.source.as_deref() == Some(FIRE_AREAS))
+                                                .find_map(|p| p.prop("id").and_then(|v| v.as_str()).map(str::to_string))
+                                        }) {
+                                            selected_fire = Some(id);
+                                            (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake) =
+                                                (None, None, None, None, None, None, None);
+                                            follow = false;
                                         } else if let Some(id) = mapterm::quakes::nearest(&quakes, unix_now(), &vp, dot, 4.0) {
+                                            selected_fire = None;
                                             selected_quake = Some(id);
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage) = (None, None, None, None, None, None);
                                             follow = false;
                                         } else if a.alerts || a.outages {
                                             selected_quake = None;
+                                            selected_fire = None;
                                             let hits = map.query_features(&last_cam, map_area, dot);
                                             // An alert area under the click: the most severe.
                                             selected_alert = hits

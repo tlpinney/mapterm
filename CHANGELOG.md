@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Wildfires: `--fires` draws the US's current wildland fire incidents from NIFC's WFIGS
+  service (public, no key) as points (✹ wildfires colored by containment, ◇ prescribed
+  burns), with the perimeters of those still burning as areas. Click one for its size,
+  containment, behavior, cause, dates and people assigned. Both layers every 5 minutes with
+  their ETags. `mapterm::fires`.
+
 - Earthquakes: `--quakes [hour|day|week|month]` draws earthquakes worldwide from the USGS
   real-time feeds (public domain, no key; all magnitudes for the past hour or day, M2.5+ for
   the week, M4.5+ for the month), sized by magnitude and colored by age as on USGS's map,
