@@ -223,8 +223,15 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · / search · i inspect · m next style · t theme ·
-      c copy coordinates · v vector overlay · n labels · q quit
+      +/- zoom · sideways swipe pans · / search · i inspect · b base maps · m/M next or
+      previous base map · ' the one before · t theme · c copy coordinates · v vector overlay ·
+      n labels · q quit
+
+base maps (b): a list of the map styles and imagery (satellite and aerial photos; keyed
+      providers once their key is set) in the middle of the map; up/down (j/k) preview the
+      chosen one after a moment, typing filters, enter keeps it, esc goes back. Imagery goes
+      under the style's roads and names (v: all, names only, none). Space or click toggles
+      labels and the overlay without closing.
 
 search (/): type a place and press enter; one match flies there, several open a list
       (up/down or tab, enter or click to fly); esc clears the marker. Uses Photon
@@ -634,6 +641,86 @@ async fn load_basemap(spec: &str, source: &str, dark: bool, cam: Camera) -> Resu
     }
 }
 
+/// Imagery layers: source and layer id, the provider, and the zoom it shows from (bottom first;
+/// the last is "the" imagery for credits and billing).
+type ImageryLayers = Vec<(String, Arc<mapterm::raster::RasterSource>, f64)>;
+/// A base map switch's imagery, loaded: its spec, and its layers (none: no imagery).
+type ImageryDone = (String, Result<ImageryLayers>);
+
+/// Imagery requests a minute: --raster-limit's, else 300 for keyed (billed) providers.
+fn imagery_limiter(limit: Option<Option<u32>>, billed: bool) -> Option<Bucket> {
+    match limit {
+        Some(n) => n,
+        None if billed => Some(300),
+        None => None,
+    }
+    .map(|n| Bucket::new(n.max(1)))
+}
+
+/// A provider for the base map switcher, keyed from the environment (or Mapbox's token).
+async fn open_preset(name: &str, max_zoom: Option<u8>, cache: Option<bool>) -> Result<mapterm::raster::RasterSource> {
+    let p = mapterm::raster::preset(name).with_context(|| format!("no imagery called {name}"))?;
+    let mut key = mapterm::raster::find_key(None, p.key_env)?;
+    if key.is_none() && p.name == "mapbox" {
+        key = mapterm::mapbox::access_token();
+    }
+    let mut r = mapterm::raster::RasterSource::from_preset(p, key)?;
+    if let Some(z) = max_zoom {
+        r.max_zoom = r.max_zoom.min(z);
+    }
+    r.start_session().await?;
+    let missing = r.missing_params();
+    if !missing.is_empty() {
+        bail!("{name} needs {}", missing.iter().map(|m| format!("{{{m}}}")).collect::<Vec<_>>().join(", "));
+    }
+    if let Some(c) = cache {
+        r.cache = c;
+    }
+    Ok(r)
+}
+
+/// Imagery for the base map switcher: a provider, or a stack of them (`planetary`), each
+/// layer under its own source id so tiles still loading for other imagery don't land in it.
+async fn open_imagery(spec: String, cache: Option<bool>, cam: Camera) -> Result<ImageryLayers> {
+    if let Some(st) = mapterm::raster::stack(&spec) {
+        let mut v = Vec::new();
+        for (i, sl) in st.layers.iter().enumerate() {
+            let r = open_preset(sl.preset, sl.max_zoom, cache).await?;
+            v.push((format!("{RASTER}-{spec}-{i}"), Arc::new(r), sl.min_zoom as f64));
+        }
+        return Ok(v);
+    }
+    let mut r = open_preset(&spec, None, cache).await?;
+    if r.is_google() {
+        let span = 360.0 / 2f64.powf(cam.zoom) * 2.0;
+        let bounds = ((cam.lat + span * 0.4).min(85.0), (cam.lat - span * 0.4).max(-85.0), cam.lon + span, cam.lon - span);
+        if let Ok(c) = r.google_credits(cam.zoom.round().clamp(0.0, 22.0) as u8, bounds).await {
+            r.attribution = c;
+        }
+    }
+    Ok(vec![(format!("{RASTER}-{spec}"), Arc::new(r), 0.0)])
+}
+
+/// Swap the imagery under the map for `layers` (none: take it away).
+fn set_imagery(map: &mut Map, layers: &ImageryLayers) -> Result<()> {
+    let old: Vec<String> = map.layer_ids().into_iter().filter(|id| is_imagery(id)).map(str::to_string).collect();
+    let ids: Vec<&str> = old.iter().map(String::as_str).collect();
+    map.remove_layers(&ids);
+    let sources: Vec<String> = map.sources().map(|(id, _)| id.to_string()).filter(|id| is_imagery(id)).collect();
+    for id in &sources {
+        map.remove_source(id);
+    }
+    if layers.is_empty() {
+        return Ok(());
+    }
+    let bottom = map.layer_ids().first().map(|s| s.to_string());
+    for (id, r, _) in layers {
+        map.add_source(id, MapSource::raster(r.clone()))?;
+    }
+    map.add_layers(layers.iter().map(|(id, _, z)| StyleLayer::raster(id, id).min_zoom(*z)).collect(), bottom.as_deref())?;
+    Ok(())
+}
+
 /// GeoJSON layers with more single points than this cluster them.
 const CLUSTER_ABOVE: usize = 1000;
 
@@ -1024,7 +1111,9 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
         (
             "look",
             vec![
-                ("m", "next style"),
+                ("b", "base maps: styles and imagery"),
+                ("m M", "next or previous base map"),
+                ("'", "back to the base map before"),
                 ("t", "light or dark"),
                 ("n", "labels on or off"),
                 ("v", "vector overlay: all, labels, none"),
@@ -1407,6 +1496,94 @@ fn draw_finder(f: &mut ratatui::Frame, area: Rect, fd: &Finder) {
         })
         .collect();
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The base map switcher (b): a box in the middle of the map with the styles, the imagery and
+/// what's drawn over it. Returns the box and each row's screen line, for clicks.
+#[allow(clippy::too_many_arguments)]
+fn draw_switcher(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    sw: &mapterm::basemaps::Switcher,
+    list: &[mapterm::basemaps::Entry],
+    current: usize,
+    loading: bool,
+    labels: bool,
+    vector: u8,
+) -> (Rect, Vec<(u16, mapterm::basemaps::Row)>) {
+    use mapterm::basemaps::Row;
+    use ratatui::style::Modifier;
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let accent = Color::Rgb(127, 178, 255);
+    let head = TStyle::new().fg(accent).add_modifier(Modifier::BOLD);
+    // Lines: section headings (while nothing is typed) and rows.
+    let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
+    let width = 58u16.min(area.width.saturating_sub(4));
+    let w = width.saturating_sub(4) as usize;
+    let mut section = "";
+    for (n, row) in sw.rows.iter().enumerate() {
+        let name = match row {
+            Row::Base(i) if list[*i].base.is_imagery() => "imagery",
+            Row::Base(_) => "maps",
+            _ => "over the map",
+        };
+        if sw.query.is_empty() && name != section {
+            if !section.is_empty() {
+                lines.push((None, Line::raw("")));
+            }
+            lines.push((None, Line::styled(format!(" {name}"), head)));
+            section = name;
+        }
+        let (mark, label, detail) = match row {
+            Row::Base(i) => {
+                let e = &list[*i];
+                let mark = if *i == current && loading { "◌" } else if *i == current { "●" } else { "○" };
+                let detail = if e.keyed { format!("{} · key", e.detail) } else { e.detail.clone() };
+                (mark, e.label.clone(), detail)
+            }
+            Row::Labels => (if labels { "☑" } else { "☐" }, "labels".to_string(), "place and road names · n".to_string()),
+            Row::Vector => {
+                let state = ["roads and names", "names only", "nothing"][vector.min(2) as usize];
+                ("▤", "over imagery".to_string(), format!("{state} · v"))
+            }
+        };
+        let left = format!(" {mark} {label}");
+        let room = w.saturating_sub(left.chars().count() + 2);
+        let detail: String = if detail.chars().count() > room { format!("{}…", detail.chars().take(room.saturating_sub(1)).collect::<String>()) } else { detail };
+        let pad = " ".repeat(w.saturating_sub(left.chars().count() + detail.chars().count()));
+        let chosen = n == sw.sel;
+        let st = if chosen { TStyle::new().add_modifier(Modifier::REVERSED) } else { TStyle::new() };
+        let dst = if chosen { st } else { dim };
+        lines.push((Some(n), Line::from(vec![Span::styled(left, st), Span::styled(format!("{pad}{detail} "), dst)])));
+    }
+    if sw.rows.is_empty() {
+        lines.push((None, Line::styled(" nothing matches", dim)));
+    }
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2)).max(3);
+    let rect = Rect { x: area.x + (area.width.saturating_sub(width)) / 2, y: area.y + (area.height.saturating_sub(height)) / 2, width, height };
+    let title = if sw.query.is_empty() { " base maps ".to_string() } else { format!(" base maps · {} ", sw.query) };
+    let block = Block::bordered()
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(TStyle::new().fg(accent))
+        .title(Span::styled(title, head))
+        .title_bottom(Line::styled(" ↑↓ preview · enter keep · space toggle · esc back ", dim).right_aligned());
+    let inner = block.inner(rect);
+    f.render_widget(ratatui::widgets::Clear, rect);
+    f.render_widget(block, rect);
+    // Keep the chosen row in view.
+    let rows = inner.height as usize;
+    let at = lines.iter().position(|(n, _)| *n == Some(sw.sel)).unwrap_or(0);
+    let first = (at + 1).saturating_sub(rows);
+    let mut hits = Vec::new();
+    let mut shown = Vec::new();
+    for (k, (n, line)) in lines.into_iter().skip(first).take(rows).enumerate() {
+        if let Some(n) = n {
+            hits.push((inner.y + k as u16, sw.rows[n]));
+        }
+        shown.push(line);
+    }
+    f.render_widget(Paragraph::new(shown), inner);
+    (rect, hits)
 }
 
 /// The --sats source and layer.
@@ -2772,9 +2949,17 @@ async fn main() -> Result<()> {
         }
     }
     let mut style_at = 0usize;
+    // The base maps `b`, `m`, `M` and `'` switch between: the styles, then imagery (the
+    // providers that need no key, or whose key is set; and what --raster named).
+    let bases = mapterm::basemaps::entries(&styles, a.raster.as_deref(), |p| {
+        mapterm::raster::find_key(None, p.key_env).ok().flatten().is_some() || (p.name == "mapbox" && mapterm::mapbox::access_token().is_some())
+    });
+    let mut base_at = a.raster.as_deref().and_then(|r| bases.iter().position(|e| e.base == mapterm::basemaps::Base::Imagery(r.to_string()))).unwrap_or(0);
 
-    // Optional raster layer under the vector map.
-    let raster = match &a.raster {
+    // Optional raster layer under the vector map; its layers are kept for the base map
+    // switcher to put back.
+    let mut start_imagery: ImageryLayers = Vec::new();
+    let mut raster = match &a.raster {
         // Several providers by zoom (`planetary`): each its own source and layer, bottom
         // first; the top one is "the" imagery for the status bar.
         Some(spec) if let Some(st) = mapterm::raster::stack(spec) => {
@@ -2796,6 +2981,7 @@ async fn main() -> Result<()> {
                 let r = Arc::new(r);
                 map.add_source(&id, MapSource::raster(r.clone()))?;
                 layers.push(StyleLayer::raster(&id, &id).min_zoom(sl.min_zoom as f64));
+                start_imagery.push((id, r.clone(), sl.min_zoom as f64));
                 top = Some(r);
             }
             map.add_layers(layers, bottom.as_deref())?;
@@ -2866,6 +3052,7 @@ async fn main() -> Result<()> {
                 r.attribution = t.clone();
             }
             let r = Arc::new(r);
+            start_imagery.push((RASTER.to_string(), r.clone(), 0.0));
             map.add_source(RASTER, MapSource::raster(r.clone()))?;
             let bottom = map.layer_ids().first().map(|s| s.to_string());
             map.add_layers(vec![StyleLayer::raster(RASTER, RASTER)], bottom.as_deref())?;
@@ -3211,7 +3398,8 @@ async fn main() -> Result<()> {
 
     // Raster drawing: real images with kitty graphics, else cell background colors.
     let has_raster = map.sources().any(|(_, s)| matches!(s, MapSource::Raster(_)));
-    let kitty = (has_raster || a.radar) && mapterm::kitty::supported();
+    // Imagery picked later (b, m) turns it on then.
+    let mut kitty = (has_raster || a.radar) && mapterm::kitty::supported();
     // Experimental pixel mode: fills and lines as an image, labels as text (MAPTERM_PIXELS=1).
     let pixels_on = std::env::var("MAPTERM_PIXELS").is_ok_and(|v| !v.is_empty() && v != "0") && mapterm::kitty::supported();
     // Tile images placed last frame, to take down the ones that left the view.
@@ -3254,7 +3442,8 @@ async fn main() -> Result<()> {
     if trails_kitty {
         let _ = map.set_visibility(TRAILS, false);
     }
-    let shm = (kitty || pixels_on || trails_kitty) && mapterm::kitty::shm_supported();
+    // Asked wherever images can show, for imagery the base map switcher may add later.
+    let shm = (mapterm::kitty::supported() || pixels_on || trails_kitty) && mapterm::kitty::shm_supported();
     dlog(|| format!("kitty medium: {}", if shm { "shared memory" } else { "inline" }));
     kstate.shm = kitty && shm;
     let pixels_shm = shm;
@@ -3383,19 +3572,32 @@ async fn main() -> Result<()> {
     let (gtx, mut grx) = mpsc::unbounded_channel::<(String, Result<Vec<mapterm::geocode::Place>>)>();
     // Style switching (m) loads on a task; the pointer (dots in the map) is for c.
     let (stx, mut srx) = mpsc::unbounded_channel::<StyleDone>();
+    // Base map switching: the one asked for (applied once nothing is loading), the one before
+    // (for `'`), imagery loading, the switcher (b) and when its choice last moved (it previews
+    // after a pause), and the imagery loaded so far, to put back without asking again.
+    let mut want_base: Option<usize> = None;
+    let mut base_prev: Option<usize> = None;
+    let (itx, mut irx) = mpsc::unbounded_channel::<ImageryDone>();
+    let mut imagery_loading: Option<String> = None;
+    let mut switcher: Option<mapterm::basemaps::Switcher> = None;
+    let mut switcher_moved: Option<Instant> = None;
+    let mut switcher_rows: Vec<(u16, mapterm::basemaps::Row)> = Vec::new();
+    let mut switcher_rect = Rect::default();
+    let mut imagery_kept: std::collections::HashMap<String, ImageryLayers> = std::collections::HashMap::new();
+    if let Some(spec) = &a.raster
+        && !start_imagery.is_empty()
+    {
+        imagery_kept.insert(spec.clone(), start_imagery.clone());
+    }
+    let mut raster_id = start_imagery.last().map_or(RASTER.to_string(), |l| l.0.clone());
     let mut style_loading: Option<String> = None;
     let mut pointer: Option<(f64, f64)> = None;
     // Google's credits follow the view: once it has stayed on a new spot for a moment, ask
     // for the credits there (a quarter of the view's width counts as a new spot).
-    let google = raster.as_ref().filter(|r| r.is_google()).cloned();
-    let billed_raster = raster.as_ref().is_some_and(|r| r.is_google() || r.wants_key());
+    let mut google = raster.as_ref().filter(|r| r.is_google()).cloned();
+    let mut billed_raster = raster.as_ref().is_some_and(|r| r.is_google() || r.wants_key());
     // Imagery requests a minute: a bucket that holds a minute's worth and refills steadily.
-    let mut limiter = match a.raster_limit {
-        Some(n) => n,
-        None if billed_raster => Some(300),
-        None => None,
-    }
-    .map(|n| Bucket::new(n.max(1)));
+    let mut limiter = imagery_limiter(a.raster_limit, billed_raster);
     let mut held_back = false;
     let mut throttled_at: Option<Instant> = None;
     let (ctx, mut crx) = mpsc::unbounded_channel::<Result<String>>();
@@ -4463,6 +4665,14 @@ async fn main() -> Result<()> {
                     }
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
+                // The base map switcher over everything on the map.
+                (switcher_rect, switcher_rows) = match &switcher {
+                    Some(sw) => {
+                        let loading = style_loading.is_some() || imagery_loading.is_some() || want_base.is_some();
+                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector)
+                    }
+                    None => (Rect::default(), Vec::new()),
+                };
                 // Credits of the sources being drawn, as the style or tiles give them.
                 let mut credits = map.attributions(cam.zoom);
                 // The aircraft feed's credit (ODbL for adsb.lol) first, where it isn't cut off.
@@ -4763,9 +4973,9 @@ async fn main() -> Result<()> {
             // where it will stop (a jump's destination, the end of a zoom or glide), not for
             // every view on the way.
             let target = ctl.target().filter(|_| billed_raster);
-            let mut reqs: Vec<_> = map.tile_requests(&draw_cam, map_area).into_iter().filter(|r| target.is_none() || r.source != RASTER).collect();
+            let mut reqs: Vec<_> = map.tile_requests(&draw_cam, map_area).into_iter().filter(|r| target.is_none() || r.source != raster_id).collect();
             if let Some(t) = target {
-                reqs.extend(map.tile_requests(&t, map_area).into_iter().filter(|r| r.source == RASTER));
+                reqs.extend(map.tile_requests(&t, map_area).into_iter().filter(|r| r.source == raster_id));
             }
             // Dataset layers: the chunks under the view, into their own slots; far ones dropped.
             {
@@ -4818,14 +5028,14 @@ async fn main() -> Result<()> {
                 }
                 // The provider said "too many requests" (or its daily quota is used up): ask it
                 // nothing for a minute, rather than every waiting tile asking on its own.
-                if req.source == RASTER && throttled_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+                if req.source == raster_id && throttled_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
                     continue;
                 }
                 if radar.as_ref().is_some_and(|r| r.owns(&req.source)) && !radar_bucket.take() {
                     held_back = true;
                     continue;
                 }
-                if req.source == RASTER
+                if req.source == raster_id
                     && let Some(b) = limiter.as_mut()
                     && !b.take()
                 {
@@ -5116,8 +5326,70 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // The switcher previews the chosen base map once it has rested there a moment
+            // (not keyed ones: those are billed or count against a quota, so only on enter).
+            if let Some(t) = switcher_moved
+                && t.elapsed() >= Duration::from_millis(300)
+            {
+                switcher_moved = None;
+                if let Some(mapterm::basemaps::Row::Base(i)) = switcher.as_ref().and_then(|s| s.row())
+                    && !bases[i].keyed
+                {
+                    want_base = Some(i);
+                }
+            }
+            // Switch base maps, one at a time: a style swaps the vector map (and takes away any
+            // imagery); imagery goes under the style's roads and names.
+            if let Some(i) = want_base.filter(|_| style_loading.is_none() && imagery_loading.is_none()) {
+                want_base = None;
+                if i != base_at && i < bases.len() {
+                    base_prev = Some(base_at);
+                    base_at = i;
+                    match bases[i].base.clone() {
+                        mapterm::basemaps::Base::Style(spec) => {
+                            vector = 0;
+                            if raster.is_some() {
+                                imagery_loading = Some(String::new());
+                                let _ = itx.send((String::new(), Ok(Vec::new())));
+                            }
+                            if styles[style_at] != spec {
+                                style_at = styles.iter().position(|s| *s == spec).unwrap_or(style_at);
+                                let (source, dark, cam, stx) = (builtin_source.clone(), theme.map_or(!a.light, |t| t.1), ctl.cam, stx.clone());
+                                let sp = spec.clone();
+                                tokio::spawn(async move {
+                                    let r = load_basemap(&sp, &source, dark, cam).await;
+                                    let _ = stx.send((sp, r));
+                                });
+                                note = Some((Instant::now(), format!("loading style {spec}…")));
+                                style_loading = Some(spec);
+                            } else {
+                                apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                            }
+                        }
+                        mapterm::basemaps::Base::Imagery(spec) => {
+                            imagery_loading = Some(spec.clone());
+                            match imagery_kept.get(&spec) {
+                                Some(l) => {
+                                    let _ = itx.send((spec, Ok(l.clone())));
+                                }
+                                None => {
+                                    note = Some((Instant::now(), format!("loading imagery {spec}…")));
+                                    let (itx, cache, cam) = (itx.clone(), a.raster_cache, ctl.cam);
+                                    tokio::spawn(async move {
+                                        let r = open_imagery(spec.clone(), cache, cam).await;
+                                        let _ = itx.send((spec, r));
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
-            let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() || stitching {
+            let idle = if switcher_moved.is_some() {
+                Duration::from_millis(50)
+            } else if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() || stitching {
                 Duration::from_millis(16)
             } else if sat_dots {
                 // Satellite dots redraw up to 15 times a second (see sat_every).
@@ -5156,6 +5428,10 @@ async fn main() -> Result<()> {
                     for (source, id, r) in batch {
                         pending.remove(&(source.clone(), id));
                         dlog(|| format!("done {source} {id:?}"));
+                        // A base map switched away while it loaded: nowhere to put it.
+                        if map.source(&source).is_none() {
+                            continue;
+                        }
                         if let Err(e) = map.insert_loaded(&source, id, r) {
                             // The map asks for it again after a growing wait.
                             dlog(|| format!("{e:#}"));
@@ -5510,7 +5786,40 @@ async fn main() -> Result<()> {
                     credit_pending = false;
                     // On failure keep the credits shown; the next new view asks again.
                     if let Ok(text) = c {
-                        let _ = map.set_attribution(RASTER, &text);
+                        let _ = map.set_attribution(&raster_id, &text);
+                    }
+                }
+                Some((spec, r)) = irx.recv() => {
+                    imagery_loading = None;
+                    let r = r.and_then(|layers| set_imagery(&mut map, &layers).map(|_| layers));
+                    match r {
+                        Ok(layers) => {
+                            if !spec.is_empty() {
+                                imagery_kept.insert(spec.clone(), layers.clone());
+                                note = Some((Instant::now(), format!("imagery: {spec}")));
+                            }
+                            raster = layers.last().map(|l| l.1.clone());
+                            raster_id = layers.last().map_or(RASTER.to_string(), |l| l.0.clone());
+                            google = raster.as_ref().filter(|r| r.is_google()).cloned();
+                            credit_view = None;
+                            billed_raster = raster.as_ref().is_some_and(|r| r.is_google() || r.wants_key());
+                            limiter = imagery_limiter(a.raster_limit, billed_raster);
+                            // Imagery shows as images where the terminal can.
+                            if raster.is_some() && !kitty && mapterm::kitty::supported() {
+                                kitty = true;
+                                map.raster_mode = RasterMode::Kitty { cell_px: cpx };
+                                kstate.shm = shm;
+                            }
+                            base = base_visibility(&map);
+                            apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                        }
+                        Err(e) => {
+                            note = Some((Instant::now(), format!("imagery {spec} failed: {e:#}")));
+                            // Back to what was showing.
+                            if let Some(p) = base_prev.take() {
+                                base_at = p;
+                            }
+                        }
                     }
                 }
                 Some((spec, r)) = srx.recv() => {
@@ -5579,6 +5888,68 @@ async fn main() -> Result<()> {
                     for ev in queued {
                         match ev {
                             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                                // The base map switcher takes every key while it's open: typing
+                                // filters, up/down (j/k before typing) choose and preview, enter
+                                // keeps, space toggles or picks and stays, esc goes back.
+                                if let Some(sw) = switcher.as_mut() {
+                                    use mapterm::basemaps::Row;
+                                    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                                    let before = sw.row();
+                                    let mut refilter = false;
+                                    let mut close = false;
+                                    let pick = |row: Option<Row>, want_base: &mut Option<usize>, labels: &mut bool, vector: &mut u8| match row {
+                                        Some(Row::Base(i)) => *want_base = Some(i),
+                                        Some(Row::Labels) => *labels = !*labels,
+                                        Some(Row::Vector) => *vector = (*vector + 1) % 3,
+                                        None => {}
+                                    };
+                                    match k.code {
+                                        KeyCode::Char('c') if ctrl => return Ok(()),
+                                        KeyCode::Char('u') if ctrl => {
+                                            sw.query.clear();
+                                            refilter = true;
+                                        }
+                                        KeyCode::Char('n') if ctrl => sw.step(true),
+                                        KeyCode::Char('p') if ctrl => sw.step(false),
+                                        KeyCode::Esc => {
+                                            want_base = Some(sw.opened_on);
+                                            close = true;
+                                        }
+                                        KeyCode::Enter => {
+                                            let row = sw.row();
+                                            if matches!(row, Some(Row::Base(_))) {
+                                                close = true;
+                                            }
+                                            pick(row, &mut want_base, &mut labels, &mut vector);
+                                        }
+                                        KeyCode::Char(' ') => pick(sw.row(), &mut want_base, &mut labels, &mut vector),
+                                        KeyCode::Down | KeyCode::Tab => sw.step(true),
+                                        KeyCode::Up | KeyCode::BackTab => sw.step(false),
+                                        KeyCode::Char('j') if sw.query.is_empty() => sw.step(true),
+                                        KeyCode::Char('k') if sw.query.is_empty() => sw.step(false),
+                                        KeyCode::Char(c) if !ctrl => {
+                                            sw.query.push(c);
+                                            refilter = true;
+                                        }
+                                        KeyCode::Backspace => {
+                                            sw.query.pop();
+                                            refilter = true;
+                                        }
+                                        _ => {}
+                                    }
+                                    if refilter {
+                                        sw.refilter(&bases);
+                                    }
+                                    if sw.row() != before {
+                                        switcher_moved = Some(Instant::now());
+                                    }
+                                    apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                                    if close {
+                                        switcher = None;
+                                        switcher_moved = None;
+                                    }
+                                    continue;
+                                }
                                 // The finder takes every key while it's open.
                                 if let Some(fd) = finder.as_mut() {
                                     let mut refilter = false;
@@ -6008,17 +6379,20 @@ async fn main() -> Result<()> {
                                             out.flush()?;
                                         }
                                     }
-                                    KeyCode::Char('m') if style_loading.is_none() => {
-                                        style_at = (style_at + 1) % styles.len();
-                                        let spec = styles[style_at].clone();
-                                        let (source, dark, cam, stx) = (builtin_source.clone(), theme.map_or(!a.light, |t| t.1), ctl.cam, stx.clone());
-                                        let sp = spec.clone();
-                                        tokio::spawn(async move {
-                                            let r = load_basemap(&sp, &source, dark, cam).await;
-                                            let _ = stx.send((sp, r));
-                                        });
-                                        note = Some((Instant::now(), format!("loading style {spec}…")));
-                                        style_loading = Some(spec);
+                                    // m / M: the next or previous base map; ': the one before; b: the
+                                    // switcher.
+                                    KeyCode::Char(c @ ('m' | 'M')) => {
+                                        let i = mapterm::basemaps::step(bases.len(), want_base.unwrap_or(base_at), c == 'm');
+                                        want_base = Some(i);
+                                        note = Some((Instant::now(), format!("base map: {}", bases[i].label)));
+                                    }
+                                    KeyCode::Char('\'') => match base_prev {
+                                        Some(p) => want_base = Some(p),
+                                        None => note = Some((Instant::now(), "' goes back to the base map before; there's none yet".into())),
+                                    },
+                                    KeyCode::Char('b') => {
+                                        finder = None;
+                                        switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at));
                                     }
                                     KeyCode::Char('c') if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                                         // The pointer's position on the map, else the center.
@@ -6104,6 +6478,35 @@ async fn main() -> Result<()> {
                                             let back = m.kind == event::MouseEventKind::ScrollLeft;
                                             timeline.pan((timeline.stop - timeline.start) * if back { -0.1 } else { 0.1 });
                                             timeline_moved = true;
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
+                                // The switcher: a click picks a row (and previews it); wheel
+                                // moves; the map under it sees nothing.
+                                if let Some(sw) = switcher.as_mut()
+                                    && switcher_rect.contains(pos)
+                                {
+                                    use mapterm::basemaps::Row;
+                                    match m.kind {
+                                        event::MouseEventKind::Down(event::MouseButton::Left) => {
+                                            if let Some(&(_, row)) = switcher_rows.iter().find(|(r, _)| *r == cell.1)
+                                                && let Some(n) = sw.rows.iter().position(|r| *r == row)
+                                            {
+                                                sw.sel = n;
+                                                switcher_moved = None;
+                                                match row {
+                                                    Row::Base(i) => want_base = Some(i),
+                                                    Row::Labels => labels = !labels,
+                                                    Row::Vector => vector = (vector + 1) % 3,
+                                                }
+                                                apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                                            }
+                                        }
+                                        event::MouseEventKind::ScrollDown | event::MouseEventKind::ScrollUp => {
+                                            sw.step(m.kind == event::MouseEventKind::ScrollDown);
+                                            switcher_moved = Some(Instant::now());
                                         }
                                         _ => {}
                                     }

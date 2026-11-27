@@ -71,6 +71,7 @@
 pub mod adsb;
 pub mod ais;
 pub mod areas;
+pub mod basemaps;
 pub mod cache;
 pub mod clock;
 pub mod closures;
