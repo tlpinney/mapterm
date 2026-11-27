@@ -3547,14 +3547,14 @@ fn add_mapillary(map: &mut Map, token: &str) -> Result<()> {
     // hidden); the dots stay.
     if mapterm::kitty::supported() {
         let tiles: Arc<dyn mapterm::raster::TileRender> = Arc::new(mapterm::mapillary::CoverageTiles::new(token));
-        let src = mapterm::areas::tile_source_to(tiles, "mapillary-lines", mapterm::mapillary::CREDIT, 18)?;
+        let src = mapterm::areas::tile_source_to(tiles, "mapillary-lines", mapterm::mapillary::CREDIT, mapterm::mapillary::IMAGE_LINES_MAX)?;
         map.add_source(MLY_TILES, MapSource::raster(src))?;
-        map.add_layers(vec![StyleLayer::raster(MLY_TILES, MLY_TILES)], before.as_deref())?;
+        let layer = StyleLayer::raster(MLY_TILES, MLY_TILES).min_zoom(mapterm::mapillary::LINES_FROM as f64).max_zoom(mapterm::mapillary::IMAGE_LINES_UNTIL);
+        map.add_layers(vec![layer], before.as_deref())?;
     }
-    map.add_layers(mapterm::mapillary::coverage_layers(MLY, MLY), before.as_deref())?;
-    if mapterm::kitty::supported() {
-        map.set_visibility(&format!("{MLY}-sequence"), false)?;
-    }
+    // The braille lines: only past the image lines where there are some.
+    let lines_from = if mapterm::kitty::supported() { mapterm::mapillary::IMAGE_LINES_UNTIL } else { mapterm::mapillary::LINES_FROM as f64 };
+    map.add_layers(mapterm::mapillary::coverage_layers(MLY, MLY, lines_from), before.as_deref())?;
     Ok(())
 }
 

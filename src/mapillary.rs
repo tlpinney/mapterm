@@ -326,14 +326,15 @@ pub fn coverage_tiles(token: &str) -> String {
     format!("https://tiles.mapillary.com/maps/vtp/mly1_public/2/{{z}}/{{x}}/{{y}}?access_token={token}")
 }
 
-/// The coverage layers over source `source`: green dots zoomed out, the sequences as lines,
-/// each photo as a dot from zoom 16.
-pub fn coverage_layers(id: &str, source: &str) -> Vec<crate::StyleLayer> {
+/// The coverage layers over source `source`: green dots zoomed out, the sequences as lines
+/// (from zoom `lines_from`: later where image lines draw them before), each photo as a dot
+/// from zoom 16.
+pub fn coverage_layers(id: &str, source: &str, lines_from: f64) -> Vec<crate::StyleLayer> {
     let green = "#05cb63";
     let docs = [
         serde_json::json!({"id": format!("{id}-overview"), "type": "circle", "source": source, "source-layer": "overview", "maxzoom": 6,
             "paint": {"circle-color": green, "circle-radius": 1, "circle-opacity": 0.6}}),
-        serde_json::json!({"id": format!("{id}-sequence"), "type": "line", "source": source, "source-layer": "sequence", "minzoom": 6,
+        serde_json::json!({"id": format!("{id}-sequence"), "type": "line", "source": source, "source-layer": "sequence", "minzoom": lines_from,
             "paint": {"line-color": green, "line-width": 1, "line-opacity": 0.55}}),
         serde_json::json!({"id": format!("{id}-image"), "type": "circle", "source": source, "source-layer": "image", "minzoom": 16,
             "paint": {"circle-color": green, "circle-radius": 2, "circle-opacity": 0.8}}),
@@ -350,6 +351,12 @@ pub struct CoverageTiles {
 
 /// Where coverage image tiles start (the sequence lines' first zoom).
 pub const LINES_FROM: u8 = 6;
+/// The deepest image tiles drawn (Mapillary's deepest vector tiles): closer in, drawing a
+/// tile per view tile would fetch and stroke dozens at once, so the braille lines take over
+/// from [`IMAGE_LINES_UNTIL`].
+pub const IMAGE_LINES_MAX: u8 = 14;
+/// Where image lines give way to braille ones.
+pub const IMAGE_LINES_UNTIL: f64 = 15.0;
 
 impl CoverageTiles {
     /// Coverage tiles with `token`.
@@ -360,11 +367,10 @@ impl CoverageTiles {
 
 impl crate::raster::TileRender for CoverageTiles {
     fn render(&self, z: u8, x: u32, y: u32, size: u32) -> Option<Vec<u8>> {
-        if z < LINES_FROM {
+        if !(LINES_FROM..=IMAGE_LINES_MAX).contains(&z) {
             return None;
         }
-        // The vector tile holding this one (14 is Mapillary's deepest).
-        let tz = z.min(14);
+        let tz = z;
         let (px, py) = (x >> (z - tz), y >> (z - tz));
         let handle = tokio::runtime::Handle::try_current().ok()?;
         let bytes = handle.block_on(self.src.tile(tz, px, py)).ok()??;
