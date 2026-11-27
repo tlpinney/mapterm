@@ -8,6 +8,13 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Directions: `--route FROM TO` (each end `here`, `LAT,LON` or a place), or `d` after a `/`
+  search, draws the route, its distance and time on the status line, and the turns in a
+  panel (`Esc` hides it, `x` clears it); `--route-mode car|bike|walk`. With `--closures` the
+  route avoids the closed roads near the trip. From Valhalla over OpenStreetMap: FOSSGIS's
+  public server (fair use: only when asked, at most once a second, `X-Client-Id: mapterm`)
+  or your own (`--router`, `MAPTERM_ROUTER`). `mapterm::route`.
+
 - A disclaimer: with a live or hazard layer on, "Not for navigation or emergencies (? more)"
   follows the credits at the bottom of the map, and the `?` key list ends with it in full
   (also in `--help`, the README and the live layers guide).

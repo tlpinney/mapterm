@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--fires] [--floods] [--tfrs] [--closures] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--fires] [--floods] [--tfrs] [--closures] [--route FROM TO] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -143,6 +143,16 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 ahead), Montgomery County, Prince William County, Fairfax County, and
                 MD, DE and NJ work zones; red closed, orange restricted, amber lanes,
                 purple planned. Click one for its road, reason, times and source
+  --route FROM TO
+                directions, each end `here`, LAT,LON or a place to search for: the
+                route drawn on the map, its distance and time (no traffic) on the status
+                line, and the turn-by-turn steps in a panel (esc hides it, x clears the
+                route). With --closures, it avoids the closed roads. From Valhalla over
+                OpenStreetMap: FOSSGIS's public server, asked only when you ask, or
+                yours with --router URL (also MAPTERM_ROUTER). Or press d after a /
+                search: directions there from your location (else the map's center)
+  --route-mode car|bike|walk
+                how you're going (default car)
   --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
                 this computer's time zone
   --sondes      live weather balloons (radiosondes) from SondeHub, tracked by amateur
@@ -271,6 +281,12 @@ struct Args {
     tfrs: bool,
     /// --closures: road closures and work zones.
     closures: bool,
+    /// --route FROM TO: directions.
+    route: Option<(String, String)>,
+    /// --route-mode: car, bike or walk.
+    route_mode: mapterm::route::Mode,
+    /// --router: a Valhalla server of your own.
+    router: Option<String>,
     /// --fires: US wildfires from NIFC.
     fires: bool,
     /// --quakes: earthquakes from USGS, for this period.
@@ -340,6 +356,9 @@ fn args() -> Result<Args> {
         floods: false,
         tfrs: false,
         closures: false,
+        route: None,
+        route_mode: mapterm::route::Mode::Car,
+        router: None,
         utc: false,
         sats: None,
         sats_country: Vec::new(),
@@ -458,6 +477,16 @@ fn args() -> Result<Args> {
             "--floods" | "--rivers" | "--gauges" => a.floods = true,
             "--tfrs" | "--tfr" | "--restrictions" => a.tfrs = true,
             "--closures" | "--roads" | "--workzones" => a.closures = true,
+            "--route" | "--directions" => {
+                let from = it.next().context("--route FROM TO")?;
+                let to = it.next().context("--route FROM TO")?;
+                a.route = Some((from, to));
+            }
+            "--route-mode" => {
+                let m = it.next().context("--route-mode car|bike|walk")?;
+                a.route_mode = mapterm::route::Mode::parse(&m).with_context(|| format!("--route-mode {m}: car, bike or walk"))?;
+            }
+            "--router" => a.router = Some(it.next().context("--router URL")?),
             "--quakes" | "--earthquakes" => {
                 // The period is optional: take the next argument only if it's one.
                 let p = it.next_if(|n| mapterm::quakes::Period::parse(n).is_some());
@@ -704,6 +733,9 @@ const QUAKES: &str = "quakes";
 const FIRES: &str = "fires";
 const GAUGES: &str = "gauges";
 const CLOSURES: &str = "closures";
+const ROUTE: &str = "route";
+/// The route as an image tile layer (where the terminal shows images).
+const ROUTE_TILES: &str = "route-tiles";
 /// The closures' lines as image tiles drawn here (where the terminal shows images).
 const CLOSURE_TILES: &str = "closure-tiles";
 const FIRE_AREAS: &str = "fire-areas";
@@ -990,7 +1022,16 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
                 ("L", "legends on or off"),
             ],
         ),
-        ("find", vec![("/", "search for a place"), ("i", "inspect: what's under the pointer"), ("y", "copy the inspected feature (JSON)")]),
+        (
+            "find",
+            vec![
+                ("/", "search for a place"),
+                ("d", "directions to it (from you, else the center)"),
+                ("x", "clear the route"),
+                ("i", "inspect: what's under the pointer"),
+                ("y", "copy the inspected feature (JSON)"),
+            ],
+        ),
     ];
     if on.live || on.alerts || on.outages {
         let areas = on.alerts || on.outages;
@@ -1783,6 +1824,57 @@ fn draw_closure(f: &mut ratatui::Frame, area: Rect, c: &mapterm::closures::Closu
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
 }
 
+/// A route end: `here` (your location), `LAT,LON`, or a place to search for.
+async fn route_end(spec: &str, geo: &mapterm::geocode::Geocoder, location_cmd: Option<String>) -> std::result::Result<(f64, f64), String> {
+    if spec.eq_ignore_ascii_case("here") {
+        let fix = tokio::task::spawn_blocking(move || mapterm::locate::locate(location_cmd.as_deref()))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("here: {e:#}"))?;
+        return Ok((fix.lon, fix.lat));
+    }
+    if let Some((a, b)) = spec.split_once(',')
+        && let (Ok(lat), Ok(lon)) = (a.trim().parse::<f64>(), b.trim().parse::<f64>())
+        && (-90.0..=90.0).contains(&lat)
+        && (-180.0..=180.0).contains(&lon)
+    {
+        return Ok((lon, lat));
+    }
+    let places = geo.search(spec, None, 1).await.map_err(|e| format!("{spec}: {e:#}"))?;
+    places.first().map(|p| (p.lon, p.lat)).ok_or_else(|| format!("no place found for {spec}"))
+}
+
+/// The directions panel: the trip, then each step with its distance.
+fn draw_route(f: &mut ratatui::Frame, area: Rect, r: &mapterm::route::Route) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let cyan = TStyle::new().fg(Color::Rgb(0x22, 0xd3, 0xee));
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" directions ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let mut l = vec![Line::from(Span::styled(
+        format!(" {} {} · {}", r.mode.verb(), mapterm::route::distance(r.miles), mapterm::route::duration(r.seconds)),
+        cyan.add_modifier(Modifier::BOLD),
+    ))];
+    l.push(Line::from(Span::styled(" estimated, without traffic", dim)));
+    if r.avoided > 0 {
+        l.push(Line::from(Span::styled(
+            format!(" avoiding {} closed road point{}", r.avoided, if r.avoided == 1 { "" } else { "s" }),
+            TStyle::new().fg(Color::Rgb(0xff, 0x7a, 0x32)),
+        )));
+    }
+    l.push(Line::default());
+    for (i, s) in r.steps.iter().enumerate() {
+        let far = if s.miles > 0.0 { format!("  {}", mapterm::route::distance(s.miles)) } else { String::new() };
+        l.push(Line::from(vec![Span::styled(format!(" {:>2}. ", i + 1), dim), Span::raw(s.instruction.clone()), Span::styled(far, dim)]));
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(" Valhalla, OpenStreetMap. Not for navigation. x clears · esc hides", dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
 /// What the --tfrs tasks send.
 enum TfrMsg {
     /// The current TFRs.
@@ -2463,7 +2555,11 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
         // Live aircraft stay up whatever the overlay shows: imagery with only the planes on
         // it is the clearest view of them.
         // So do the other live layers: closures, gauges, fires, quakes.
-        let live = id == CLOSURE_TILES || [CLOSURES, GAUGES, FIRES, QUAKES].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')));
+        let live = id == CLOSURE_TILES
+            || id == ROUTE_TILES
+            || id == ROUTE
+            || id == format!("{ROUTE}-line")
+            || [CLOSURES, GAUGES, FIRES, QUAKES].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')));
         if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
         }
@@ -2886,6 +2982,22 @@ async fn main() -> Result<()> {
             map.set_visibility(&format!("{CLOSURES}-line"), false)?;
         }
     }
+    // A route (--route, or d after a search): over the closures, under the live layers.
+    let route_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
+    {
+        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
+        map.add_source(ROUTE, MapSource::geojson(&empty)?)?;
+        if mapterm::kitty::supported() {
+            map.add_source(ROUTE_TILES, MapSource::raster(mapterm::areas::tile_source_to(route_tiles.clone(), "route", mapterm::route::CREDIT, 18)?))?;
+            map.add_layer(mapterm::StyleLayer::raster(ROUTE_TILES, ROUTE_TILES))?;
+        }
+        let line = serde_json::json!({"id": format!("{ROUTE}-line"), "type": "line", "source": ROUTE, "paint": {"line-color": "#22d3ee", "line-width": 3}});
+        let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
+        map.add_layers(vec![mapterm::StyleLayer::from_json(&line)?.0], above.as_deref())?;
+        if mapterm::kitty::supported() {
+            map.set_visibility(&format!("{ROUTE}-line"), false)?;
+        }
+    }
     // River gauges (--floods), with the quakes.
     if a.floods {
         let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
@@ -3165,6 +3277,33 @@ async fn main() -> Result<()> {
     let geocoder = mapterm::geocode::Geocoder::from_env()?;
     let mut search = Search::Off;
     let mut found: Option<mapterm::geocode::Place> = None;
+    // Directions: the route, whether its panel shows, its ends (to ask again around closures
+    // once they're in), and the answers.
+    let router =
+        a.router.clone().or_else(|| std::env::var("MAPTERM_ROUTER").ok().filter(|r| !r.is_empty())).unwrap_or_else(|| mapterm::route::PUBLIC.to_string());
+    let mut route: Option<mapterm::route::Route> = None;
+    let mut route_new = false;
+    let mut route_panel = true;
+    let mut route_ends: Option<((f64, f64), (f64, f64))> = None;
+    let mut route_asking = false;
+    // Asked again once, with the closed roads to avoid, when they arrive after it.
+    let mut route_avoid_pending = false;
+    let (routetx, mut routerx) = mpsc::unbounded_channel::<std::result::Result<(mapterm::route::Route, (f64, f64), (f64, f64)), String>>();
+    if let Some((from, to)) = a.route.clone() {
+        let (tx, geo, cmd, mode, server) = (routetx.clone(), geocoder.clone(), a.location_cmd.clone(), a.route_mode, router.clone());
+        route_asking = true;
+        route_avoid_pending = a.closures;
+        tokio::spawn(async move {
+            let r = async {
+                let f = route_end(&from, &geo, cmd.clone()).await?;
+                let t = route_end(&to, &geo, cmd).await?;
+                let r = mapterm::route::route(&server, f, t, mode, &[]).await.map_err(|e| format!("{e:#}"))?;
+                Ok((r, f, t))
+            }
+            .await;
+            let _ = tx.send(r);
+        });
+    }
     // Search results from the map's own data, waiting for the geocoder's.
     let mut search_local: Vec<mapterm::geocode::Place> = Vec::new();
     let (gtx, mut grx) = mpsc::unbounded_channel::<(String, Result<Vec<mapterm::geocode::Place>>)>();
@@ -3931,11 +4070,12 @@ async fn main() -> Result<()> {
                 let outage = selected_outage.as_deref().and_then(|k| outages.find(k));
                 let quake = selected_quake.as_deref().and_then(|id| quakes.iter().find(|q| q.id == id));
                 let fire = selected_fire.as_deref().and_then(|id| fires.iter().find(|f| f.id == id));
+                let show_route = route.as_ref().filter(|_| route_panel);
                 let closure = selected_closure.as_deref().and_then(|k| closures.values().flatten().find(|c| c.key == k));
                 let tfr = selected_tfr.as_deref().and_then(|k| tfr_live.iter().chain(&tfr_standing).find(|r| r.key == k));
                 let gauge = selected_gauge.as_deref().and_then(|id| gauges.iter().find(|g| g.lid == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || balloon.is_some() {
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() {
                         52.min(main.width / 2)
                     } else {
                         0
@@ -4039,6 +4179,10 @@ async fn main() -> Result<()> {
                     }
                     _ if let Some(o) = outage => {
                         draw_outage(f, panel, o);
+                        Vec::new()
+                    }
+                    _ if let Some(r) = show_route => {
+                        draw_route(f, panel, r);
                         Vec::new()
                     }
                     _ => Vec::new(),
@@ -4173,6 +4317,12 @@ async fn main() -> Result<()> {
                     };
                     spans.push(Span::styled(text, st));
                 }
+                if let Some(r) = &route {
+                    let st = TStyle::new().fg(Color::Rgb(0x22, 0xd3, 0xee));
+                    spans.push(Span::styled(format!("⮕ {} · {} ", mapterm::route::distance(r.miles), mapterm::route::duration(r.seconds)), st));
+                } else if route_asking {
+                    spans.push(Span::styled("⮕ routing… ", TStyle::new().fg(Color::Rgb(0x22, 0xd3, 0xee))));
+                }
                 if a.closures {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x7a, 0x32));
                     let now = unix_now();
@@ -4244,6 +4394,9 @@ async fn main() -> Result<()> {
                     && !credits.iter().any(|x| x == c)
                 {
                     credits.push(c.to_string());
+                }
+                if route.is_some() && !credits.iter().any(|c| c == mapterm::route::CREDIT) {
+                    credits.push(mapterm::route::CREDIT.to_string());
                 }
                 let mut credit_items = if credits.is_empty() { vec![basemap_name.clone()] } else { credits };
                 // With a live or hazard layer on, mapterm's disclaimer after the credits.
@@ -4629,6 +4782,37 @@ async fn main() -> Result<()> {
                 map.set_data(QUAKES, &mapterm::quakes::points(&quakes, unix_now(), selected_quake.as_deref()))?;
                 (quakes_new, quakes_drawn, quakes_shown_selected) = (false, Instant::now(), selected_quake.clone());
             }
+            // The route: drawn when a new one comes (or it's cleared).
+            if route_new {
+                let fc = match &route {
+                    Some(r) => serde_json::json!({"type": "FeatureCollection", "features": [{"type": "Feature", "geometry": r.geometry(), "properties": {}}]}),
+                    None => serde_json::json!({"type": "FeatureCollection", "features": []}),
+                };
+                map.set_data(ROUTE, &fc)?;
+                let mut shape = mapterm::areas::Shape::lines((0x22, 0xd3, 0xee), 5.0, false);
+                if let Some(r) = &route {
+                    shape.add(&r.geometry());
+                }
+                route_tiles.set(if route.is_some() { vec![shape] } else { Vec::new() });
+                map.put_raster_tile(ROUTE_TILES, None, true);
+                route_new = false;
+            }
+            // Asked again, avoiding the closed roads, once they've come in.
+            if route_avoid_pending && !route_asking && !closures.is_empty()
+                && let Some((f, t)) = route_ends
+            {
+                route_avoid_pending = false;
+                let all: Vec<mapterm::closures::Closure> = closures.values().flatten().cloned().collect();
+                let avoid = mapterm::route::avoid_closures(&all, unix_now(), f, t);
+                if !avoid.is_empty() {
+                    route_asking = true;
+                    let (tx, mode, server) = (routetx.clone(), route.as_ref().map_or(a.route_mode, |r| r.mode), router.clone());
+                    tokio::spawn(async move {
+                        let r = mapterm::route::route(&server, f, t, mode, &avoid).await.map(|r| (r, f, t)).map_err(|e| format!("{e:#}"));
+                        let _ = tx.send(r);
+                    });
+                }
+            }
             // Closures: again when new ones come, another is selected, or a minute on.
             if a.closures && (closures_new || selected_closure != closures_shown_selected || closures_drawn.elapsed() >= Duration::from_secs(60)) {
                 let all: Vec<mapterm::closures::Closure> = closures.values().flatten().cloned().collect();
@@ -4923,6 +5107,35 @@ async fn main() -> Result<()> {
                             dlog(|| format!("floods: {lid}: {e}"));
                             gauge_details.remove(&lid);
                             note = Some((Instant::now(), format!("gauge {lid}: {e}")));
+                        }
+                    }
+                }
+                Some(r) = routerx.recv() => {
+                    route_asking = false;
+                    match r {
+                        Ok((r, f, t)) => {
+                            dlog(|| format!("route: {:.1} mi, {:.0} s, {} steps, avoiding {}", r.miles, r.seconds, r.steps.len(), r.avoided));
+                            // Fit the map to it.
+                            if let Some(b) = r.bounds() {
+                                let p = mapterm::geocode::Place {
+                                    name: String::new(),
+                                    context: String::new(),
+                                    kind: "route".into(),
+                                    lon: (b.0 + b.2) / 2.0,
+                                    lat: (b.1 + b.3) / 2.0,
+                                    bounds: Some(b),
+                                };
+                                let (lon, lat, z) = p.view(map_area.width, map_area.height);
+                                ctl.fly_to(Camera::new(lon, lat, z));
+                            }
+                            route = Some(r);
+                            route_ends = Some((f, t));
+                            route_new = true;
+                            route_panel = true;
+                        }
+                        Err(e) => {
+                            dlog(|| format!("route: {e}"));
+                            note = Some((Instant::now(), format!("route: {e}")));
                         }
                     }
                 }
@@ -5502,6 +5715,29 @@ async fn main() -> Result<()> {
                                     }
                                     KeyCode::Char('/') => {
                                         search = Search::Typing(String::new());
+                                    }
+                                    // Directions to the place found with /, from your location (else
+                                    // the map's center).
+                                    KeyCode::Char('d') if found.is_some() && !route_asking => {
+                                        let to = found.as_ref().map(|p| (p.lon, p.lat)).expect("found");
+                                        let from = me.as_ref().map_or((cam.lon, cam.lat), |m| (m.lon, m.lat));
+                                        let all: Vec<mapterm::closures::Closure> = closures.values().flatten().cloned().collect();
+                                        let avoid = mapterm::route::avoid_closures(&all, unix_now(), from, to);
+                                        route_asking = true;
+                                        note = Some((Instant::now(), format!("routing from {}…", if me.is_some() { "your location" } else { "the map's center" })));
+                                        let (tx, mode, server) = (routetx.clone(), a.route_mode, router.clone());
+                                        tokio::spawn(async move {
+                                            let r = mapterm::route::route(&server, from, to, mode, &avoid).await.map(|r| (r, from, to)).map_err(|e| format!("{e:#}"));
+                                            let _ = tx.send(r);
+                                        });
+                                    }
+                                    KeyCode::Char('x') if route.is_some() => {
+                                        route = None;
+                                        route_ends = None;
+                                        route_new = true;
+                                    }
+                                    KeyCode::Esc if route.is_some() && route_panel && selected.is_none() && selected_ship.is_none() && selected_sat.is_none() && selected_alert.is_none() && selected_outage.is_none() && selected_quake.is_none() && selected_fire.is_none() && selected_gauge.is_none() && selected_tfr.is_none() && selected_closure.is_none() && selected_balloon.is_none() && !inspect && !matches!(search, Search::Results { .. }) => {
+                                        route_panel = false;
                                     }
                                     KeyCode::Char('g') if !locating => {
                                         locating = true;

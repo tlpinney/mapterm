@@ -114,6 +114,7 @@ pub mod quakes;
 pub mod rainviewer;
 pub mod raster;
 pub mod render;
+pub mod route;
 pub mod satellites;
 pub mod satnogs;
 pub mod shp;
