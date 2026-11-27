@@ -721,7 +721,7 @@ pub fn area_layers(id: &str, source: &str) -> Vec<crate::StyleLayer> {
 /// The style layer for the lines from the selected balloon to the stations hearing it.
 pub fn link_layer(id: &str, source: &str) -> crate::StyleLayer {
     let v =
-        json!({"id": id, "type": "line", "source": source, "paint": {"line-color": "#7ee787", "line-width": 1, "line-opacity": 0.6, "line-dasharray": [2, 2]}});
+        json!({"id": id, "type": "line", "source": source, "paint": {"line-color": "#c084fc", "line-width": 1, "line-opacity": 0.8, "line-dasharray": [2, 2]}});
     crate::StyleLayer::from_json(&v).expect("a valid line layer").0
 }
 
