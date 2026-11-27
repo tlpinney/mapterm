@@ -73,6 +73,13 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 loading it as the map moves
   --at          start position (default: fit the GeoJSON layers, else the source's center);
                 `here` is where you are (see --location-cmd), zoomed to its accuracy
+  --session NAME  open a session saved with S: its layers, view, base map, overlays and
+                layers turned off (options given after it win over its own)
+  --continue, -c  open the last run again, as it was when it ended
+  --resume [NAME]  pick a saved session or a recent run from a list (typing filters), or
+                open NAME
+  --sessions    list the saved sessions and recent runs, then exit (kept in
+                ~/.config/mapterm/sessions, or $XDG_CONFIG_HOME/mapterm/sessions)
   --adsb [FEED]  live aircraft over the map, from a free ADS-B feed: lol (adsb.lol, the
                 default), fi (adsb.fi), or a URL with {lat}, {lon} and {nm}. Polled for the
                 area in view (adsb.lol every 30 s, 12 s with a key; others every 10 s);
@@ -332,6 +339,13 @@ struct Args {
     /// smoothly, `shift` makes dragging pixel-exact (smooth protocol v3).
     smooth: bool,
     shift: bool,
+    /// The session opened (--session, --resume NAME, --continue): what to put back once the
+    /// map is up.
+    session: Option<mapterm::sessions::Session>,
+    /// --resume without a name: open on the list of sessions.
+    resume: bool,
+    /// The options to keep in a saved session (mapterm::sessions::keep_args).
+    kept: Vec<String>,
 }
 
 fn args() -> Result<Args> {
@@ -385,6 +399,9 @@ fn args() -> Result<Args> {
         location_cmd: None,
         raster_headers: Vec::new(),
         raster_cache: None,
+        session: None,
+        resume: false,
+        kept: Vec::new(),
         raster_limit: None,
         raster_params: Vec::new(),
         list_mosaics: false,
@@ -413,7 +430,46 @@ fn args() -> Result<Args> {
     if let Ok(v) = std::env::var("MAPTERM_RASTER_LIMIT") {
         a.raster_limit = Some(parse_limit(&v)?);
     }
-    let mut it = std::env::args().skip(1).peekable();
+    // Sessions first: --session NAME (or --resume NAME) and --continue put the session's
+    // options before the ones given, which win over them; --resume alone opens on the list.
+    let given: Vec<String> = std::env::args().skip(1).collect();
+    let mut argv: Vec<String> = Vec::new();
+    let mut session: Option<mapterm::sessions::Session> = None;
+    let mut gi = given.into_iter().peekable();
+    while let Some(x) = gi.next() {
+        match x.as_str() {
+            "--sessions" => {
+                let now = unix_now();
+                let all = mapterm::sessions::all();
+                if all.is_empty() {
+                    println!("no sessions yet: S in the viewer saves one, and each run is kept when it ends");
+                }
+                for (s, past) in all {
+                    let name = if past { "(recent)".to_string() } else { s.name.clone() };
+                    println!("{name:<24} {:<14} {:.4},{:.4} z{:.1}  {}", mapterm::sessions::ago(s.saved_at, now), s.lat, s.lon, s.zoom, s.summary());
+                }
+                std::process::exit(0);
+            }
+            "--continue" | "-c" => {
+                session = Some(mapterm::sessions::latest().context("--continue: no earlier run kept yet")?);
+            }
+            "--session" | "--resume" => match gi.peek() {
+                Some(n) if !n.starts_with('-') => {
+                    let n = gi.next().expect("peeked");
+                    session = Some(mapterm::sessions::load(&n)?);
+                }
+                _ if x == "--resume" => a.resume = true,
+                _ => bail!("--session NAME (mapterm --sessions lists them)"),
+            },
+            _ => argv.push(x),
+        }
+    }
+    if let Some(s) = &session {
+        argv = s.command_line().into_iter().chain(argv).collect();
+    }
+    a.kept = mapterm::sessions::keep_args(&argv);
+    a.session = session;
+    let mut it = argv.into_iter().peekable();
     while let Some(x) = it.next() {
         match x.as_str() {
             "--at" => {
@@ -1168,6 +1224,7 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
                 ("shift+drag", "zoom to a box"),
                 ("g", "go to your location"),
                 ("c", "copy the coordinates"),
+                ("S", "save as a named session (--session NAME)"),
             ],
         ),
         (
@@ -1593,6 +1650,7 @@ fn draw_switcher(
             Row::Base(i) if list[*i].base.is_imagery() => "imagery",
             Row::Base(_) => "maps",
             Row::Live(_) => "live layers",
+            Row::Session(_) => "sessions",
             Row::Overlay(_) => "imagery overlays",
             _ => "vector map",
         };
@@ -1619,6 +1677,10 @@ fn draw_switcher(
                 let o = &mapterm::basemaps::OVERLAYS[*i];
                 let (on, loading) = overlays.get(*i).copied().unwrap_or_default();
                 (if loading { "◌" } else if on { "☑" } else { "☐" }, o.label.to_string(), o.detail.to_string())
+            }
+            Row::Session(i) => {
+                let (name, detail) = &sw.sessions[*i];
+                ("↺", name.clone(), detail.clone())
             }
             Row::Live(i) => {
                 let l = &mapterm::basemaps::LIVE[*i];
@@ -3687,7 +3749,12 @@ async fn main() -> Result<()> {
     let mut switcher: Option<mapterm::basemaps::Switcher> = None;
     let mut switcher_moved: Option<Instant> = None;
     // A row picked (enter, space or a click), handled with everything else in the loop.
-    let mut switcher_pick: Option<mapterm::basemaps::Row> = None;
+    let mut switcher_picks: Vec<mapterm::basemaps::Row> = Vec::new();
+    // Sessions: one to open in place (its layers are running) once nothing is loading, the
+    // command line to start again with (one that needs other layers), and S's name prompt.
+    let mut restart_with: Option<mapterm::sessions::Session> = None;
+    let mut naming: Option<String> = None;
+    let mut session_list: Vec<(mapterm::sessions::Session, bool)> = Vec::new();
     // Imagery overlays (by their place in mapterm::basemaps::OVERLAYS): on, loading.
     let mut overlay_on = vec![false; mapterm::basemaps::OVERLAYS.len()];
     let mut overlay_loading: HashSet<usize> = HashSet::new();
@@ -4208,6 +4275,40 @@ async fn main() -> Result<()> {
     let mut credit_view: Option<(i32, i64, i64)> = None;
     let mut credit_seen: Option<((i32, i64, i64), Instant)> = None;
     let mut credit_pending = false;
+    // The live layers running: each can be turned off and on.
+    let live_running: Vec<usize> = mapterm::basemaps::LIVE
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| match l.key {
+            "aircraft" => adsb_feed.is_some(),
+            "ships" => ais_key.is_some(),
+            "satellites" => a.sats.is_some(),
+            "balloons" => a.sondes,
+            "radar" => radar.is_some(),
+            "alerts" => a.alerts,
+            "quakes" => a.quakes.is_some(),
+            "fires" => a.fires,
+            "gauges" => a.floods,
+            "outages" => a.outages,
+            "tfrs" => a.tfrs,
+            "closures" => a.closures,
+            "traffic" => a.traffic,
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+    // A session opened: its base map, overlays, layers turned off and overlay setting.
+    let mut session_open: Option<mapterm::sessions::Session> = a.session.clone();
+    // --resume: open on the sessions to pick one.
+    if a.resume {
+        session_list = mapterm::sessions::all();
+        let rows = session_rows(&session_list);
+        if rows.is_empty() {
+            note = Some((Instant::now(), "no sessions yet: S saves one, and each run is kept when it ends".into()));
+        } else {
+            switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at, &live_running).with_sessions(&bases, rows, true));
+        }
+    }
     let result: Result<()> = async {
         loop {
             while demo.last().is_some_and(|(t, _)| demo_start.elapsed().as_secs_f64() >= *t) {
@@ -4837,6 +4938,15 @@ async fn main() -> Result<()> {
                         Span::raw(format!(" > {}", fd.query)),
                         Span::styled("█", TStyle::new().fg(Color::Rgb(127, 178, 255))),
                         Span::styled("  ↑↓ choose · enter go · esc close ", dim),
+                    ];
+                }
+                // While naming a session, the status line is its prompt.
+                if let Some(name) = &naming {
+                    spans = vec![
+                        Span::styled(" save session ", TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255))),
+                        Span::raw(format!(" > {name}")),
+                        Span::styled("█", TStyle::new().fg(Color::Rgb(127, 178, 255))),
+                        Span::styled("  enter save · esc cancel", dim),
                     ];
                 }
                 // While typing a search, the status line is the search box.
@@ -5482,10 +5592,51 @@ async fn main() -> Result<()> {
                     want_base = Some(i);
                 }
             }
+            // A session opened in place: the view, then the rest as switcher picks.
+            if let Some(sn) = session_open.take() {
+                use mapterm::basemaps::{OVERLAYS, Row};
+                ctl.fly_to(Camera::new(sn.lon, sn.lat, sn.zoom));
+                if let Some(b) = &sn.base
+                    && let Some(i) = bases.iter().position(|e| e.base.spec() == b)
+                {
+                    want_base = Some(i);
+                }
+                for (i, o) in OVERLAYS.iter().enumerate() {
+                    if overlay_on[i] != sn.overlays.iter().any(|x| x == o.preset) && !overlay_loading.contains(&i) {
+                        switcher_picks.push(Row::Overlay(i));
+                    }
+                }
+                for &i in &live_running {
+                    let key = mapterm::basemaps::LIVE[i].key;
+                    if key != "radar" && live_off.contains_key(key) != sn.live_off.iter().any(|k| k == key) {
+                        switcher_picks.push(Row::Live(i));
+                    }
+                }
+                vector = sn.vector;
+                apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                if switcher.as_ref().is_some_and(|s| s.sessions_first) {
+                    switcher = None;
+                }
+                note = Some((Instant::now(), format!("session {}", sn.name)));
+            }
+            // Start again with another session's layers.
+            if restart_with.is_some() {
+                return Ok(());
+            }
             // What was picked in the switcher.
-            if let Some(row) = switcher_pick.take() {
+            for row in std::mem::take(&mut switcher_picks) {
                 use mapterm::basemaps::{OVERLAYS, Row};
                 match row {
+                    Row::Session(i) => {
+                        if let Some((sn, _)) = session_list.get(i) {
+                            if sn.args == a.kept {
+                                session_open = Some(sn.clone());
+                            } else {
+                                // Other layers: start again with them.
+                                restart_with = Some(sn.clone());
+                            }
+                        }
+                    }
                     Row::Base(i) => want_base = Some(i),
                     Row::Labels => labels = !labels,
                     Row::Vector => vector = (vector + 1) % 3,
@@ -6130,6 +6281,38 @@ async fn main() -> Result<()> {
                     for ev in queued {
                         match ev {
                             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                                // S's name prompt takes every key while it's open.
+                                if let Some(name) = naming.as_mut() {
+                                    match k.code {
+                                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                                        KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => name.clear(),
+                                        KeyCode::Esc => naming = None,
+                                        KeyCode::Enter => {
+                                            let sn = session_now(
+                                                name.trim(),
+                                                &a.kept,
+                                                &ctl.cam,
+                                                bases.get(base_at).map(|e| e.base.spec().to_string()),
+                                                &overlay_on,
+                                                &live_off,
+                                                vector,
+                                            );
+                                            match sn.save() {
+                                                Ok(_) => {
+                                                    note = Some((Instant::now(), format!("saved session {} · mapterm --session {:?}", sn.name, sn.name)));
+                                                    naming = None;
+                                                }
+                                                Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                                            }
+                                        }
+                                        KeyCode::Char(c) => name.push(c),
+                                        KeyCode::Backspace => {
+                                            name.pop();
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
                                 // The base map switcher takes every key while it's open, as fzf:
                                 // typing filters, up/down (ctrl-n/p, ctrl-j/k) choose and preview,
                                 // enter keeps, space toggles or picks and stays, esc goes back.
@@ -6153,12 +6336,12 @@ async fn main() -> Result<()> {
                                         }
                                         KeyCode::Enter => {
                                             let row = sw.row();
-                                            if matches!(row, Some(Row::Base(_))) {
+                                            if matches!(row, Some(Row::Base(_) | Row::Session(_))) {
                                                 close = true;
                                             }
-                                            switcher_pick = row;
+                                            switcher_picks.extend(row);
                                         }
-                                        KeyCode::Char(' ') => switcher_pick = sw.row(),
+                                        KeyCode::Char(' ') => switcher_picks.extend(sw.row()),
                                         KeyCode::Down | KeyCode::Tab => sw.step(true),
                                         KeyCode::Up | KeyCode::BackTab => sw.step(false),
                                         KeyCode::Char(c) if !ctrl => {
@@ -6623,31 +6806,13 @@ async fn main() -> Result<()> {
                                         Some(p) => want_base = Some(p),
                                         None => note = Some((Instant::now(), "' goes back to the base map before; there's none yet".into())),
                                     },
+                                    // S: save what's shown as a named session (the one opened, by default).
+                                    KeyCode::Char('S') => naming = Some(a.session.as_ref().map(|s| s.name.clone()).filter(|n| n != "run").unwrap_or_default()),
                                     KeyCode::Char('b') => {
                                         finder = None;
-                                        // The live layers running: each can be turned off and on.
-                                        let running: Vec<usize> = mapterm::basemaps::LIVE
-                                            .iter()
-                                            .enumerate()
-                                            .filter(|(_, l)| match l.key {
-                                                "aircraft" => adsb_feed.is_some(),
-                                                "ships" => ais_key.is_some(),
-                                                "satellites" => a.sats.is_some(),
-                                                "balloons" => a.sondes,
-                                                "radar" => radar.is_some(),
-                                                "alerts" => a.alerts,
-                                                "quakes" => a.quakes.is_some(),
-                                                "fires" => a.fires,
-                                                "gauges" => a.floods,
-                                                "outages" => a.outages,
-                                                "tfrs" => a.tfrs,
-                                                "closures" => a.closures,
-                                                "traffic" => a.traffic,
-                                                _ => false,
-                                            })
-                                            .map(|(i, _)| i)
-                                            .collect();
-                                        switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at, &running));
+                                        session_list = mapterm::sessions::all();
+                                        let rows = session_rows(&session_list);
+                                        switcher = Some(mapterm::basemaps::Switcher::open(&bases, base_at, &live_running).with_sessions(&bases, rows, false));
                                     }
                                     KeyCode::Char('c') if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                                         // The pointer's position on the map, else the center.
@@ -6750,7 +6915,7 @@ async fn main() -> Result<()> {
                                             {
                                                 sw.sel = n;
                                                 switcher_moved = None;
-                                                switcher_pick = Some(row);
+                                                switcher_picks.push(row);
                                             }
                                         }
                                         event::MouseEventKind::ScrollDown | event::MouseEventKind::ScrollUp => {
@@ -6951,7 +7116,73 @@ async fn main() -> Result<()> {
     }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
+    // Keep this run in the history, for --continue and --resume.
+    let sn = session_now(
+        a.session.as_ref().map_or("run", |s| s.name.as_str()),
+        &a.kept,
+        &ctl.cam,
+        bases.get(base_at).map(|e| e.base.spec().to_string()),
+        &overlay_on,
+        &live_off,
+        vector,
+    );
+    if let Err(e) = sn.save_history() {
+        dlog(|| format!("history: {e:#}"));
+    }
+    // A session with other layers: this program again, continuing it (it goes in the history
+    // as the latest run, after this one).
+    if let Some(mut sn) = restart_with {
+        use std::os::unix::process::CommandExt;
+        sn.saved_at = unix_now() + 0.001;
+        sn.save_history()?;
+        let exe = std::env::current_exe().context("finding mapterm to start again")?;
+        let e = std::process::Command::new(exe).arg("--continue").exec();
+        return Err(e).context("starting mapterm again");
+    }
     result
+}
+
+/// What the viewer shows now, as a session called `name`.
+fn session_now(
+    name: &str,
+    kept: &[String],
+    cam: &Camera,
+    base: Option<String>,
+    overlay_on: &[bool],
+    live_off: &std::collections::HashMap<&'static str, (Vec<StyleLayer>, Option<String>)>,
+    vector: u8,
+) -> mapterm::sessions::Session {
+    let mut off: Vec<String> = live_off.keys().map(|k| k.to_string()).collect();
+    off.sort();
+    mapterm::sessions::Session {
+        name: name.to_string(),
+        args: kept.to_vec(),
+        lon: cam.lon,
+        lat: cam.lat,
+        zoom: cam.zoom,
+        base,
+        overlays: overlay_on.iter().zip(mapterm::basemaps::OVERLAYS).filter(|(on, _)| **on).map(|(_, o)| o.preset.to_string()).collect(),
+        live_off: off,
+        vector,
+        saved_at: unix_now(),
+    }
+}
+
+/// The switcher's rows for sessions: a name (or when, for a recent run) and what it shows.
+fn session_rows(list: &[(mapterm::sessions::Session, bool)]) -> Vec<(String, String)> {
+    let now = unix_now();
+    list.iter()
+        .map(|(s, past)| {
+            let when = mapterm::sessions::ago(s.saved_at, now);
+            let name = match (*past, s.name.as_str()) {
+                (true, "run") => when.clone(),
+                (true, n) => format!("{when} · {n}"),
+                (false, n) => n.to_string(),
+            };
+            let detail = if *past { s.summary() } else { format!("{} · {when}", s.summary()) };
+            (name, detail)
+        })
+        .collect()
 }
 
 /// A token bucket for --raster-limit: holds a minute's worth of requests, refilled steadily.

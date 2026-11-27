@@ -26,6 +26,13 @@ All notable changes to mapterm are listed here. The format follows
   TFRs, closures, traffic) has a row, first in the list, found by typing like the rest. Off
   takes it off the map, its legend and the status line; its data keeps coming.
 
+- Sessions: `S` saves what's shown under a name (the options it started with, the view, base
+  map, imagery overlays, layers turned off); `--session NAME` opens it again. Each run is
+  kept when it ends (the last 50): `--continue` (`-c`) reopens the last, `--resume` lists
+  saved sessions and recent runs to pick from, as the `b` switcher does too. Opening one
+  that needs other layers starts mapterm again with them. `--sessions` lists them.
+  `mapterm::sessions`.
+
 - Traffic speeds (`--traffic`): Maryland CHART's speed sensors, a dot per sensor colored by
   its slowest direction, speeds labeled from zoom 10. With a route, each choice shows its
   time with traffic beside the free-flow time. `mapterm::traffic`.

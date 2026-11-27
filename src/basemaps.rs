@@ -177,6 +177,8 @@ pub enum Row {
     Overlay(usize),
     /// A live layer on or off (its index in [`LIVE`]), when it was started.
     Live(usize),
+    /// A saved or recent session to open (its index in [`Switcher::sessions`]).
+    Session(usize),
 }
 
 /// The overlay rows' names and the words they're found by.
@@ -184,9 +186,11 @@ const LABELS_ROW: (&str, &str) = ("labels", "place and road names");
 const VECTOR_ROW: (&str, &str) = ("over imagery", "roads and names, vector overlay");
 
 impl Row {
-    /// Its name in the switcher, and the words after it that the filter also searches.
-    pub fn text(self, list: &[Entry]) -> (String, String) {
+    /// Its name in the switcher, and the words after it that the filter also searches
+    /// (`sessions`: each session's name and description).
+    pub fn text(self, list: &[Entry], sessions: &[(String, String)]) -> (String, String) {
         match self {
+            Row::Session(i) => (sessions[i].0.clone(), format!("{} session", sessions[i].1)),
             Row::Base(i) => {
                 let e = &list[i];
                 (e.label.clone(), format!("{} {}", e.detail, if e.base.is_imagery() { "imagery satellite" } else { "map style" }))
@@ -218,6 +222,10 @@ pub struct Switcher {
     pub opened_on: usize,
     /// The live layers running, which have rows (indices in [`LIVE`]).
     pub live: Vec<usize>,
+    /// Sessions to open: name (or when, for a recent one) and a description.
+    pub sessions: Vec<(String, String)>,
+    /// Sessions come first (opened to resume one).
+    pub sessions_first: bool,
 }
 
 impl Switcher {
@@ -225,10 +233,33 @@ impl Switcher {
     /// running (indices in [`LIVE`]).
     pub fn open(list: &[Entry], current: usize, live: &[usize]) -> Self {
         let total = list.len() + OVERLAYS.len() + 2 + live.len();
-        let mut s = Switcher { query: String::new(), rows: Vec::new(), marks: Vec::new(), total, sel: 0, opened_on: current, live: live.to_vec() };
+        let mut s = Switcher {
+            query: String::new(),
+            rows: Vec::new(),
+            marks: Vec::new(),
+            total,
+            sel: 0,
+            opened_on: current,
+            live: live.to_vec(),
+            sessions: Vec::new(),
+            sessions_first: false,
+        };
         s.refilter(list);
         s.sel = s.rows.iter().position(|r| *r == Row::Base(current)).unwrap_or(0);
         s
+    }
+
+    /// With `sessions` to open as well; `first`: listed first and the first one chosen (to
+    /// resume one).
+    pub fn with_sessions(mut self, list: &[Entry], sessions: Vec<(String, String)>, first: bool) -> Self {
+        self.total += sessions.len();
+        self.sessions = sessions;
+        self.sessions_first = first;
+        self.refilter(list);
+        if first && !self.sessions.is_empty() {
+            self.sel = 0;
+        }
+        self
     }
 
     /// The rows matching the query: in list order while it's empty, best first once typed.
@@ -236,17 +267,20 @@ impl Switcher {
         let keep = self.row().filter(|_| self.query.is_empty());
         // Live layers first (what's turned on and off most), then base maps, imagery
         // overlays, and the vector map's parts.
-        let all = self
-            .live
-            .iter()
-            .map(|&i| Row::Live(i))
+        // Sessions last, or first to resume one.
+        let sessions: Vec<Row> = (0..self.sessions.len()).map(Row::Session).collect();
+        let (before, after) = if self.sessions_first { (sessions, Vec::new()) } else { (Vec::new(), sessions) };
+        let all = before
+            .into_iter()
+            .chain(self.live.iter().map(|&i| Row::Live(i)))
             .chain((0..list.len()).map(Row::Base))
             .chain((0..OVERLAYS.len()).map(Row::Overlay))
-            .chain([Row::Labels, Row::Vector]);
+            .chain([Row::Labels, Row::Vector])
+            .chain(after);
         let mut scored: Vec<(i32, usize, Row, Vec<usize>)> = all
             .enumerate()
             .filter_map(|(n, row)| {
-                let (name, more) = row.text(list);
+                let (name, more) = row.text(list, &self.sessions);
                 let (sc, at) = crate::fuzzy::matches(&self.query, &format!("{name} {more}"))?;
                 let len = name.chars().count();
                 Some((sc, n, row, at.into_iter().filter(|&i| i < len).collect()))
@@ -362,6 +396,15 @@ mod tests {
         r.query = "wildf".into();
         r.refilter(&l);
         assert_eq!(r.row(), Some(Row::Live(fires)));
+        // Sessions: last, or first (and chosen) to resume one; found by name.
+        let sessions = vec![("frederick".to_string(), "closures on esri".to_string())];
+        let r = Switcher::open(&l, 0, &[]).with_sessions(&l, sessions.clone(), false);
+        assert_eq!(*r.rows.last().unwrap(), Row::Session(0));
+        let mut r = Switcher::open(&l, 0, &[]).with_sessions(&l, sessions, true);
+        assert_eq!(r.row(), Some(Row::Session(0)));
+        r.query = "freder".into();
+        r.refilter(&l);
+        assert_eq!(r.row(), Some(Row::Session(0)));
     }
 
     #[test]

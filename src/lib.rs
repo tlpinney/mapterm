@@ -118,6 +118,7 @@ pub mod render;
 pub mod route;
 pub mod satellites;
 pub mod satnogs;
+pub mod sessions;
 pub mod shp;
 pub mod smooth;
 pub mod sondehub;
