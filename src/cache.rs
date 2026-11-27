@@ -30,7 +30,8 @@ pub struct Cache {
 }
 
 /// The cache names, in report order.
-pub const NAMES: [&str; 12] = ["tiles", "imagery", "geoparquet", "docs", "buildings", "stac", "orbits", "radio", "zones", "radar", "outages", "old"];
+pub const NAMES: [&str; 13] =
+    ["tiles", "imagery", "geoparquet", "docs", "buildings", "stac", "orbits", "radio", "zones", "radar", "outages", "stations", "old"];
 
 /// A folder earlier versions kept a source's tiles in: named by [`crate::source::hash`], 16
 /// hex digits.
@@ -62,6 +63,7 @@ pub fn caches_in(root: &Path) -> Vec<Cache> {
                 "zones" => ("weather alert zone outlines from the NWS (--alerts)", "kept 90 days".to_string()),
                 "radar" => ("weather radar scans from RainViewer (--radar)", "scans over 3 hours old go".to_string()),
                 "outages" => ("power outage outlines from the states (--outages)", "re-read after 30 days".to_string()),
+                "stations" => ("weather balloon receiving stations heard (--sondes)", "each kept 30 days from its last upload".to_string()),
                 _ => ("left by earlier versions (a file per tile), no longer read", "none: clear it".to_string()),
             };
             Cache { name, about, paths, bytes, files, limit }
@@ -116,6 +118,7 @@ fn paths_of(root: &Path, name: &str) -> Vec<PathBuf> {
             .filter(|p| p.is_file() && is_db(p, "sqlite") && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("rainviewer.")))
             .collect(),
         "outages" => dir("outages"),
+        "stations" => dir("sondehub"),
         // Earlier versions: a folder per source (named by its hash) at the top and under
         // raster/, and the old geoparquet/ folder. Nothing else: other folders may not be
         // mapterm's.
