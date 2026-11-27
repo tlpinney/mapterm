@@ -13,7 +13,11 @@ All notable changes to mapterm are listed here. The format follows
   terminal shows them), when and which way it was taken, who took it and its Mapillary page;
   tab steps through the others, and the map marks where it was taken. Needs your own
   Mapillary client token (`--mapillary-key-cmd`, else `MAPILLARY_TOKEN`); photos are kept a
-  week by id, their expiring links never. `mapterm::mapillary`.
+  week by id, their expiring links never. Walk mode (`w` with a photo shown): W/S (or ↑/↓)
+  step along the street, following the photographer's sequence and then the nearest photo
+  ahead, A/D (←/→) turn onto a photo facing left or right, Q/E older and newer photos of the
+  spot, esc leaves; the map follows, the photo takes more of the screen.
+  `mapterm::mapillary`.
 
 - Mobile network cells (`--cells`, or from `L`) from OpenCelliD (CC BY-SA 4.0): each cell's
   estimated position as ▴ colored by radio (5G NR magenta, LTE blue, 3G green, 2G grey),

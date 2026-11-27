@@ -1391,6 +1391,10 @@ const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
 const PATH_IMAGE: u32 = 4_000_000_005;
 /// The kitty image of satellite dots and their names.
 const SAT_IMAGE: u32 = 4_000_000_006;
+/// A walk-mode step done: what the walk knows now, and the photo it led to (with the way
+/// you then face), or None for nowhere that way.
+type WalkDone = (mapterm::mapillary::Walk, Result<Option<(mapterm::mapillary::Photo, f64)>>);
+
 /// A street-level photo's image as it comes: its id, and its size and RGBA pixels.
 type PhotoImage = (String, Result<(u32, u32, Vec<u8>)>);
 /// The kitty image of the street-level photo shown in the panel.
@@ -1649,6 +1653,7 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
                 ("c", "copy the coordinates"),
                 ("S", "sessions: open one, or save this view"),
                 ("B", "places: fly to one, or save this spot"),
+                ("w", "walk mode, from a street-level photo (WASD, Q/E)"),
             ],
         ),
         (
@@ -4992,6 +4997,12 @@ async fn main() -> Result<()> {
     let mut photo_img: Option<(String, u32, u32, Vec<u8>)> = None;
     let mut photo_rect = Rect::default();
     let mut photo_placed: Option<(String, Rect)> = None;
+    // Walk mode (w with a photo shown): on, what it knows (taken while a step is under way),
+    // and which way you face.
+    let mut walking = false;
+    let mut walk: Option<mapterm::mapillary::Walk> = None;
+    let mut facing = 0.0f64;
+    let (walktx, mut walkrx) = mpsc::unbounded_channel::<WalkDone>();
     let (photostx, mut photosrx) = mpsc::unbounded_channel::<Result<Vec<mapterm::mapillary::Photo>>>();
     let (imgtx, mut imgrx) = mpsc::unbounded_channel::<PhotoImage>();
     let fetch_image = |p: mapterm::mapillary::Photo, tx: mpsc::UnboundedSender<PhotoImage>| {
@@ -5428,7 +5439,8 @@ async fn main() -> Result<()> {
                 let site = selected_site.as_deref().and_then(|id| launch_sites.iter().find(|s| s.id == id));
                 let panel_w =
                     if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() || site.is_some() || !selected_cells.is_empty() || !photos.is_empty() {
-                        52.min(main.width / 2)
+                        // Walking, the photo takes more of the screen.
+                        if walking && !photos.is_empty() { (main.width * 3 / 5).max(52.min(main.width)) } else { 52.min(main.width / 2) }
                     } else {
                         0
                     };
@@ -5909,6 +5921,13 @@ async fn main() -> Result<()> {
                         Span::styled("█", TStyle::new().fg(Color::Rgb(127, 178, 255))),
                         Span::styled("  ↑↓ choose · enter go · esc close ", dim),
                     ];
+                }
+                // Walk mode says so, with its keys.
+                if walking {
+                    let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(0x05, 0xcb, 0x63)).add_modifier(ratatui::style::Modifier::BOLD);
+                    let busy = if walk.is_none() { " stepping…" } else { "" };
+                    spans.insert(0, Span::styled(format!(" ⇡ WALK {}{busy} ", mapterm::mapillary::compass8(facing)), st));
+                    spans.insert(1, Span::styled(" W/S step · A/D turn · Q/E older/newer · esc ", dim));
                 }
                 // While naming a place, the status line is its prompt.
                 if let Some(name) = &place_naming {
@@ -7340,6 +7359,22 @@ async fn main() -> Result<()> {
                         Err(e) => note = Some((Instant::now(), format!("launch sites: {e:#}"))),
                     }
                 }
+                Some((w, r)) = walkrx.recv() => {
+                    walk = Some(w);
+                    match r {
+                        Ok(Some((p, face))) => {
+                            facing = face;
+                            if let Some((lon, lat)) = p.at {
+                                ctl.fly_to(beside_panel(Camera::new(lon, lat, ctl.cam.zoom.max(18.0)), map_area, panel_area));
+                            }
+                            photos = vec![p];
+                            (photo_at, photo_img) = (0, None);
+                            fetch_image(photos[0].clone(), imgtx.clone());
+                        }
+                        Ok(None) => note = Some((Instant::now(), "no photo that way".into())),
+                        Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                    }
+                }
                 Some(r) = photosrx.recv() => {
                     photos_asking = false;
                     match r {
@@ -7679,6 +7714,37 @@ async fn main() -> Result<()> {
                                         _ => {}
                                     }
                                     continue;
+                                }
+                                // Walk mode: WASD and the arrows step and turn, Q/E older and newer
+                                // photos of the spot, esc leaves it. Other keys work as usual.
+                                if walking {
+                                    use mapterm::mapillary::Step;
+                                    let step = match k.code {
+                                        KeyCode::Char('w' | 'W') | KeyCode::Up => Some(Step::Forward),
+                                        KeyCode::Char('s' | 'S') | KeyCode::Down => Some(Step::Back),
+                                        KeyCode::Char('a' | 'A') | KeyCode::Left => Some(Step::Left),
+                                        KeyCode::Char('d' | 'D') | KeyCode::Right => Some(Step::Right),
+                                        KeyCode::Char('q' | 'Q') => Some(Step::Older),
+                                        KeyCode::Char('e' | 'E') => Some(Step::Newer),
+                                        _ => None,
+                                    };
+                                    if k.code == KeyCode::Esc {
+                                        walking = false;
+                                        note = Some((Instant::now(), "left walk mode".into()));
+                                        continue;
+                                    }
+                                    if let Some(step) = step {
+                                        // One step at a time: keys while one is under way wait their turn.
+                                        if let (Some(mut w), Some(cur), Some(token)) = (walk.take(), photos.get(photo_at).cloned(), mapillary_token.clone()) {
+                                            let tx = walktx.clone();
+                                            let face = facing;
+                                            tokio::spawn(async move {
+                                                let r = w.step(&cur, face, step, &token).await;
+                                                let _ = tx.send((w, r));
+                                            });
+                                        }
+                                        continue;
+                                    }
                                 }
                                 // The base map switcher takes every key while it's open, as fzf:
                                 // typing filters, up/down (ctrl-n/p, ctrl-j/k) choose and preview,
@@ -8083,7 +8149,10 @@ async fn main() -> Result<()> {
                                     }
                                     KeyCode::Esc if selected_site.is_some() && !inspect => selected_site = None,
                                     KeyCode::Esc if !selected_cells.is_empty() && !inspect => selected_cells.clear(),
-                                    KeyCode::Esc if !photos.is_empty() && !inspect => (photos, photo_img) = (Vec::new(), None),
+                                    KeyCode::Esc if !photos.is_empty() && !inspect => {
+                                        (photos, photo_img) = (Vec::new(), None);
+                                        walking = false;
+                                    }
                                     // Tab, shift-tab: the next or previous photo nearby.
                                     KeyCode::Tab | KeyCode::BackTab if photos.len() > 1 && !inspect => {
                                         let n = photos.len();
@@ -8262,6 +8331,16 @@ async fn main() -> Result<()> {
                                         place_list = mapterm::places::load();
                                         place_forget = None;
                                         switcher = Some(mapterm::basemaps::Switcher::places(place_rows(&place_list)));
+                                    }
+                                    // w: walk mode, from the street-level photo shown.
+                                    KeyCode::Char('w') if !photos.is_empty() && mapillary_token.is_some() => {
+                                        walking = true;
+                                        walk.get_or_insert_with(Default::default);
+                                        facing = photos.get(photo_at).and_then(|p| p.heading).unwrap_or(0.0);
+                                        if let Some((lon, lat)) = photos.get(photo_at).and_then(|p| p.at) {
+                                            ctl.fly_to(Camera::new(lon, lat, ctl.cam.zoom.max(18.0)));
+                                        }
+                                        note = Some((Instant::now(), "walk mode: W/S step · A/D turn · Q/E older/newer · esc leaves".into()));
                                     }
                                     // S: the sessions, to open one or save this.
                                     KeyCode::Char('S') => {
