@@ -72,7 +72,8 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
   --bbox W,S,E,N  read a GeoParquet layer once, for this area only (lon/lat), instead of
                 loading it as the map moves
   --at          start position (default: fit the GeoJSON layers, else the source's center);
-                `here` is where you are (see --location-cmd), zoomed to its accuracy
+                `here` is where you are (see --location-cmd), zoomed to its accuracy; or a
+                place saved with B, by name (at its zoom)
   --session NAME  open a session saved with S: its layers, view, base map, overlays and
                 layers turned off (options given after it win over its own)
   --continue, -c  open the last run again, as it was when it ended
@@ -235,7 +236,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
       +/- zoom · sideways swipe pans · / search · i inspect · b base map · L layers · K legends ·
-      D data sources · S sessions · m/M next or previous base map · ' the one before · t theme · c copy
+      D data sources · S sessions · B places · m/M next or previous base map · ' the one before · t theme · c copy
       coordinates · v vector overlay · n labels · q quit
 
 pickers, in the middle of the map, fzf-style (typing filters, matched letters lit, best
@@ -250,6 +251,9 @@ pickers, in the middle of the map, fzf-style (typing filters, matched letters li
   D   the data sources (live feeds and data files): how many features, when each last
       updated and how often, errors, how it relates to time (events, tracks drawn a little
       behind, frames...), where it's from and its credit
+  B   places you saved: enter flies there; the first row saves the spot (the pointer's,
+      else the center) under what's typed; ctrl-d twice forgets one. Saved places come
+      first in / search too
   S   sessions saved and recent runs, with when each was made and opened: enter opens one;
       the first row saves this view under what's typed
       Imagery goes under the style's roads and names (v: all, names only, none).
@@ -493,8 +497,15 @@ fn args() -> Result<Args> {
                     a.at_here = true;
                     continue;
                 }
-                let (la, lo) = v.split_once(',').context("--at LAT,LON")?;
-                a.at = Some((lo.trim().parse()?, la.trim().parse()?));
+                // LAT,LON, else a saved place's name.
+                match v.split_once(',').map(|(la, lo)| (la.trim().parse::<f64>(), lo.trim().parse::<f64>())) {
+                    Some((Ok(la), Ok(lo))) => a.at = Some((lo, la)),
+                    _ => {
+                        let p = mapterm::places::find(&v).with_context(|| format!("--at {v}: not LAT,LON, here, or a saved place (B saves one)"))?;
+                        a.at = Some((p.lon, p.lat));
+                        a.zoom = a.zoom.or(Some(p.zoom));
+                    }
+                }
             }
             "--style" => a.style = Some(it.next().context("--style NAME|URL|FILE")?),
             "-z" | "--zoom" => a.zoom = Some(it.next().context("-z ZOOM")?.parse()?),
@@ -1337,6 +1348,7 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
                 ("g", "go to your location"),
                 ("c", "copy the coordinates"),
                 ("S", "sessions: open one, or save this view"),
+                ("B", "places: fly to one, or save this spot"),
             ],
         ),
         (
@@ -1760,7 +1772,7 @@ fn draw_switcher(
     // Lines: section headings (while nothing is typed) and rows.
     let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
     // Sessions say more (what, when made, when opened): wider.
-    let width = if matches!(sw.kind, Picker::Sessions | Picker::Sources) { 84u16 } else { 58 }.min(area.width.saturating_sub(4));
+    let width = if matches!(sw.kind, Picker::Sessions | Picker::Sources | Picker::Places) { 84u16 } else { 58 }.min(area.width.saturating_sub(4));
     let w = width.saturating_sub(4) as usize;
     let mut section = "";
     for (n, row) in sw.rows.iter().enumerate() {
@@ -1770,7 +1782,7 @@ fn draw_switcher(
             Row::Live(_) => "live layers",
             Row::Data(_) => "data",
             Row::Labels | Row::Vector | Row::Legends => "map",
-            Row::Session(_) | Row::SaveAs => "",
+            Row::Session(_) | Row::SaveAs | Row::Place(_) => "",
             Row::Overlay(_) => "imagery overlays",
         };
         if sw.query.is_empty() && name != section {
@@ -1817,7 +1829,8 @@ fn draw_switcher(
                 let (name, detail) = &sw.sessions[*i];
                 ("↺", name.clone(), detail.clone())
             }
-            Row::SaveAs => ("＋", sw.text(Row::SaveAs, list).0, "S".to_string()),
+            Row::SaveAs => ("＋", sw.text(Row::SaveAs, list).0, if sw.kind == Picker::Places { "B" } else { "S" }.to_string()),
+            Row::Place(i) => ("⚑", sw.sessions[*i].0.clone(), sw.sessions[*i].1.clone()),
             Row::Data(i) => (if data_on(*i) { "☑" } else { "☐" }, sw.data[*i].clone(), "data layer".to_string()),
             Row::Legends => (if legends { "☑" } else { "☐" }, "legends".to_string(), "keys to the colors".to_string()),
             Row::Live(i) => {
@@ -1874,6 +1887,7 @@ fn draw_switcher(
                     Picker::Layers => " ↑↓ choose · enter or space on/off · esc close ",
                     Picker::Sessions => " ↑↓ choose · enter open or save · esc close ",
                     Picker::Sources => " ↑↓ choose · enter or space on/off · esc close ",
+                    Picker::Places => " ↑↓ choose · enter fly or save · ctrl-d twice forgets · esc close ",
                 },
                 dim,
             )
@@ -4437,6 +4451,13 @@ async fn main() -> Result<()> {
     // command line to start again with (one that needs other layers), and S's name prompt.
     let mut restart_with: Option<mapterm::sessions::Session> = None;
     let mut naming: Option<String> = None;
+    // B: saved places. The spot B was pressed on (the pointer, else the center), the name
+    // prompt for saving it, the places listed, and a place to forget once ctrl-d is pressed
+    // again.
+    let mut place_spot = (0.0f64, 0.0f64, 0.0f64);
+    let mut place_naming: Option<String> = None;
+    let mut place_list: Vec<mapterm::places::Place> = Vec::new();
+    let mut place_forget: Option<String> = None;
     // How each data source is doing (by live layer key): updated when, errors, how often.
     let mut status: std::collections::HashMap<&'static str, mapterm::sources::Status> = std::collections::HashMap::new();
     // Data layers (--geojson and the like) turned off in L: their style layers, to put back.
@@ -5416,6 +5437,15 @@ async fn main() -> Result<()> {
                         Span::styled("  ↑↓ choose · enter go · esc close ", dim),
                     ];
                 }
+                // While naming a place, the status line is its prompt.
+                if let Some(name) = &place_naming {
+                    spans = vec![
+                        Span::styled(" save place ", TStyle::new().fg(Color::Black).bg(Color::Rgb(0xfb, 0xbf, 0x24))),
+                        Span::raw(format!(" > {name}")),
+                        Span::styled("█", TStyle::new().fg(Color::Rgb(0xfb, 0xbf, 0x24))),
+                        Span::styled(format!("  {:.4}, {:.4} · enter save · esc cancel", place_spot.1, place_spot.0), dim),
+                    ];
+                }
                 // While naming a session, the status line is its prompt.
                 if let Some(name) = &naming {
                     spans = vec![
@@ -6127,6 +6157,14 @@ async fn main() -> Result<()> {
                     }
                     Row::Base(i) => want_base = Some(i),
                     Row::SaveAs => {}
+                    Row::Place(i) => {
+                        if let Some(p) = place_list.get(i) {
+                            follow = false;
+                            ctl.fly_to(Camera::new(p.lon, p.lat, p.zoom));
+                            mapterm::places::visit(&mapterm::places::file(), &p.name, unix_now());
+                            note = Some((Instant::now(), format!("⚑ {}", p.name)));
+                        }
+                    }
                     Row::Legends => show_legend = !show_legend,
                     Row::Data(i) => {
                         if let Some((id, _)) = legend.get(i) {
@@ -6970,6 +7008,30 @@ async fn main() -> Result<()> {
                     for ev in queued {
                         match ev {
                             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                                // B's name prompt (saving the spot as a place) takes every key.
+                                if let Some(name) = place_naming.as_mut() {
+                                    match k.code {
+                                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                                        KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => name.clear(),
+                                        KeyCode::Esc => place_naming = None,
+                                        KeyCode::Enter => {
+                                            let (lon, lat, zoom) = place_spot;
+                                            match mapterm::places::add(&mapterm::places::file(), name, lat, lon, zoom, unix_now()) {
+                                                Ok(_) => {
+                                                    note = Some((Instant::now(), format!("saved place {} · B finds it", name.trim())));
+                                                    place_naming = None;
+                                                }
+                                                Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                                            }
+                                        }
+                                        KeyCode::Char(c) => name.push(c),
+                                        KeyCode::Backspace => {
+                                            name.pop();
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
                                 // S's name prompt takes every key while it's open.
                                 if let Some(name) = naming.as_mut() {
                                     match k.code {
@@ -7012,6 +7074,44 @@ async fn main() -> Result<()> {
                                         KeyCode::Char('n' | 'j') if ctrl => sw.step(true),
                                         KeyCode::Char('p' | 'k') if ctrl => sw.step(false),
                                         KeyCode::Esc => close = true,
+                                        KeyCode::Enter if sw.row() == Some(Row::SaveAs) && sw.kind == mapterm::basemaps::Picker::Places => {
+                                            // Save the spot under what's typed, or ask for a name.
+                                            let typed = sw.query.trim().to_string();
+                                            if typed.is_empty() {
+                                                place_naming = Some(String::new());
+                                            } else {
+                                                let (lon, lat, zoom) = place_spot;
+                                                note = Some((Instant::now(), match mapterm::places::add(&mapterm::places::file(), &typed, lat, lon, zoom, unix_now()) {
+                                                    Ok(_) => format!("saved place {typed} · B finds it"),
+                                                    Err(e) => format!("{e:#}"),
+                                                }));
+                                            }
+                                            close = true;
+                                        }
+                                        // ctrl-d twice forgets a place (there's no undo).
+                                        KeyCode::Char('d') if ctrl && sw.kind == mapterm::basemaps::Picker::Places => {
+                                            if let Some(Row::Place(i)) = sw.row()
+                                                && let Some(p) = place_list.get(i)
+                                            {
+                                                if place_forget.as_deref() == Some(p.name.as_str()) {
+                                                    let name = p.name.clone();
+                                                    match mapterm::places::remove(&mapterm::places::file(), &name) {
+                                                        Ok(v) => {
+                                                            place_list = v;
+                                                            sw.sessions = place_rows(&place_list);
+                                                            sw.total = place_list.len();
+                                                            refilter = true;
+                                                            note = Some((Instant::now(), format!("forgot {name}")));
+                                                        }
+                                                        Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                                                    }
+                                                    place_forget = None;
+                                                } else {
+                                                    note = Some((Instant::now(), format!("ctrl-d again forgets {}", p.name)));
+                                                    place_forget = Some(p.name.clone());
+                                                }
+                                            }
+                                        }
                                         KeyCode::Enter if sw.row() == Some(Row::SaveAs) => {
                                             // Save under what's typed, or ask for a name.
                                             let typed = sw.query.trim().to_string();
@@ -7029,7 +7129,7 @@ async fn main() -> Result<()> {
                                         }
                                         KeyCode::Enter => {
                                             let row = sw.row();
-                                            if matches!(row, Some(Row::Base(_) | Row::Session(_))) {
+                                            if matches!(row, Some(Row::Base(_) | Row::Session(_) | Row::Place(_))) {
                                                 close = true;
                                             }
                                             switcher_picks.extend(row);
@@ -7186,7 +7286,9 @@ async fn main() -> Result<()> {
                                             let query = q.trim().to_string();
                                             // Addresses, streets and names already on the map, with the geocoder's.
                                             let feats: Vec<&mapterm::geojson::Feature> = legend.iter().flat_map(|(id, _)| map.data_features(id)).collect();
-                                            search_local = mapterm::geocode::search_features(feats, &query, 8);
+                                            // Saved places first.
+                                            search_local = mapterm::places::search(&mapterm::places::load(), &query, 3);
+                                            search_local.extend(mapterm::geocode::search_features(feats, &query, 8));
                                             let (geo, gtx) = (geocoder.clone(), gtx.clone());
                                             let near = (ctl.cam.lon, ctl.cam.lat, ctl.cam.zoom);
                                             let qq = query.clone();
@@ -7515,6 +7617,19 @@ async fn main() -> Result<()> {
                                         None => note = Some((Instant::now(), "' goes back to the base map before; there's none yet".into())),
                                     },
                                     // S: save what's shown as a named session (the one opened, by default).
+                                    // B: saved places, to fly to one or save this spot (the pointer's,
+                                    // else the center).
+                                    KeyCode::Char('B') => {
+                                        finder = None;
+                                        let (lon, lat) = match pointer {
+                                            Some(d) => Viewport::new(&last_cam, map_area).dot_to_lonlat(d.0, d.1),
+                                            None => (ctl.cam.lon, ctl.cam.lat),
+                                        };
+                                        place_spot = (lon, lat, ctl.cam.zoom);
+                                        place_list = mapterm::places::load();
+                                        place_forget = None;
+                                        switcher = Some(mapterm::basemaps::Switcher::places(place_rows(&place_list)));
+                                    }
                                     // S: the sessions, to open one or save this.
                                     KeyCode::Char('S') => {
                                         finder = None;
@@ -7893,6 +8008,18 @@ fn session_now(
         created_at: created,
         viewed_at: unix_now(),
     }
+}
+
+/// The places picker's rows: each place's name, and when it was saved and visited, where.
+fn place_rows(list: &[mapterm::places::Place]) -> Vec<(String, String)> {
+    use mapterm::sessions::ago;
+    let now = unix_now();
+    list.iter()
+        .map(|p| {
+            let visited = if p.visited > p.created { format!(" · visited {}", ago(p.visited, now)) } else { String::new() };
+            (p.name.clone(), format!("saved {}{visited} · {:.4}, {:.4} · z{:.0}", ago(p.created, now), p.lat, p.lon, p.zoom))
+        })
+        .collect()
 }
 
 /// The switcher's rows for sessions: a name (or when, for a recent run) and what it shows.

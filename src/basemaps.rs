@@ -177,6 +177,8 @@ pub enum Picker {
     Sessions,
     /// The data sources: live feeds and data files, how they're doing.
     Sources,
+    /// Saved places, to fly to.
+    Places,
 }
 
 impl Picker {
@@ -187,6 +189,7 @@ impl Picker {
             Picker::Layers => "layers",
             Picker::Sessions => "sessions",
             Picker::Sources => "data sources",
+            Picker::Places => "places",
         }
     }
 }
@@ -210,8 +213,11 @@ pub enum Row {
     Data(usize),
     /// A saved or recent session to open (its index in [`Switcher::sessions`]).
     Session(usize),
-    /// Save what's shown as a session (named by what's typed, if anything).
+    /// Save what's shown as a session, or the spot as a place (named by what's typed).
     SaveAs,
+    /// A saved place to fly to (its index in [`Switcher::sessions`], which holds the places'
+    /// names and descriptions in the places picker).
+    Place(usize),
 }
 
 /// The fixed rows' names and the words they're found by.
@@ -289,6 +295,18 @@ impl Switcher {
         s
     }
 
+    /// The places picker (`places`: each one's name and description), with saving the spot
+    /// first; the most recent place chosen when there are any.
+    pub fn places(places: Vec<(String, String)>) -> Self {
+        let mut s = Switcher { sessions: places, ..Switcher::new(Picker::Places) };
+        s.refilter(&[]);
+        s.total = s.rows.len() - 1;
+        if s.rows.len() > 1 {
+            s.sel = 1;
+        }
+        s
+    }
+
     /// The sessions picker, with saving first; `resume`: the first session chosen.
     pub fn sessions(sessions: Vec<(String, String)>, resume: bool) -> Self {
         let mut s = Switcher { sessions, ..Switcher::new(Picker::Sessions) };
@@ -314,10 +332,12 @@ impl Switcher {
             Row::Overlay(i) => (OVERLAYS[i].label.into(), format!("{} imagery overlay", OVERLAYS[i].detail)),
             Row::Live(i) => (LIVE[i].label.into(), format!("{} {} live", LIVE[i].detail, LIVE[i].key)),
             Row::Data(i) => (self.data[i].clone(), "data layer".into()),
-            Row::SaveAs => match self.query.trim() {
-                "" => ("save this view…".into(), String::new()),
-                q => (format!("save as \"{q}\""), String::new()),
+            Row::SaveAs => match (self.query.trim(), self.kind) {
+                ("", Picker::Places) => ("save this spot…".into(), String::new()),
+                ("", _) => ("save this view…".into(), String::new()),
+                (q, _) => (format!("save as \"{q}\""), String::new()),
             },
+            Row::Place(i) => (self.sessions[i].0.clone(), self.sessions[i].1.clone()),
         }
     }
 
@@ -337,6 +357,7 @@ impl Switcher {
                 .chain([Row::Labels, Row::Vector, Row::Legends])
                 .collect(),
             Picker::Sessions => (0..self.sessions.len()).map(Row::Session).collect(),
+            Picker::Places => (0..self.sessions.len()).map(Row::Place).collect(),
             Picker::Sources => self.live.iter().map(|&i| Row::Live(i)).chain((0..self.data.len()).map(Row::Data)).collect(),
         };
         let mut scored: Vec<(i32, usize, Row, Vec<usize>)> = all
@@ -353,12 +374,12 @@ impl Switcher {
             scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
         }
         (self.rows, self.marks) = scored.into_iter().map(|(_, _, r, m)| (r, m)).unzip();
-        // Saving is always there, at the top: chosen when nothing typed matches a session.
-        if self.kind == Picker::Sessions {
+        // Saving is always there, at the top: chosen when nothing typed matches.
+        if matches!(self.kind, Picker::Sessions | Picker::Places) {
             self.rows.insert(0, Row::SaveAs);
             self.marks.insert(0, Vec::new());
         }
-        let first = usize::from(self.kind == Picker::Sessions && self.rows.len() > 1 && !self.query.trim().is_empty());
+        let first = usize::from(matches!(self.kind, Picker::Sessions | Picker::Places) && self.rows.len() > 1 && !self.query.trim().is_empty());
         self.sel = keep.and_then(|k| self.rows.iter().position(|r| *r == k)).unwrap_or(first);
     }
 
@@ -477,6 +498,23 @@ mod tests {
         s.query = "parc".into();
         s.refilter(&[]);
         assert_eq!(s.row(), Some(Row::Data(0)));
+    }
+
+    #[test]
+    fn places_picker() {
+        let list = vec![("Cunningham Falls".into(), "saved 3 days ago".into()), ("Home field".into(), "saved today".into())];
+        let mut s = Switcher::places(list);
+        assert_eq!(s.rows[0], Row::SaveAs);
+        assert_eq!(s.text(Row::SaveAs, &[]).0, "save this spot…");
+        assert_eq!(s.row(), Some(Row::Place(0)), "the latest place chosen");
+        s.query = "home".into();
+        s.refilter(&[]);
+        assert_eq!(s.row(), Some(Row::Place(1)));
+        s.query = "beach".into();
+        s.refilter(&[]);
+        assert_eq!(s.rows, vec![Row::SaveAs]);
+        assert_eq!(s.text(Row::SaveAs, &[]).0, "save as \"beach\"");
+        assert_eq!(Switcher::places(Vec::new()).row(), Some(Row::SaveAs), "nothing saved yet: saving");
     }
 
     #[test]
