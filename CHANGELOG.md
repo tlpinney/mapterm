@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Saved places (`B`): a picker of places you saved, filtered fzf-style; enter flies there
+  (at the zoom it was saved at). Its first row saves the spot (the pointer's, else the
+  center) under what's typed; ctrl-d twice forgets one. Saved places come first in `/`
+  search, and `--at NAME` starts at one. Kept in `~/.config/mapterm/places.json`.
+  `mapterm::places`.
+
 - Clicking a receiving station in a weather balloon's panel flies the map to it, centered in
   the part of the map the panel doesn't cover.
 - Receiving stations are shown, measured from and kept only as an area (the middle of a
