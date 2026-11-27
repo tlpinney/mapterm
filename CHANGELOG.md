@@ -8,6 +8,11 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- The lines from a selected weather balloon to the stations hearing it are violet, apart
+  from the stations' green and the predicted path's blue, and drawn as smooth image lines
+  where the terminal shows images. The predicted landing's label has a solid background, so
+  it reads over any map or imagery.
+
 - Balloons and airships in the ADS-B feed: aircraft whose emitter category is B2 (lighter
   than air), or typed `BALL` when they send no category, show as ◓ instead of an arrow (big
   scientific and stratospheric balloons carry transponders), counted on the status line.

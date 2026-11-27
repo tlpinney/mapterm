@@ -733,7 +733,7 @@ fn live_sources(key: &str) -> &'static [&'static str] {
         "aircraft" => &[AIRCRAFT, TRAILS],
         "ships" => &[SHIPS],
         "satellites" => &[SATS],
-        "balloons" => &[BALLOONS, STATIONS, STATION_LINKS, STATION_AREAS],
+        "balloons" => &[BALLOONS, STATIONS, STATION_LINKS, STATION_AREAS, STATION_LINK_TILES],
         "nasa" => &[NASA, NASA_TRACKS],
         "alerts" => &[ALERTS, ALERT_TILES],
         "quakes" => &[QUAKES],
@@ -1063,6 +1063,10 @@ const NASA_TRACKS: &str = "nasa-tracks";
 const STATION_LINKS: &str = "balloon-links";
 /// The stations' areas (where each is, somewhere inside).
 const STATION_AREAS: &str = "balloon-station-areas";
+/// The lines to the stations as image tiles, where the terminal shows images.
+const STATION_LINK_TILES: &str = "balloon-link-tiles";
+/// Their color: violet, apart from the stations' green and the predicted path's blue.
+const STATION_LINK_RGB: (u8, u8, u8) = (0xc0, 0x84, 0xfc);
 const QUAKES: &str = "quakes";
 const FIRES: &str = "fires";
 const GAUGES: &str = "gauges";
@@ -3271,10 +3275,19 @@ fn add_closures(map: &mut Map, tiles: &Arc<mapterm::areas::AreaTiles>, tiles_bef
 
 /// The weather balloons over the stations receiving them and the lines between, all under
 /// `before` (None: on top).
-fn add_balloons(map: &mut Map, before: Option<&str>) -> Result<()> {
+fn add_balloons(map: &mut Map, link_tiles: &Arc<mapterm::areas::AreaTiles>, before: Option<&str>) -> Result<()> {
     map.add_source(STATION_AREAS, empty_source()?)?;
     map.add_layers(mapterm::sondehub::area_layers(STATION_AREAS, STATION_AREAS), before)?;
+    // Where the terminal shows images, the lines to the stations are smooth image lines; the
+    // braille ones stay, hidden, for clicking.
+    if mapterm::kitty::supported() {
+        map.add_source(STATION_LINK_TILES, MapSource::raster(mapterm::areas::tile_source_to(link_tiles.clone(), "balloon-links", SONDE_CREDIT, 18)?))?;
+        map.add_layers(vec![StyleLayer::raster(STATION_LINK_TILES, STATION_LINK_TILES)], before)?;
+    }
     add_points(map, STATION_LINKS, SONDE_CREDIT, mapterm::sondehub::link_layer(STATION_LINKS, STATION_LINKS), before)?;
+    if mapterm::kitty::supported() {
+        map.set_visibility(STATION_LINKS, false)?;
+    }
     add_points(map, STATIONS, SONDE_CREDIT, mapterm::sondehub::station_layer(STATIONS, STATIONS), before)?;
     add_points(map, BALLOONS, SONDE_CREDIT, mapterm::sondehub::layer(BALLOONS, BALLOONS), before)
 }
@@ -4078,9 +4091,11 @@ async fn main() -> Result<()> {
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS || *id == AIRCRAFT).map(str::to_string);
         add_nasa(&mut map, above.as_deref())?;
     }
+    // The lines from a selected balloon to the stations hearing it, as image tiles.
+    let link_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
     if a.sondes {
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS || *id == AIRCRAFT).map(str::to_string);
-        add_balloons(&mut map, above.as_deref())?;
+        add_balloons(&mut map, &link_tiles, above.as_deref())?;
     }
     // Earthquakes (--quakes): under everything that moves.
     if a.quakes.is_some() {
@@ -4629,6 +4644,8 @@ async fn main() -> Result<()> {
     let mut balloons = mapterm::sondehub::Balloons::default();
     // The receiving stations heard before (kept 30 days), so they show before any balloon is.
     let mut stations_saved = Instant::now();
+    // What the image lines to the stations were last drawn from.
+    let mut links_drawn = String::new();
     if a.sondes {
         balloons.load_stations(&mapterm::sondehub::stations_file(), unix_now());
         // Exact positions an earlier version kept: replaced by their areas at once.
@@ -4906,8 +4923,10 @@ async fn main() -> Result<()> {
                     if !trails_kitty {
                         overlays.push(Overlay::Line { pts: p.path.iter().map(|&(_, lon, lat, _)| (lon, lat)).collect(), color: dim });
                     }
-                    let when = format!("lands {}", hhmm(t));
-                    overlays.push(Overlay::Marker { lon, lat, glyph: "✕".into(), style: TStyle::new().fg(dim), label: Some((when, TStyle::new().fg(dim))), priority: 100 });
+                    // The label on a solid background, so it reads over any map or imagery.
+                    let when = format!(" lands {} ", hhmm(t));
+                    let tag = TStyle::new().fg(Color::Black).bg(dim).add_modifier(ratatui::style::Modifier::BOLD);
+                    overlays.push(Overlay::Marker { lon, lat, glyph: "✕".into(), style: TStyle::new().fg(dim), label: Some((when, tag)), priority: 100 });
                 }
                 let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255)).add_modifier(ratatui::style::Modifier::BOLD);
                 overlays.push(Overlay::Marker { lon: at.lon, lat: at.lat, glyph: b.glyph().into(), style: st, label: Some((b.latest.serial.clone(), st)), priority: 101 });
@@ -5960,6 +5979,29 @@ async fn main() -> Result<()> {
                     None => serde_json::json!({"type": "FeatureCollection", "features": []}),
                 };
                 map.set_data(STATION_LINKS, &links)?;
+                // The image lines again only when they'd look different: another balloon,
+                // other stations, or the balloon a kilometer on.
+                let key = links["features"]
+                    .as_array()
+                    .map(|fs| {
+                        fs.iter()
+                            .map(|f| {
+                                let c = &f["geometry"]["coordinates"][0];
+                                format!("{}@{:.2},{:.2}", f["properties"]["callsign"], c[0].as_f64().unwrap_or(0.0), c[1].as_f64().unwrap_or(0.0))
+                            })
+                            .collect::<Vec<_>>()
+                            .join(";")
+                    })
+                    .unwrap_or_default();
+                if key != links_drawn {
+                    let mut shape = mapterm::areas::Shape::lines(STATION_LINK_RGB, 2.0, false);
+                    for f in links["features"].as_array().into_iter().flatten() {
+                        shape.add(&f["geometry"]);
+                    }
+                    link_tiles.set(vec![shape]);
+                    map.put_raster_tile(STATION_LINK_TILES, None, true);
+                    links_drawn = key;
+                }
                 // New or moved stations, kept for next time (at most every 5 minutes).
                 if balloons.stations_changed() && stations_saved.elapsed() >= Duration::from_secs(300) {
                     stations_saved = Instant::now();
@@ -6220,7 +6262,7 @@ async fn main() -> Result<()> {
                                 "balloons" => {
                                     a.sondes = true;
                                     let before = under(&map, &[TRAILS, AIRCRAFT, SATS]);
-                                    add_balloons(&mut map, before.as_deref())?;
+                                    add_balloons(&mut map, &link_tiles, before.as_deref())?;
                                     balloons.load_stations(&mapterm::sondehub::stations_file(), unix_now());
                                     if balloons.stations_changed() {
                                         let _ = balloons.save_stations(&mapterm::sondehub::stations_file());
