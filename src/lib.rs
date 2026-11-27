@@ -79,6 +79,7 @@ pub mod events;
 pub mod export;
 pub mod expr;
 pub mod fgb;
+pub mod fires;
 pub mod formats;
 pub mod fuzzy;
 pub mod geocode;
