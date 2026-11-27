@@ -10,7 +10,6 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::io::Read;
 use std::path::PathBuf;
 
 /// The credit OpenCelliD asks for (CC BY-SA 4.0).
@@ -48,6 +47,18 @@ impl Radio {
             "NBIOT" => Radio::NbIot,
             _ => return None,
         })
+    }
+
+    /// Its code in OpenCelliD's files (`LTE`, `NR`, ...).
+    pub fn code(self) -> &'static str {
+        match self {
+            Radio::Gsm => "GSM",
+            Radio::Umts => "UMTS",
+            Radio::Cdma => "CDMA",
+            Radio::Lte => "LTE",
+            Radio::Nr => "NR",
+            Radio::NbIot => "NBIOT",
+        }
     }
 
     /// Its name.
@@ -149,29 +160,55 @@ pub fn dir() -> PathBuf {
     crate::source::cache_root().join("opencellid")
 }
 
-/// Download the files for `mccs` with `key` into [`dir`], each at most once in 12 hours.
-/// Returns, for each, what happened.
-pub async fn download(mccs: &[u16], key: &str) -> Vec<(u16, Result<String>)> {
+/// What to download: a mobile country code's file, or the whole world's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Area {
+    /// One mobile country code (the US has several: [`US`]).
+    Mcc(u16),
+    /// Every cell OpenCelliD has.
+    World,
+}
+
+impl Area {
+    /// Its name, and its files' (`310`, `world`).
+    pub fn name(self) -> String {
+        match self {
+            Area::Mcc(m) => m.to_string(),
+            Area::World => "world".into(),
+        }
+    }
+
+    fn url(self, key: &str) -> String {
+        match self {
+            Area::Mcc(m) => format!("https://opencellid.org/ocid/downloads?token={key}&type=mcc&file={m}.csv.gz"),
+            Area::World => format!("https://opencellid.org/ocid/downloads?token={key}&type=full&file=cell_towers.csv.gz"),
+        }
+    }
+}
+
+/// Download `areas` with `key` and turn each into GeoParquet in [`dir`], each at most once in
+/// 12 hours. Returns, for each, what happened.
+pub async fn download(areas: &[Area], key: &str) -> Vec<(String, Result<String>)> {
     let mut out = Vec::new();
-    for &m in mccs {
-        out.push((m, download_one(m, key).await));
+    for &a in areas {
+        out.push((a.name(), download_one(a, key).await));
     }
     out
 }
 
-async fn download_one(mcc: u16, key: &str) -> Result<String> {
-    let path = dir().join(format!("{mcc}.csv.gz"));
-    if let Some(age) = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok())
+async fn download_one(area: Area, key: &str) -> Result<String> {
+    let name = area.name();
+    let stamp = dir().join(format!("{name}.downloaded"));
+    if let Some(age) = std::fs::metadata(&stamp).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok())
         && age < MIN_AGAIN
     {
         return Ok(format!("kept (downloaded {} ago; OpenCelliD allows two a day)", crate::sources::span(age.as_secs_f64())));
     }
-    let url = format!("https://opencellid.org/ocid/downloads?token={key}&type=mcc&file={mcc}.csv.gz");
-    let got = crate::source::get_limited(&crate::source::http_client(), &url, &[], 2 << 30).await;
+    let got = crate::source::get_limited(&crate::source::http_client(), &area.url(key), &[], 8 << 30).await;
     // The URL holds the key: errors are reported without it.
     let bytes = match got {
         Ok(Some(b)) => b,
-        Ok(None) => bail!("no file for MCC {mcc}"),
+        Ok(None) => bail!("no file for {name}"),
         Err(e) => bail!("{}", format!("{e:#}").replace(key, "<key>")),
     };
     if !bytes.starts_with(&[0x1f, 0x8b]) {
@@ -179,72 +216,253 @@ async fn download_one(mcc: u16, key: &str) -> Result<String> {
         bail!("OpenCelliD: {}", String::from_utf8_lossy(&bytes[..bytes.len().min(200)]).replace(key, "<key>").trim());
     }
     std::fs::create_dir_all(dir())?;
-    let tmp = path.with_extension("part");
-    std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(format!("{:.1} MB", bytes.len() as f64 / 1e6))
+    let gz = dir().join(format!("{name}.csv.gz.part"));
+    std::fs::write(&gz, &bytes)?;
+    std::fs::write(&stamp, b"")?;
+    let size = bytes.len();
+    drop(bytes);
+    let out = dir().join(format!("{name}.parquet"));
+    let (gz2, out2) = (gz.clone(), out.clone());
+    let n = tokio::task::spawn_blocking(move || convert(&gz2, &out2)).await??;
+    let _ = std::fs::remove_file(&gz);
+    let kept = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+    Ok(format!("{:.1} MB, {} cells, kept as GeoParquet ({:.1} MB)", size as f64 / 1e6, n, kept as f64 / 1e6))
 }
 
-/// The cells in the downloaded files, sorted by longitude (reading them is CPU work: call
-/// from a blocking task).
-pub fn load() -> Result<Vec<Cell>> {
-    let mut all = Vec::new();
-    let entries = std::fs::read_dir(dir()).with_context(|| "no cells downloaded yet: mapterm --cells-download us")?;
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.extension().is_some_and(|x| x == "gz") {
-            let mut s = String::new();
-            flate2::read::GzDecoder::new(std::fs::File::open(&p)?).read_to_string(&mut s).with_context(|| format!("reading {}", p.display()))?;
-            all.extend(parse(&s));
+/// A cell packed for sorting on disk.
+const PACKED: usize = 40;
+
+fn pack(c: &Cell) -> [u8; PACKED] {
+    let mut b = [0u8; PACKED];
+    b[0..4].copy_from_slice(&c.lon.to_le_bytes());
+    b[4..8].copy_from_slice(&c.lat.to_le_bytes());
+    b[8] = c.radio as u8;
+    b[9..11].copy_from_slice(&c.mcc.to_le_bytes());
+    b[11..13].copy_from_slice(&c.mnc.to_le_bytes());
+    b[13..17].copy_from_slice(&c.area.to_le_bytes());
+    b[17..25].copy_from_slice(&c.cell.to_le_bytes());
+    b[25..29].copy_from_slice(&c.range.to_le_bytes());
+    b[29..33].copy_from_slice(&c.samples.to_le_bytes());
+    b[33..37].copy_from_slice(&(c.updated.clamp(0, u32::MAX as i64) as u32).to_le_bytes());
+    b
+}
+
+fn unpack(b: &[u8]) -> Cell {
+    let f32_at = |i: usize| f32::from_le_bytes(b[i..i + 4].try_into().expect("4 bytes"));
+    let u32_at = |i: usize| u32::from_le_bytes(b[i..i + 4].try_into().expect("4 bytes"));
+    let u16_at = |i: usize| u16::from_le_bytes(b[i..i + 2].try_into().expect("2 bytes"));
+    let radio = [Radio::Gsm, Radio::Umts, Radio::Cdma, Radio::Lte, Radio::Nr, Radio::NbIot][(b[8] as usize).min(5)];
+    Cell {
+        radio,
+        mcc: u16_at(9),
+        mnc: u16_at(11),
+        area: u32_at(13),
+        cell: u64::from_le_bytes(b[17..25].try_into().expect("8 bytes")),
+        lon: f32_at(0),
+        lat: f32_at(4),
+        range: u32_at(25),
+        samples: u32_at(29),
+        updated: u32::from_le_bytes([b[33], b[34], b[35], b[36]]) as i64,
+    }
+}
+
+/// Where a point falls on a Z-order curve (16 bits of longitude, 16 of latitude, interleaved):
+/// nearby points sort near each other, so a chunk of rows covers a small area.
+fn zorder(lon: f32, lat: f32) -> u32 {
+    let x = (((lon as f64 + 180.0) / 360.0 * 65535.0) as u32).min(65535);
+    let y = (((lat as f64 + 90.0) / 180.0 * 65535.0) as u32).min(65535);
+    let spread = |mut v: u32| {
+        v = (v | (v << 8)) & 0x00ff_00ff;
+        v = (v | (v << 4)) & 0x0f0f_0f0f;
+        v = (v | (v << 2)) & 0x3333_3333;
+        (v | (v << 1)) & 0x5555_5555
+    };
+    spread(x) | (spread(y) << 1)
+}
+
+/// Rows in each chunk (row group) of the GeoParquet file.
+const CHUNK: usize = 20_000;
+
+/// Turn an OpenCelliD CSV (gzipped) into GeoParquet at `out`, sorted along a Z-order curve
+/// with GeoParquet 1.1 bbox columns, so a view reads only the few chunks it covers. The world
+/// is too big to sort in memory: rows go first into 30° squares on disk, then each square is
+/// sorted and written in turn. Returns how many cells there were.
+pub fn convert(gz: &std::path::Path, out: &std::path::Path) -> Result<usize> {
+    use std::io::{BufRead, Write};
+    let tmp = out.with_extension("buckets");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+    // Pass 1: each cell into its 30° square's file (6 x 12 of them).
+    let square =
+        |c: &Cell| (((c.lat as f64 + 90.0) / 30.0).floor().clamp(0.0, 5.0) as usize) * 12 + (((c.lon as f64 + 180.0) / 30.0).floor().clamp(0.0, 11.0) as usize);
+    let mut files: Vec<Option<std::io::BufWriter<std::fs::File>>> = (0..72).map(|_| None).collect();
+    let mut n = 0usize;
+    let reader = std::io::BufReader::new(flate2::read::GzDecoder::new(std::fs::File::open(gz).with_context(|| format!("opening {}", gz.display()))?));
+    for line in reader.lines() {
+        let line = line.context("reading the cells")?;
+        let Some(c) = parse(&line).pop() else { continue };
+        let i = square(&c);
+        if files[i].is_none() {
+            files[i] = Some(std::io::BufWriter::new(std::fs::File::create(tmp.join(format!("{i}")))?));
         }
+        files[i].as_mut().expect("opened").write_all(&pack(&c))?;
+        n += 1;
     }
-    if all.is_empty() {
-        bail!("no cells downloaded yet: mapterm --cells-download us");
+    for f in files.iter_mut().flatten() {
+        f.flush()?;
     }
-    all.sort_by(|a, b| a.lon.total_cmp(&b.lon));
-    Ok(all)
+    drop(files);
+    // Pass 2: each square sorted along the curve, written in chunks.
+    let schema = schema();
+    let geo = serde_json::json!({
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"],
+            "covering": {"bbox": {"xmin": ["bbox", "xmin"], "ymin": ["bbox", "ymin"], "xmax": ["bbox", "xmax"], "ymax": ["bbox", "ymax"]}}}}
+    });
+    let props = parquet::file::properties::WriterProperties::builder()
+        .set_max_row_group_row_count(Some(CHUNK))
+        .set_compression(parquet::basic::Compression::ZSTD(parquet::basic::ZstdLevel::try_new(3)?))
+        .set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new("geo".into(), geo.to_string())]))
+        .build();
+    let part = out.with_extension("parquet.part");
+    let mut w = parquet::arrow::ArrowWriter::try_new(std::fs::File::create(&part)?, schema.clone(), Some(props))?;
+    for i in 0..72 {
+        let Ok(raw) = std::fs::read(tmp.join(format!("{i}"))) else { continue };
+        let mut cells: Vec<Cell> = raw.as_chunks::<PACKED>().0.iter().map(|b| unpack(b)).collect();
+        drop(raw);
+        cells.sort_by_key(|c| zorder(c.lon, c.lat));
+        for chunk in cells.chunks(CHUNK) {
+            w.write(&batch(&schema, chunk)?)?;
+            // Each square's last chunk ends its row group, so none spans two squares.
+        }
+        w.flush()?;
+    }
+    w.close()?;
+    std::fs::rename(&part, out)?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(n)
 }
 
-/// The cells in (west, south, east, north), at most `max` (the most measured first).
-pub fn in_view(cells: &[Cell], bounds: (f64, f64, f64, f64), max: usize) -> Vec<&Cell> {
-    let (w, s, e, n) = bounds;
-    let start = cells.partition_point(|c| (c.lon as f64) < w);
-    let end = cells.partition_point(|c| (c.lon as f64) <= e);
-    let mut v: Vec<&Cell> = cells[start..end].iter().filter(|c| (c.lat as f64) >= s && (c.lat as f64) <= n).collect();
-    if v.len() > max {
-        v.sort_by_key(|c| std::cmp::Reverse(c.samples));
-        v.truncate(max);
+fn schema() -> std::sync::Arc<arrow_schema::Schema> {
+    use arrow_schema::{DataType, Field, Fields, Schema};
+    let bbox = Fields::from(vec![
+        Field::new("xmin", DataType::Float64, false),
+        Field::new("ymin", DataType::Float64, false),
+        Field::new("xmax", DataType::Float64, false),
+        Field::new("ymax", DataType::Float64, false),
+    ]);
+    std::sync::Arc::new(Schema::new(vec![
+        Field::new("geometry", DataType::Binary, false),
+        Field::new("bbox", DataType::Struct(bbox), false),
+        Field::new("radio", DataType::Utf8, false),
+        Field::new("network", DataType::Utf8, false),
+        Field::new("mcc", DataType::Int32, false),
+        Field::new("mnc", DataType::Int32, false),
+        Field::new("area", DataType::Int64, false),
+        Field::new("cell", DataType::Int64, false),
+        Field::new("range_m", DataType::Int32, false),
+        Field::new("samples", DataType::Int32, false),
+        Field::new("updated", DataType::Int64, false),
+    ]))
+}
+
+fn batch(schema: &std::sync::Arc<arrow_schema::Schema>, cells: &[Cell]) -> Result<arrow_array::RecordBatch> {
+    use arrow_array::{ArrayRef, BinaryArray, Float64Array, Int32Array, Int64Array, StringArray, StructArray};
+    use std::sync::Arc;
+    let wkb: Vec<Vec<u8>> = cells
+        .iter()
+        .map(|c| {
+            let mut b = Vec::with_capacity(21);
+            b.push(1u8);
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&(c.lon as f64).to_le_bytes());
+            b.extend_from_slice(&(c.lat as f64).to_le_bytes());
+            b
+        })
+        .collect();
+    let xs: Vec<f64> = cells.iter().map(|c| c.lon as f64).collect();
+    let ys: Vec<f64> = cells.iter().map(|c| c.lat as f64).collect();
+    let arrow_schema::DataType::Struct(bbox_fields) = schema.field(1).data_type().clone() else { unreachable!("bbox is a struct") };
+    let bbox = StructArray::new(
+        bbox_fields,
+        vec![
+            Arc::new(Float64Array::from(xs.clone())) as ArrayRef,
+            Arc::new(Float64Array::from(ys.clone())),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+        ],
+        None,
+    );
+    let radio = StringArray::from_iter_values(cells.iter().map(|c| c.radio.code()));
+    let network =
+        StringArray::from_iter_values(cells.iter().map(|c| carrier(c.mcc, c.mnc).map(str::to_string).unwrap_or_else(|| format!("{}-{}", c.mcc, c.mnc))));
+    let cols: Vec<ArrayRef> = vec![
+        Arc::new(BinaryArray::from_iter_values(wkb.iter())),
+        Arc::new(bbox),
+        Arc::new(radio),
+        Arc::new(network),
+        Arc::new(Int32Array::from_iter_values(cells.iter().map(|c| c.mcc as i32))),
+        Arc::new(Int32Array::from_iter_values(cells.iter().map(|c| c.mnc as i32))),
+        Arc::new(Int64Array::from_iter_values(cells.iter().map(|c| c.area as i64))),
+        Arc::new(Int64Array::from_iter_values(cells.iter().map(|c| c.cell as i64))),
+        Arc::new(Int32Array::from_iter_values(cells.iter().map(|c| c.range.min(i32::MAX as u32) as i32))),
+        Arc::new(Int32Array::from_iter_values(cells.iter().map(|c| c.samples.min(i32::MAX as u32) as i32))),
+        Arc::new(Int64Array::from_iter_values(cells.iter().map(|c| c.updated))),
+    ];
+    Ok(arrow_array::RecordBatch::try_new(schema.clone(), cols)?)
+}
+
+/// The GeoParquet files to read: the world's when there is one, else the countries'.
+pub fn files() -> Vec<PathBuf> {
+    let world = dir().join("world.parquet");
+    if world.exists() {
+        return vec![world];
     }
+    let mut v: Vec<PathBuf> =
+        std::fs::read_dir(dir()).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "parquet")).collect();
+    v.sort();
     v
 }
 
-/// Cells as GeoJSON points: ▴ in their radio's color, the carrier from zoom 15.
-pub fn points(cells: &[&Cell]) -> Value {
-    let features: Vec<Value> = cells
-        .iter()
-        .map(|c| {
-            let net = carrier(c.mcc, c.mnc).map(str::to_string).unwrap_or_else(|| format!("{}-{}", c.mcc, c.mnc));
-            json!({
-                "type": "Feature",
-                "geometry": {"type": "Point", "coordinates": [c.lon, c.lat]},
-                "properties": {
-                    "glyph": "▴", "color": c.radio.color(), "label": net, "radio": c.radio.name(), "network": net,
-                    "mcc": c.mcc, "mnc": c.mnc, "area": c.area, "cell": c.cell, "range_m": c.range, "samples": c.samples,
-                    "kind": "mobile cell (estimated position)",
-                }
-            })
-        })
-        .collect();
-    json!({"type": "FeatureCollection", "features": features})
+/// The cells in (west, south, east, north) from `files`, as GeoJSON points, at most `max`
+/// (the most measured first). Reads only the chunks the box covers (CPU and disk work: call
+/// from a blocking task).
+pub fn read_view(files: &[PathBuf], bounds: (f64, f64, f64, f64), max: usize) -> Result<Value> {
+    let (w, s, e, n) = bounds;
+    let mut features: Vec<Value> = Vec::new();
+    for f in files {
+        let fc = crate::geoparquet::read_file(&f.to_string_lossy(), Some([w, s, e, n])).with_context(|| format!("reading {}", f.display()))?;
+        if let Some(Value::Array(v)) = fc.get("features").cloned() {
+            features.extend(v);
+        }
+    }
+    if features.len() > max {
+        features.sort_by_key(|f| std::cmp::Reverse(f["properties"]["samples"].as_i64().unwrap_or(0)));
+        features.truncate(max);
+    }
+    Ok(json!({"type": "FeatureCollection", "features": features}))
 }
 
-/// The style layer: ▴ colored by radio, the carrier from zoom 15.
+/// The style layer: ▴ colored by radio (5G NR magenta, LTE blue, 3G green, the rest grey),
+/// the carrier from zoom 15.
 pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
-    crate::StyleLayer::symbol(id, source)
-        .glyph(json!(["get", "glyph"]))
-        .text(json!(["step", ["zoom"], "", 15, ["get", "label"]]))
-        .color("#9ca3af")
-        .paint("icon-color", json!(["get", "color"]))
+    crate::StyleLayer::symbol(id, source).glyph(json!("▴")).text(json!(["step", ["zoom"], "", 15, ["get", "network"]])).color("#9ca3af").paint(
+        "icon-color",
+        json!([
+            "match",
+            ["get", "radio"],
+            "NR",
+            Radio::Nr.color(),
+            "LTE",
+            Radio::Lte.color(),
+            "UMTS",
+            Radio::Umts.color(),
+            "CDMA",
+            Radio::Cdma.color(),
+            Radio::Gsm.color()
+        ]),
+    )
 }
 
 #[cfg(test)]
@@ -273,16 +491,35 @@ LTE,310,410,1,1,0,0,0,1,1,1,1,1,0
     }
 
     #[test]
-    fn cells_in_view() {
+    fn packs_and_orders() {
         let c = parse(CSV);
-        let v = in_view(&c, (-78.0, 39.0, -77.0, 40.0), 10);
-        assert_eq!(v.len(), 1);
-        assert_eq!(v[0].radio, Radio::Nr);
-        let all = in_view(&c, (-180.0, -90.0, 180.0, 90.0), 2);
-        assert_eq!(all.len(), 2, "capped");
-        assert_eq!(all[0].samples, 120, "the most measured kept");
-        let p = points(&v);
-        assert_eq!(p["features"][0]["properties"]["network"], "Verizon");
-        assert_eq!(p["features"][0]["properties"]["color"], "#e879f9");
+        for x in &c {
+            assert_eq!(unpack(&pack(x)), Cell { updated: x.updated & 0xffff_ffff, ..*x });
+        }
+        // Near points sort near each other.
+        assert!(zorder(-77.41, 39.41).abs_diff(zorder(-77.40, 39.42)) < zorder(-77.41, 39.41).abs_diff(zorder(10.0, 50.0)));
+    }
+
+    #[test]
+    fn converts_to_geoparquet_and_reads_a_view() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("mapterm-cells-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gz = dir.join("t.csv.gz");
+        let mut enc = flate2::write::GzEncoder::new(std::fs::File::create(&gz).unwrap(), flate2::Compression::fast());
+        enc.write_all(b"radio,mcc,net,area,cell,unit,lon,lat,range,samples,changeable,created,updated,averageSignal\n").unwrap();
+        enc.write_all(CSV.as_bytes()).unwrap();
+        enc.finish().unwrap();
+        let out = dir.join("t.parquet");
+        assert_eq!(convert(&gz, &out).unwrap(), 3, "the header and bad rows left out");
+        let v = read_view(std::slice::from_ref(&out), (-78.0, 39.0, -77.0, 40.0), 100).unwrap();
+        let f = v["features"].as_array().unwrap();
+        assert_eq!(f.len(), 1, "only the cell in the box");
+        assert_eq!(f[0]["properties"]["network"], "Verizon");
+        assert_eq!(f[0]["properties"]["radio"], "NR");
+        let all = read_view(std::slice::from_ref(&out), (-180.0, -90.0, 180.0, 90.0), 2).unwrap();
+        assert_eq!(all["features"].as_array().unwrap().len(), 2, "capped, the most measured kept");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

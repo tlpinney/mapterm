@@ -178,8 +178,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 estimated position, colored by radio (5G magenta, LTE blue, 3G green, 2G
                 grey), from zoom 11; inspect for the carrier, ids and range. Reads the files
                 --cells-download fetched
-  --cells-download [us|MCC,...]
-                download OpenCelliD's files (the US by default, or mobile country codes)
+  --cells-download [us|world|MCC,...]
+                download OpenCelliD's files (the US by default, the world's 5.5 million
+                cells, or mobile country codes) and keep them as GeoParquet
                 with your free key (--opencellid-key-cmd, else OPENCELLID_KEY), each at most
                 once in 12 hours (OpenCelliD allows two a day), then exit
   --opencellid-key-cmd CMD
@@ -328,8 +329,8 @@ struct Args {
     towers: bool,
     /// --cells: OpenCelliD's cells, from the files downloaded.
     cells: bool,
-    /// --cells-download: the mobile country codes to download, then exit.
-    cells_download: Option<Vec<u16>>,
+    /// --cells-download: the areas to download (and turn into GeoParquet), then exit.
+    cells_download: Option<Vec<mapterm::opencellid::Area>>,
     /// --opencellid-key-cmd: prints the OpenCelliD key.
     opencellid_key_cmd: Option<String>,
     /// --alerts: US weather alerts from the NWS.
@@ -597,15 +598,22 @@ fn args() -> Result<Args> {
             "--towers" => a.towers = true,
             "--cells" => a.cells = true,
             "--cells-download" => {
+                use mapterm::opencellid::Area;
                 let v = it.next_if(|n| !n.starts_with('-')).unwrap_or_else(|| "us".into());
-                let mccs: Vec<u16> = if v.eq_ignore_ascii_case("us") {
-                    mapterm::opencellid::US.to_vec()
-                } else {
-                    v.split(',')
-                        .map(|m| m.trim().parse::<u16>().with_context(|| format!("--cells-download {v}: `us` or mobile country codes (310,311)")))
-                        .collect::<Result<_>>()?
+                let areas: Vec<Area> = match v.to_ascii_lowercase().as_str() {
+                    "us" => mapterm::opencellid::US.iter().map(|&m| Area::Mcc(m)).collect(),
+                    "world" => vec![Area::World],
+                    _ => v
+                        .split(',')
+                        .map(|m| {
+                            m.trim()
+                                .parse::<u16>()
+                                .map(Area::Mcc)
+                                .with_context(|| format!("--cells-download {v}: `us`, `world`, or mobile country codes (310,311)"))
+                        })
+                        .collect::<Result<_>>()?,
                 };
-                a.cells_download = Some(mccs);
+                a.cells_download = Some(areas);
             }
             "--opencellid-key-cmd" => a.opencellid_key_cmd = Some(it.next().context("--opencellid-key-cmd CMD")?),
             "--radar" => a.radar = true,
@@ -3858,13 +3866,13 @@ fn spawn_outages(outx: mpsc::UnboundedSender<OutageMsg>) {
 async fn main() -> Result<()> {
     let mut a = args()?;
     // --cells-download: fetch OpenCelliD's files with your key, then exit.
-    if let Some(mccs) = a.cells_download.take() {
+    if let Some(areas) = a.cells_download.take() {
         let key = mapterm::raster::find_key(a.opencellid_key_cmd.as_deref(), &["OPENCELLID_KEY"])?
             .context("--cells-download needs your OpenCelliD key: sign up free at opencellid.org, then set OPENCELLID_KEY or pass --opencellid-key-cmd")?;
-        for (mcc, r) in mapterm::opencellid::download(&mccs, &key).await {
+        for (name, r) in mapterm::opencellid::download(&areas, &key).await {
             match r {
-                Ok(what) => println!("{mcc}: {what}"),
-                Err(e) => println!("{mcc}: {e:#}"),
+                Ok(what) => println!("{name}: {what}"),
+                Err(e) => println!("{name}: {e:#}"),
             }
         }
         println!("kept in {} · show them with mapterm --cells", mapterm::opencellid::dir().display());
@@ -4838,18 +4846,15 @@ async fn main() -> Result<()> {
     if a.towers {
         load_towers(towertx.clone());
     }
-    // --cells: OpenCelliD's cells from the files downloaded (read once), and the view they
-    // were last drawn for.
-    let mut cells: Vec<mapterm::opencellid::Cell> = Vec::new();
+    // --cells: OpenCelliD's GeoParquet files (only the chunks in view are read, as it moves),
+    // the view last asked for, whether a read is under way, and how many cells came.
+    let mut cell_files: Vec<std::path::PathBuf> = if a.cells { mapterm::opencellid::files() } else { Vec::new() };
     let mut cells_drawn: Option<(i32, i64, i64)> = None;
-    let (celltx, mut cellrx) = mpsc::unbounded_channel::<Result<Vec<mapterm::opencellid::Cell>>>();
-    let load_cells = |tx: mpsc::UnboundedSender<Result<Vec<mapterm::opencellid::Cell>>>| {
-        tokio::task::spawn_blocking(move || {
-            let _ = tx.send(mapterm::opencellid::load());
-        });
-    };
-    if a.cells {
-        load_cells(celltx.clone());
+    let mut cells_reading = false;
+    let mut cells_shown: Option<usize> = None;
+    let (celltx, mut cellrx) = mpsc::unbounded_channel::<Result<serde_json::Value>>();
+    if a.cells && cell_files.is_empty() {
+        note = Some((Instant::now(), "no cells downloaded yet: mapterm --cells-download us (or world)".into()));
     }
     if let Some(all) = a.nasa {
         spawn_nasa(nasatx.clone(), all);
@@ -5452,15 +5457,12 @@ async fn main() -> Result<()> {
                     spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
                 }
                 if a.cells && !live_off.contains_key("cells") {
-                    let text = if cells.is_empty() {
-                        "▴ … ".to_string()
-                    } else if cam.zoom < CELLS_MIN_ZOOM {
-                        "▴ zoom in for cells ".to_string()
-                    } else {
-                        let vp = Viewport::new(&cam, map_area);
-                        let (w, n) = vp.cell_to_lonlat(0, 0);
-                        let (e, s) = vp.cell_to_lonlat(map_area.width, map_area.height);
-                        format!("▴ {} cells ", thousands(mapterm::opencellid::in_view(&cells, (w, s, e, n), usize::MAX).len()))
+                    let text = match (cell_files.is_empty(), cells_shown) {
+                        (true, _) => "▴ no cells downloaded ".to_string(),
+                        _ if cam.zoom < CELLS_MIN_ZOOM => "▴ zoom in for cells ".to_string(),
+                        (_, None) => "▴ … ".to_string(),
+                        (_, Some(n)) if n >= CELLS_MAX => format!("▴ {}+ cells (the most measured) ", thousands(n)),
+                        (_, Some(n)) => format!("▴ {} cells ", thousands(n)),
                     };
                     spans.push(Span::styled(text, TStyle::new().fg(Color::Rgb(0x60, 0xa5, 0xfa))));
                 }
@@ -6203,7 +6205,7 @@ async fn main() -> Result<()> {
                 }
             }
             // Cells around the view, the same way (more of them: from zoom 11, capped).
-            if a.cells && !cells.is_empty() && map_area.width > 0 {
+            if a.cells && !cell_files.is_empty() && map_area.width > 0 && !cells_reading {
                 let vp = Viewport::new(&cam, map_area);
                 let (west, north) = vp.cell_to_lonlat(0, 0);
                 let (east, south) = vp.cell_to_lonlat(map_area.width, map_area.height);
@@ -6211,13 +6213,19 @@ async fn main() -> Result<()> {
                 let key = if cam.zoom >= CELLS_MIN_ZOOM { (cam.zoom.floor() as i32, (cam.lon / step).round() as i64, (cam.lat / step).round() as i64) } else { (-1, 0, 0) };
                 if cells_drawn != Some(key) {
                     cells_drawn = Some(key);
-                    let (dx, dy) = ((east - west).abs() / 2.0, (north - south).abs() / 2.0);
-                    let pts = if key.0 < 0 {
-                        serde_json::json!({"type": "FeatureCollection", "features": []})
+                    if key.0 < 0 {
+                        cells_shown = None;
+                        map.set_data(CELLS, &serde_json::json!({"type": "FeatureCollection", "features": []}))?;
                     } else {
-                        mapterm::opencellid::points(&mapterm::opencellid::in_view(&cells, (west - dx, south - dy, east + dx, north + dy), CELLS_MAX))
-                    };
-                    map.set_data(CELLS, &pts)?;
+                        // Read in the background: only the chunks this view covers.
+                        let (dx, dy) = ((east - west).abs() / 2.0, (north - south).abs() / 2.0);
+                        let bounds = (west - dx, south - dy, east + dx, north + dy);
+                        let (files, tx) = (cell_files.clone(), celltx.clone());
+                        cells_reading = true;
+                        tokio::task::spawn_blocking(move || {
+                            let _ = tx.send(mapterm::opencellid::read_view(&files, bounds, CELLS_MAX));
+                        });
+                    }
                 }
             }
             if let (Some(all), true) = (a.nasa, nasa_new) {
@@ -6520,7 +6528,10 @@ async fn main() -> Result<()> {
                                     a.cells = true;
                                     let before = under(&map, MOVING);
                                     add_points(&mut map, CELLS, mapterm::opencellid::CREDIT, mapterm::opencellid::layer(CELLS, CELLS), before.as_deref())?;
-                                    load_cells(celltx.clone());
+                                    cell_files = mapterm::opencellid::files();
+                                    if cell_files.is_empty() {
+                                        bail!("no cells downloaded yet: mapterm --cells-download us (or world)");
+                                    }
                                 }
                                 "towers" => {
                                     a.towers = true;
@@ -7107,12 +7118,13 @@ async fn main() -> Result<()> {
                     }
                 }
                 Some(r) = cellrx.recv() => {
+                    cells_reading = false;
                     match r {
                         Ok(v) => {
-                            status.entry("cells").or_default().ok(unix_now(), Some(v.len()));
-                            dlog(|| format!("cells: {}", v.len()));
-                            cells = v;
-                            cells_drawn = None;
+                            let n = v["features"].as_array().map_or(0, Vec::len);
+                            status.entry("cells").or_default().heard(unix_now(), Some(n));
+                            cells_shown = Some(n);
+                            map.set_data(CELLS, &v)?;
                         }
                         Err(e) => {
                             status.entry("cells").or_default().fail(unix_now(), format!("{e:#}"));

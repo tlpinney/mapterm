@@ -10,9 +10,12 @@ All notable changes to mapterm are listed here. The format follows
 
 - Mobile network cells (`--cells`, or from `L`) from OpenCelliD (CC BY-SA 4.0): each cell's
   estimated position as ▴ colored by radio (5G NR magenta, LTE blue, 3G green, 2G grey),
-  from zoom 11; inspect for the carrier, ids, range and samples. `--cells-download [us|MCC]`
-  fetches OpenCelliD's country files with your own free key (`--opencellid-key-cmd`, else
-  `OPENCELLID_KEY`), each at most once in 12 hours. `mapterm::opencellid`.
+  from zoom 11; inspect for the carrier, ids, range and samples. `--cells-download
+  [us|world|MCC]` fetches OpenCelliD's files with your own free key (`--opencellid-key-cmd`,
+  else `OPENCELLID_KEY`), each at most once in 12 hours, and keeps them as GeoParquet sorted
+  along a Z-order curve with bbox columns, so a view reads only the chunks it covers (the
+  world's 5.5 million cells: 168 MB, a city view in tens of milliseconds).
+  `mapterm::opencellid`.
 
 - Antenna structures (`--towers`, or from `L`): the towers and other structures registered
   with the FCC (US, public domain), 142,000 constructed ones, as Ψ with their height from

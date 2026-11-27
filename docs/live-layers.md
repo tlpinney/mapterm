@@ -155,11 +155,12 @@ carrier (for the big US networks; others by their network code), the cell and ar
 the estimated range and how many measurements it rests on.
 
 OpenCelliD needs a free account and key, and its live API is too tight for a map, so
-mapterm uses its country files: `mapterm --cells-download` (the US; or mobile country
-codes, `--cells-download 234,235`) fetches them with your key, from
+mapterm uses its files: `mapterm --cells-download` (the US; `world` for all 5.5 million
+cells; or mobile country codes, `--cells-download 234,235`) fetches them with your key, from
 `--opencellid-key-cmd 'pass opencellid/token'` or `OPENCELLID_KEY`, at most once in 12 hours
-each (OpenCelliD allows two downloads a day), into `~/.cache/mapterm/opencellid`. Run it
-again now and then for newer data. The key is yours: keep it to yourself.
+each (OpenCelliD allows two downloads a day), and keeps them in
+`~/.cache/mapterm/opencellid` as GeoParquet sorted so nearby cells sit together: a view
+reads only the chunks it covers. Run it again now and then for newer data. The key is yours: keep it to yourself.
 
 ## Satellites
 
