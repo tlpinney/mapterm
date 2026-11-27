@@ -2943,6 +2943,11 @@ fn draw_aircraft(
     for s in [a.desc.as_deref(), a.operator.as_deref()].into_iter().flatten() {
         d.push(Line::from(Span::raw(format!(" {s}"))));
     }
+    // What kind of aircraft, by its ADS-B category: a balloon stands out.
+    if let Some(c) = a.category.as_deref().and_then(mapterm::adsb::category_name) {
+        let st = if a.is_balloon() { TStyle::new().fg(Color::Rgb(0xff, 0x6b, 0x6b)) } else { dim };
+        d.push(Line::from(Span::styled(format!(" {c}"), st)));
+    }
     d.push(Line::default());
     if let Some(e) = &a.emergency {
         d.push(Line::from(vec![key("emergency"), Span::styled(e.to_uppercase(), TStyle::new().fg(Color::Red).add_modifier(Modifier::BOLD))]));
@@ -5247,10 +5252,15 @@ async fn main() -> Result<()> {
                     let text = match aircraft_retry.map(|t| t.saturating_duration_since(Instant::now())) {
                         _ if cam.zoom < ADSB_MIN_ZOOM => "✈ zoom in for aircraft ".to_string(),
                         Some(w) if !w.is_zero() => format!("✈ paused {} s ", w.as_secs() + 1),
-                        _ => match aircraft_quota {
-                            Some(q) => format!("✈ {} · {} left ", aircraft.len(), q.remaining),
-                            None => format!("✈ {} ", aircraft.len()),
-                        },
+                        _ => {
+                            // Balloons and airships in the feed, counted on their own.
+                            let lta_n = aircraft.all().filter(|a| a.is_balloon()).count();
+                            let lta = if lta_n > 0 { format!(" · ◓ {lta_n} lighter than air") } else { String::new() };
+                            match aircraft_quota {
+                                Some(q) => format!("✈ {}{lta} · {} left ", aircraft.len(), q.remaining),
+                                None => format!("✈ {}{lta} ", aircraft.len()),
+                            }
+                        }
                     };
                     spans.push(Span::styled(text, st));
                 }

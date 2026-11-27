@@ -115,6 +115,43 @@ pub struct Aircraft {
     pub vert_rate: Option<f64>,
     /// An emergency the aircraft declares (`general`, `lifeguard`, `nordo`, ...).
     pub emergency: Option<String>,
+    /// Its ADS-B emitter category (`A3` a large airplane, `B2` lighter than air, ...).
+    pub category: Option<String>,
+}
+
+impl Aircraft {
+    /// Lighter than air: a balloon or an airship. Its ADS-B category (B2) says so; the
+    /// type from the registry (`BALL`) only counts when it sends no category, as registries
+    /// have planes typed `BALL` by mistake (a CargoJet 767, category A5, was).
+    pub fn is_balloon(&self) -> bool {
+        match self.category.as_deref() {
+            Some(c) => c == "B2",
+            None => self.type_code.as_deref() == Some("BALL"),
+        }
+    }
+}
+
+/// An ADS-B emitter category in words (DO-260B), for the aircraft panel.
+pub fn category_name(c: &str) -> Option<&'static str> {
+    Some(match c {
+        "A1" => "light airplane (under 7 t)",
+        "A2" => "small airplane (7 to 34 t)",
+        "A3" => "large airplane (34 to 136 t)",
+        "A4" => "high-vortex large (a 757)",
+        "A5" => "heavy (over 136 t)",
+        "A6" => "high performance (fast, agile)",
+        "A7" => "rotorcraft",
+        "B1" => "glider or sailplane",
+        "B2" => "lighter than air (balloon, airship)",
+        "B3" => "parachutist or skydiver",
+        "B4" => "ultralight, hang glider, paraglider",
+        "B6" => "unmanned aircraft (drone)",
+        "B7" => "space or trans-atmospheric vehicle",
+        "C1" => "emergency vehicle (on the ground)",
+        "C2" => "service vehicle (on the ground)",
+        "C3" => "obstacle",
+        _ => return None,
+    })
 }
 
 /// Read the feed's answer: the aircraft that have a position.
@@ -145,6 +182,7 @@ pub fn parse(body: &[u8]) -> Result<Vec<Aircraft>> {
                 squawk: text(a, "squawk"),
                 vert_rate: num(a, "baro_rate").or_else(|| num(a, "geom_rate")),
                 emergency: text(a, "emergency").filter(|e| e != "none"),
+                category: text(a, "category"),
             })
         })
         .collect())
@@ -252,6 +290,10 @@ pub fn backoff(err: &anyhow::Error, failures_in_a_row: u32) -> std::time::Durati
 /// An arrow for a track, in eight directions; a dot on the ground or without a track.
 pub fn arrow(a: &Aircraft) -> &'static str {
     const ARROWS: [&str; 8] = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
+    // A balloon drifts with the wind: no heading to point.
+    if a.is_balloon() {
+        return "◓";
+    }
     match a.track {
         Some(t) if !a.on_ground => ARROWS[((t.rem_euclid(360.0) + 22.5) / 45.0) as usize % 8],
         _ => "•",
@@ -372,6 +414,8 @@ impl Tracks {
                         "registration": a.registration,
                         "speed_kt": a.gs_kt,
                         "track": a.track,
+                        "category": a.category.as_deref().and_then(category_name).or(a.category.as_deref()),
+                        "balloon": a.is_balloon(),
                     }
                 }))
             })
@@ -537,6 +581,16 @@ mod tests {
         }
         a.on_ground = true;
         assert_eq!(arrow(&a), "•");
+        a.on_ground = false;
+        a.category = Some("B2".into());
+        assert!(a.is_balloon());
+        assert_eq!(arrow(&a), "◓", "a balloon, whatever its track");
+        (a.category, a.type_code) = (None, Some("BALL".into()));
+        assert!(a.is_balloon(), "ICAO type BALL, no category");
+        a.category = Some("A5".into());
+        assert!(!a.is_balloon(), "a heavy jet typed BALL by mistake");
+        assert_eq!(category_name("B6"), Some("unmanned aircraft (drone)"));
+        assert_eq!(category_name("Z9"), None);
     }
 
     #[test]

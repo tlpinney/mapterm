@@ -8,6 +8,11 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Balloons and airships in the ADS-B feed: aircraft whose emitter category is B2 (lighter
+  than air), or typed `BALL` when they send no category, show as ◓ instead of an arrow (big
+  scientific and stratospheric balloons carry transponders), counted on the status line.
+  Every aircraft's panel names its category (light airplane, rotorcraft, glider, drone, ...).
+
 - Saved places (`B`): a picker of places you saved, filtered fzf-style; enter flies there
   (at the zoom it was saved at). Its first row saves the spot (the pointer's, else the
   center) under what's typed; ctrl-d twice forgets one. Saved places come first in `/`
