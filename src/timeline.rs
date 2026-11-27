@@ -107,6 +107,19 @@ impl Timeline {
         Some(area.x + ((t - self.start) / (self.stop - self.start) * (area.width.max(2) - 1) as f64).round() as u16)
     }
 
+    /// What the clock is doing, for a badge: `● LIVE` (following the present), `⏸ 07:40`
+    /// (stopped at a time), `▶ 4× 07:40` or `◀ 2× 07:40` (playing), with its color.
+    pub fn badge(&self, clock: &crate::clock::Clock) -> (String, Color) {
+        if clock.is_live() {
+            ("● LIVE".into(), LIVE)
+        } else if clock.is_playing() {
+            let dir = if clock.multiplier < 0.0 { "◀" } else { "▶" };
+            (format!("{dir} {:.0}× {}", clock.multiplier.abs(), self.zone.hhmm(clock.time())), PLAYING)
+        } else {
+            (format!("⏸ {}", self.zone.hhmm(clock.time())), PAUSED)
+        }
+    }
+
     /// The tick step for a bar `width` columns wide: the finest whose labels fit.
     pub fn step(&self, width: u16) -> f64 {
         let per_col = (self.stop - self.start) / width.max(1) as f64;
@@ -119,6 +132,8 @@ impl Timeline {
         if area.height < 2 || area.width < 10 {
             return;
         }
+        let (badge, badge_color) = self.badge(clock);
+        let badge_w = badge.chars().count() as u16 + 1;
         let labels = Rect { height: 1, ..area };
         let bar = Rect { y: area.y + 1, height: 1, ..area };
         let dim = Style::new().fg(Color::DarkGray);
@@ -148,7 +163,7 @@ impl Timeline {
                 buf[(x, bar.y)].set_symbol("┼");
                 let text = label(t + off, step);
                 let lx = x.saturating_sub(text.chars().count() as u16 / 2).max(labels.x);
-                if lx + text.chars().count() as u16 <= labels.right().saturating_sub(zone.chars().count() as u16 + 1) {
+                if lx >= labels.x + badge_w && lx + text.chars().count() as u16 <= labels.right().saturating_sub(zone.chars().count() as u16 + 1) {
                     buf.set_string(lx, labels.y, &text, dim);
                 }
             }
@@ -156,6 +171,8 @@ impl Timeline {
         }
         let zw = zone.chars().count() as u16;
         buf.set_string(labels.right().saturating_sub(zw), labels.y, &zone, dim);
+        // Live or stopped at a time, at the start of the labels.
+        buf.set_string(labels.x, labels.y, &badge, Style::new().fg(badge_color).add_modifier(Modifier::BOLD));
         // Now: where real time is.
         if let Some(x) = self.col_of(bar, now) {
             buf[(x, bar.y)].set_symbol("╂").set_fg(Color::Rgb(0x8a, 0x91, 0x9c));
@@ -171,6 +188,13 @@ impl Timeline {
         }
     }
 }
+
+/// The badge's colors: live (green), stopped at a time (amber), playing (blue).
+pub const LIVE: Color = Color::Rgb(0x4a, 0xde, 0x80);
+/// Stopped at a time.
+pub const PAUSED: Color = Color::Rgb(0xfb, 0xbf, 0x24);
+/// Playing.
+pub const PLAYING: Color = Color::Rgb(0x7f, 0xb2, 0xff);
 
 /// A tick label: `21:30` within a day, `Thu 26` for day steps, `Nov 26` beyond a week.
 fn label(t: f64, step: f64) -> String {
@@ -204,6 +228,18 @@ mod tests {
 
     // 2026-11-26 04:20 UTC, a Thursday.
     const NOW: f64 = 1_795_666_800.0;
+
+    #[test]
+    fn badge_says_live_or_when() {
+        let t = Timeline::new(NOW - 7200.0, NOW);
+        let mut c = Clock::live(NOW);
+        assert_eq!(t.badge(&c).0, "● LIVE");
+        c.seek(NOW - 1800.0);
+        let (b, color) = t.badge(&c);
+        assert!(b.starts_with("⏸ ") && color == PAUSED, "{b}");
+        c.play(NOW - 7200.0, NOW, crate::clock::Range::Loop, 4.0);
+        assert!(t.badge(&c).0.starts_with("▶ 4× "));
+    }
 
     #[test]
     fn ticks_fit_the_span() {
