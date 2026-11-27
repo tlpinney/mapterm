@@ -176,7 +176,7 @@ It needs your own Mapillary client token: sign up, register an application at
 mapillary.com/dashboard/developers (read access is enough), and pass
 `--mapillary-key-cmd 'pass mapillary/token'` or set `MAPILLARY_TOKEN`.
 
-Green dots and lines show where there are photos (each photo from zoom 16). It's
+Green dots (zoomed out) and lines show where there are photos. It's
 "street view" in `L`: start it there while running (the token still comes from
 `--mapillary-key-cmd` or `MAPILLARY_TOKEN`), and turn it off and on; while it's off,
 clicks don't look for photos. Photos are kept in

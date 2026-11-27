@@ -320,15 +320,16 @@ pub async fn image(p: &Photo) -> Result<(u32, u32, Vec<u8>)> {
 }
 
 /// The coverage tiles (Mapbox Vector Tiles; layers `overview` to zoom 5, `sequence` lines
-/// from 6 to 14, `image` points at 14), with `token`. Mapillary allows an app 50,000 tile
+/// from 6 to 14, `image` points at 14, not drawn), with `token`. Mapillary allows an app 50,000 tile
 /// requests a day: the viewer keeps them in its tile cache.
 pub fn coverage_tiles(token: &str) -> String {
     format!("https://tiles.mapillary.com/maps/vtp/mly1_public/2/{{z}}/{{x}}/{{y}}?access_token={token}")
 }
 
 /// The coverage layers over source `source`: green dots zoomed out, the sequences as lines
-/// (from zoom `lines_from`: later where image lines draw them before), each photo as a dot
-/// from zoom 16.
+/// (from zoom `lines_from`: later where image lines draw them before). Not each photo: a
+/// tile holds every photo for a couple of kilometers, thousands where it's busy, and drawing
+/// them every frame close in made the viewer crawl; the lines show where they are.
 pub fn coverage_layers(id: &str, source: &str, lines_from: f64) -> Vec<crate::StyleLayer> {
     let green = "#05cb63";
     let docs = [
@@ -336,8 +337,6 @@ pub fn coverage_layers(id: &str, source: &str, lines_from: f64) -> Vec<crate::St
             "paint": {"circle-color": green, "circle-radius": 1, "circle-opacity": 0.6}}),
         serde_json::json!({"id": format!("{id}-sequence"), "type": "line", "source": source, "source-layer": "sequence", "minzoom": lines_from,
             "paint": {"line-color": green, "line-width": 1, "line-opacity": 0.55}}),
-        serde_json::json!({"id": format!("{id}-image"), "type": "circle", "source": source, "source-layer": "image", "minzoom": 16,
-            "paint": {"circle-color": green, "circle-radius": 2, "circle-opacity": 0.8}}),
     ];
     docs.iter().map(|d| crate::StyleLayer::from_json(d).expect("a valid layer").0).collect()
 }
