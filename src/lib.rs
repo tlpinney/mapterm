@@ -106,6 +106,7 @@ pub mod pixels;
 pub mod planetary;
 pub mod pmtiles;
 pub mod proxy;
+pub mod quakes;
 pub mod rainviewer;
 pub mod raster;
 pub mod render;
