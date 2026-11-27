@@ -15,7 +15,7 @@ All notable changes to mapterm are listed here. The format follows
   `OPENCELLID_KEY`), each at most once in 12 hours. `mapterm::opencellid`.
 
 - Antenna structures (`--towers`, or from `L`): the towers and other structures registered
-  with the FCC (US, public domain), 142,000 constructed ones, as † with their height from
+  with the FCC (US, public domain), 142,000 constructed ones, as Ψ with their height from
   zoom 8; inspect for the structure type, owner and registration. The FCC's weekly file
   (~38 MB) is kept for a week. `mapterm::towers`, with a small zip reader.
 

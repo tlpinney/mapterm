@@ -171,7 +171,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 radio receivers (no key): ▲ climbing, ▼ falling, colored by altitude, with
                 their flight as a trail; click or Tab for readings, frequency and the
                 predicted landing
-  --towers      antenna structures registered with the FCC (US; no key): † with their height,
+  --towers      antenna structures registered with the FCC (US; no key): Ψ with their height,
                 from zoom 8; inspect (i) for the structure type, owner and registration.
                 The FCC's weekly file (~38 MB) is kept for a week
   --cells       mobile network cells from OpenCelliD (CC BY-SA 4.0): ▴ at each cell's
@@ -5466,15 +5466,15 @@ async fn main() -> Result<()> {
                 }
                 if a.towers && !live_off.contains_key("towers") {
                     let text = if towers.is_empty() {
-                        "† … ".to_string()
+                        "Ψ … ".to_string()
                     } else if cam.zoom < TOWERS_MIN_ZOOM {
-                        "† zoom in for towers ".to_string()
+                        "Ψ zoom in for towers ".to_string()
                     } else {
                         let vp = Viewport::new(&cam, map_area);
                         let (w, n) = vp.cell_to_lonlat(0, 0);
                         let (e, s) = vp.cell_to_lonlat(map_area.width, map_area.height);
                         let inview = towers.iter().filter(|t| t.lon >= w && t.lon <= e && t.lat >= s && t.lat <= n).count();
-                        format!("† {} towers ", thousands(inview))
+                        format!("Ψ {} towers ", thousands(inview))
                     };
                     spans.push(Span::styled(text, TStyle::new().fg(Color::Rgb(0x8a, 0xa4, 0xc8))));
                 }

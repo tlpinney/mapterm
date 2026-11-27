@@ -199,7 +199,7 @@ pub async fn load() -> Result<Vec<Tower>> {
     tokio::task::spawn_blocking(move || from_zip(&data)).await?
 }
 
-/// The structures in (west, south, east, north) as GeoJSON points: † with the height.
+/// The structures in (west, south, east, north) as GeoJSON points: Ψ with the height.
 pub fn points(towers: &[Tower], bounds: (f64, f64, f64, f64)) -> Value {
     let (w, s, e, n) = bounds;
     let features: Vec<Value> = towers
@@ -211,7 +211,7 @@ pub fn points(towers: &[Tower], bounds: (f64, f64, f64, f64)) -> Value {
                 "id": format!("asr:{}", t.reg),
                 "geometry": {"type": "Point", "coordinates": [t.lon, t.lat]},
                 "properties": {
-                    "glyph": "†", "label": t.height.map(|h| format!("{h:.0} m")).unwrap_or_default(),
+                    "glyph": "Ψ", "label": t.height.map(|h| format!("{h:.0} m")).unwrap_or_default(),
                     "registration": t.reg, "structure": t.kind_name(), "height_m": t.height, "ground_m": t.ground,
                     "place": t.place, "owner": t.owner, "kind": "antenna structure",
                 }
@@ -221,7 +221,7 @@ pub fn points(towers: &[Tower], bounds: (f64, f64, f64, f64)) -> Value {
     json!({"type": "FeatureCollection", "features": features})
 }
 
-/// The style layer: † in steel blue, the height from zoom 12.
+/// The style layer: Ψ in steel blue, the height from zoom 12.
 pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
     crate::StyleLayer::symbol(id, source).glyph(json!(["get", "glyph"])).text(json!(["step", ["zoom"], "", 12, ["get", "label"]])).color("#8aa4c8")
 }
