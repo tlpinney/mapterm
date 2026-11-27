@@ -174,6 +174,8 @@ pub enum Picker {
     Layers,
     /// Saved sessions and recent runs.
     Sessions,
+    /// The data sources: live feeds and data files, how they're doing.
+    Sources,
 }
 
 impl Picker {
@@ -183,6 +185,7 @@ impl Picker {
             Picker::Base => "base map",
             Picker::Layers => "layers",
             Picker::Sessions => "sessions",
+            Picker::Sources => "data sources",
         }
     }
 }
@@ -276,6 +279,15 @@ impl Switcher {
         s
     }
 
+    /// The data sources picker: the `live` layers running (indices in [`LIVE`]) and the
+    /// `data` layers.
+    pub fn sources(live: &[usize], data: Vec<String>) -> Self {
+        let mut s = Switcher { live: live.to_vec(), data, ..Switcher::new(Picker::Sources) };
+        s.refilter(&[]);
+        s.total = s.rows.len();
+        s
+    }
+
     /// The sessions picker, with saving first; `resume`: the first session chosen.
     pub fn sessions(sessions: Vec<(String, String)>, resume: bool) -> Self {
         let mut s = Switcher { sessions, ..Switcher::new(Picker::Sessions) };
@@ -324,6 +336,7 @@ impl Switcher {
                 .chain([Row::Labels, Row::Vector, Row::Legends])
                 .collect(),
             Picker::Sessions => (0..self.sessions.len()).map(Row::Session).collect(),
+            Picker::Sources => self.live.iter().map(|&i| Row::Live(i)).chain((0..self.data.len()).map(Row::Data)).collect(),
         };
         let mut scored: Vec<(i32, usize, Row, Vec<usize>)> = all
             .into_iter()
@@ -453,6 +466,16 @@ mod tests {
         s.refilter(&[]);
         assert_eq!(s.row(), Some(Row::Data(0)));
         assert!(!Switcher::layers(&[], Vec::new()).rows.iter().any(|r| matches!(r, Row::Live(_) | Row::Data(_))));
+    }
+
+    #[test]
+    fn sources_picker() {
+        let quakes = live_index("quakes").unwrap();
+        let mut s = Switcher::sources(&[quakes], vec!["parcels".into()]);
+        assert_eq!(s.rows, vec![Row::Live(quakes), Row::Data(0)]);
+        s.query = "parc".into();
+        s.refilter(&[]);
+        assert_eq!(s.row(), Some(Row::Data(0)));
     }
 
     #[test]
