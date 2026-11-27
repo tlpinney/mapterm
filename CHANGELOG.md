@@ -8,6 +8,16 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Overture Maps themes by name: `--geojson overture-addresses`, `overture-buildings` and
+  `overture-places` find the latest release in Overture's STAC catalog and load as the map
+  moves. From zoom 17, address points are labeled with their house numbers (`number` or
+  `housenumber`), and a feature's label is its name, else its number and street.
+  `mapterm::overture`.
+- `/` searches the data layers on the map before the geocoder: an address by number and
+  street (`1600 penn`), a street by name (`vermont ave`, one result framing its addresses),
+  or a feature by name, with common street abbreviations taken as the same
+  (`mapterm::geocode::search_features`). They're listed first, and still found when the
+  geocoder can't be reached.
 - Wildfires: `--fires` draws the US's current wildland fire incidents from NIFC's WFIGS
   service (public, no key) as points (✹ wildfires colored by containment, ◇ prescribed
   burns), with the perimeters of those still burning as areas. Click one for its size,

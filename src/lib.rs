@@ -101,6 +101,7 @@ pub mod mvt;
 pub mod nws;
 pub mod odin;
 pub mod outages;
+pub mod overture;
 pub mod pbf;
 pub mod pick;
 pub mod pixels;

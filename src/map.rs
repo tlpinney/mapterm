@@ -380,6 +380,11 @@ impl GeoJsonSource {
     pub fn parts(&self) -> impl Iterator<Item = (u64, usize)> + '_ {
         self.parts.iter().map(|(k, l, _)| (*k, l.features.len()))
     }
+
+    /// Every feature: those given and those of the parts added since.
+    pub fn all_features(&self) -> impl Iterator<Item = &geojson::Feature> + '_ {
+        self.data.features.iter().chain(self.parts.iter().flat_map(|(_, l, _)| l.features.iter()))
+    }
 }
 
 /// A raster tile found for an id: itself or a loaded ancestor, with the ancestor's id.
@@ -977,6 +982,14 @@ impl Map {
     /// Every source with its id, in the order added.
     pub fn sources(&self) -> impl Iterator<Item = (&str, &MapSource)> {
         self.sources.iter().map(|(id, s)| (id.as_str(), s))
+    }
+
+    /// Every feature of GeoJSON source `id` (given and loaded since); none for other sources.
+    pub fn data_features(&self, id: &str) -> Vec<&geojson::Feature> {
+        match self.source(id) {
+            Some(MapSource::GeoJson(g)) => g.all_features().collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// A source by id.

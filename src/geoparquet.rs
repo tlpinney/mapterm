@@ -663,6 +663,14 @@ impl Dataset {
     /// A dataset from `spec`: a GeoParquet file URL, or a STAC collection's URL (a
     /// `collection.json` whose items have a Parquet asset).
     pub async fn open(spec: &str) -> Result<Dataset> {
+        // An Overture short name: the latest release's collection.
+        let resolved;
+        let spec = if crate::overture::is_spec(spec) {
+            resolved = crate::overture::collection_url(spec).await?;
+            resolved.as_str()
+        } else {
+            spec
+        };
         let client = crate::source::http_client();
         let world = [-180.0, -90.0, 180.0, 90.0];
         let path = spec.split(['?', '#']).next().unwrap_or(spec).to_ascii_lowercase();
