@@ -341,6 +341,59 @@ pub fn coverage_layers(id: &str, source: &str) -> Vec<crate::StyleLayer> {
     docs.iter().map(|d| crate::StyleLayer::from_json(d).expect("a valid layer").0).collect()
 }
 
+/// The coverage's sequence lines drawn as image tiles (where the terminal shows images):
+/// each from Mapillary's vector tile there (zoom 14 at most, the same tiles and disk cache
+/// as the vector layer), its `sequence` lines stroked smooth.
+pub struct CoverageTiles {
+    src: crate::Source,
+}
+
+/// Where coverage image tiles start (the sequence lines' first zoom).
+pub const LINES_FROM: u8 = 6;
+
+impl CoverageTiles {
+    /// Coverage tiles with `token`.
+    pub fn new(token: &str) -> Self {
+        CoverageTiles { src: crate::Source::xyz(&coverage_tiles(token)) }
+    }
+}
+
+impl crate::raster::TileRender for CoverageTiles {
+    fn render(&self, z: u8, x: u32, y: u32, size: u32) -> Option<Vec<u8>> {
+        if z < LINES_FROM {
+            return None;
+        }
+        // The vector tile holding this one (14 is Mapillary's deepest).
+        let tz = z.min(14);
+        let (px, py) = (x >> (z - tz), y >> (z - tz));
+        let handle = tokio::runtime::Handle::try_current().ok()?;
+        let bytes = handle.block_on(self.src.tile(tz, px, py)).ok()??;
+        let tile = crate::mvt::decode(&bytes).ok()?;
+        let n = (1u64 << tz) as f64;
+        // Wider lines closer in.
+        let width = match z {
+            ..=10 => 1.2,
+            11..=14 => 1.8,
+            _ => 2.6,
+        };
+        let mut shape = crate::areas::Shape::lines((0x05, 0xcb, 0x63), width, false);
+        for layer in tile.layers.iter().filter(|l| l.name == "sequence") {
+            let e = layer.extent.max(1) as f64;
+            for f in &layer.features {
+                for part in &f.geometry {
+                    let line: Vec<(f64, f64)> = part.iter().map(|p| ((px as f64 + p[0] as f64 / e) / n, (py as f64 + p[1] as f64 / e) / n)).collect();
+                    if line.len() >= 2 {
+                        shape.add_world(line);
+                    }
+                }
+            }
+        }
+        let areas = crate::areas::AreaTiles::default();
+        areas.set(vec![shape]);
+        crate::raster::TileRender::render(&areas, z, x, y, size)
+    }
+}
+
 /// A heading as a compass point (`N`, `NE`, ...).
 pub fn compass8(deg: f64) -> &'static str {
     ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][((deg.rem_euclid(360.0) / 45.0).round() as usize) % 8]

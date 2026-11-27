@@ -798,7 +798,7 @@ fn live_sources(key: &str) -> &'static [&'static str] {
         "nasa" => &[NASA, NASA_TRACKS],
         "towers" => &[TOWERS],
         "cells" => &[CELLS],
-        "mapillary" => &[MLY],
+        "mapillary" => &[MLY, MLY_TILES],
         "alerts" => &[ALERTS, ALERT_TILES],
         "quakes" => &[QUAKES],
         "fires" => &[FIRES, FIRE_AREAS, FIRE_TILES],
@@ -1355,6 +1355,8 @@ const TOWERS: &str = "fcc-towers";
 const TOWERS_MIN_ZOOM: f64 = 8.0;
 /// Where Mapillary has street-level photos (with --streetview).
 const MLY: &str = "mapillary-coverage";
+/// Its sequence lines as image tiles, where the terminal shows images.
+const MLY_TILES: &str = "mapillary-coverage-tiles";
 /// OpenCelliD's cells (--cells), drawn from this zoom, at most this many.
 const CELLS: &str = "opencellid-cells";
 const CELLS_MIN_ZOOM: f64 = 11.0;
@@ -3541,7 +3543,19 @@ fn add_mapillary(map: &mut Map, token: &str) -> Result<()> {
     src.attribution = Some(mapterm::mapillary::CREDIT.into());
     map.add_source(MLY, MapSource::vector(src)).map_err(|e| anyhow::anyhow!("{}", format!("{e:#}").replace(token, "<token>")))?;
     let before = under(map, MOVING);
-    map.add_layers(mapterm::mapillary::coverage_layers(MLY, MLY), before.as_deref())
+    // Where the terminal shows images, the lines are smooth image lines (the braille ones
+    // hidden); the dots stay.
+    if mapterm::kitty::supported() {
+        let tiles: Arc<dyn mapterm::raster::TileRender> = Arc::new(mapterm::mapillary::CoverageTiles::new(token));
+        let src = mapterm::areas::tile_source_to(tiles, "mapillary-lines", mapterm::mapillary::CREDIT, 18)?;
+        map.add_source(MLY_TILES, MapSource::raster(src))?;
+        map.add_layers(vec![StyleLayer::raster(MLY_TILES, MLY_TILES)], before.as_deref())?;
+    }
+    map.add_layers(mapterm::mapillary::coverage_layers(MLY, MLY), before.as_deref())?;
+    if mapterm::kitty::supported() {
+        map.set_visibility(&format!("{MLY}-sequence"), false)?;
+    }
+    Ok(())
 }
 
 /// Where a layer started later goes: under the first layer drawing from one of `sources`

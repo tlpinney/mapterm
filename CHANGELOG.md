@@ -20,7 +20,8 @@ All notable changes to mapterm are listed here. The format follows
   photos shows as a coverage layer (green: dots zoomed out, the sequences' lines, each photo
   from zoom 16), from Mapillary's tiles kept in the tile cache. "street view" in `L`
   starts it while running (with your token) and turns it off and on; off, clicks don't
-  look for photos.
+  look for photos. Where the terminal shows images, the sequence lines are smooth
+  image lines (drawn from the same cached vector tiles), the braille ones hidden.
   `mapterm::mapillary`.
 
 - Mobile network cells (`--cells`, or from `L`) from OpenCelliD (CC BY-SA 4.0): each cell's
