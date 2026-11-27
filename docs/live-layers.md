@@ -340,12 +340,14 @@ Click one for the road and cross streets, how much is closed, why (construction,
 parade...), the direction, when, the county or city, the text given, and the source. Every
 feed is asked every 5 minutes.
 
-With `--closures` the map switches to `mapterm-roads`: every road drawn and named in greys
-and cool whites by class (motorways brightest) over dim land and water, with county, state
-and country lines, and no reds, oranges or yellows, which are the closures' colors. `m`
-cycles to the other styles, and `--style mapterm-roads` picks it any time. For roads drawn
-as real lines with their widths rather than braille, add `MAPTERM_PIXELS=1` (experimental,
-kitty-graphics terminals); or put a road raster underneath, such as `--raster esri-dark`. DC, Arlington, Alexandria and Loudoun publish no live
+With `--closures` (and no other map asked for) the roads are rendered: Esri's Dark Gray
+Canvas goes underneath as an image (quiet greys made for overlays; Esri's terms apply), and
+the vector map starts on labels only, so road and place names from `mapterm-roads` sit on
+Esri's roads (`v` cycles all, labels only, off). With `--raster` of your own, a `--style`,
+a source or `--light`, that's your map instead; `mapterm-roads` alone draws every road and
+name in greys and cool whites by class with county lines and no warm colors, the closures'.
+For the vector roads as real lines with their widths, `MAPTERM_PIXELS=1` (experimental,
+kitty-graphics terminals). DC, Arlington, Alexandria and Loudoun publish no live
 closures; Virginia's statewide feed needs a key.
 
 ## Flight restrictions
