@@ -8,6 +8,14 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Weather balloon receiving stations (`--sondes`): the amateur stations that hear the
+  balloons, from the reports themselves (each says which station heard it, where the station
+  is, its antenna and the signal strength). ⌂ on the map, green while hearing a balloon,
+  callsigns from zoom 7. A selected balloon shows lines to the stations hearing it, and its
+  panel lists them with their distance and signal. Stations are kept on disk for 30 days
+  (`~/.cache/mapterm/sondehub/stations.json`, "stations" in `--cache`), so they show before
+  any balloon is heard.
+
 - `K` shows or hides the legends (they're also a row in `L`).
 
 - The clock says whether it's live: `● LIVE` (green), `⏸ 07:40 · 35 min ago` (amber,

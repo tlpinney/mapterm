@@ -714,7 +714,7 @@ fn live_sources(key: &str) -> &'static [&'static str] {
         "aircraft" => &[AIRCRAFT, TRAILS],
         "ships" => &[SHIPS],
         "satellites" => &[SATS],
-        "balloons" => &[BALLOONS],
+        "balloons" => &[BALLOONS, STATIONS, STATION_LINKS],
         "alerts" => &[ALERTS, ALERT_TILES],
         "quakes" => &[QUAKES],
         "fires" => &[FIRES, FIRE_AREAS, FIRE_TILES],
@@ -1013,6 +1013,9 @@ const TRAIL_IMAGE: u32 = 4_000_000_002;
 const SHIPS: &str = "ships";
 /// The --sondes source and layer, and its trail image.
 const BALLOONS: &str = "balloons";
+/// The stations receiving the balloons, and the lines from the selected balloon to them.
+const STATIONS: &str = "balloon-stations";
+const STATION_LINKS: &str = "balloon-links";
 const QUAKES: &str = "quakes";
 const FIRES: &str = "fires";
 const GAUGES: &str = "gauges";
@@ -2679,11 +2682,13 @@ fn draw_outage(f: &mut ratatui::Frame, area: Rect, o: &mapterm::outages::Area) {
 }
 
 /// The --sondes panel for the selected balloon: its readings, and where it's predicted to land.
+#[allow(clippy::too_many_arguments)]
 fn draw_balloon(
     f: &mut ratatui::Frame,
     area: Rect,
     (b, at): (&mapterm::sondehub::Balloon, mapterm::timeseries::Sample),
     pred: Option<&mapterm::sondehub::Prediction>,
+    heard: &[(&mapterm::sondehub::Station, f64, Option<f64>)],
     now: f64,
     follow: bool,
     me: Option<&mapterm::locate::Fix>,
@@ -2731,8 +2736,27 @@ fn draw_balloon(
     if let Some(v) = t.batt {
         l.push(Line::from(vec![key("battery"), Span::raw(format!("{v:.1} V"))]));
     }
-    if let Some(u) = &t.uploader {
+    // The stations hearing it now (green), then those that heard it earlier: how far, how
+    // strongly. Only the callsign when no station gave its position.
+    if heard.is_empty()
+        && let Some(u) = &t.uploader
+    {
         l.push(Line::from(vec![key("heard by"), Span::raw(u.clone())]));
+    }
+    for (i, (s, when, snr)) in heard.iter().take(6).enumerate() {
+        let km = mapterm::adsb::distance_nm((at.lon, at.lat), (s.lon, s.lat)) * 1.852;
+        let snr = snr.map(|x| format!(" · {x:.0} dB")).unwrap_or_default();
+        let now_ = now - when <= mapterm::sondehub::HEARING;
+        let st = if now_ { TStyle::new().fg(Color::Rgb(0x7e, 0xe7, 0x87)) } else { TStyle::new() };
+        let ago = if now_ { String::new() } else { format!(" · {}", mapterm::sessions::ago(*when, now)) };
+        l.push(Line::from(vec![
+            key(if i == 0 { "heard by" } else { "" }),
+            Span::styled(format!("⌂ {}", s.callsign), st),
+            Span::styled(format!("  {km:.0} km{snr}{ago}"), dim),
+        ]));
+    }
+    if heard.len() > 6 {
+        l.push(Line::from(vec![key(""), Span::styled(format!("and {} more", heard.len() - 6), dim)]));
     }
     l.push(Line::from(vec![key("position"), Span::raw(format!("{:.4}, {:.4}", at.lat, at.lon))]));
     l.push(Line::from(vec![key("last report"), Span::raw(format!("{:.0} s ago", (now - t.t).max(0.0)))]));
@@ -3167,6 +3191,14 @@ fn add_closures(map: &mut Map, tiles: &Arc<mapterm::areas::AreaTiles>, tiles_bef
         map.set_visibility(&format!("{CLOSURES}-line"), false)?;
     }
     Ok(())
+}
+
+/// The weather balloons over the stations receiving them and the lines between, all under
+/// `before` (None: on top).
+fn add_balloons(map: &mut Map, before: Option<&str>) -> Result<()> {
+    add_points(map, STATION_LINKS, SONDE_CREDIT, mapterm::sondehub::link_layer(STATION_LINKS, STATION_LINKS), before)?;
+    add_points(map, STATIONS, SONDE_CREDIT, mapterm::sondehub::station_layer(STATIONS, STATIONS), before)?;
+    add_points(map, BALLOONS, SONDE_CREDIT, mapterm::sondehub::layer(BALLOONS, BALLOONS), before)
 }
 
 /// The aircraft and their trails, from `feed`, under `before` (None: on top).
@@ -3898,7 +3930,7 @@ async fn main() -> Result<()> {
     // Live weather balloons (--sondes), between the ships and the aircraft.
     if a.sondes {
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS || *id == AIRCRAFT).map(str::to_string);
-        add_points(&mut map, BALLOONS, SONDE_CREDIT, mapterm::sondehub::layer(BALLOONS, BALLOONS), above.as_deref())?;
+        add_balloons(&mut map, above.as_deref())?;
     }
     // Earthquakes (--quakes): under everything that moves.
     if a.quakes.is_some() {
@@ -4436,6 +4468,12 @@ async fn main() -> Result<()> {
     // --sondes: the balloons, the stream's task with the circle it follows and the balloon
     // whose prediction it follows, and the selected balloon.
     let mut balloons = mapterm::sondehub::Balloons::default();
+    // The receiving stations heard before (kept 30 days), so they show before any balloon is.
+    let mut stations_saved = Instant::now();
+    if a.sondes {
+        balloons.load_stations(&mapterm::sondehub::stations_file(), unix_now());
+        map.set_data(STATIONS, &balloons.station_points(unix_now()))?;
+    }
     let (sonde_area_tx, sonde_area_rx) = tokio::sync::watch::channel::<Option<mapterm::sondehub::Area>>(None);
     let (sonde_sel_tx, sonde_sel_rx) = tokio::sync::watch::channel::<Option<String>>(None);
     let (btx, mut brx) = mpsc::unbounded_channel::<mapterm::sondehub::Event>();
@@ -4873,7 +4911,8 @@ async fn main() -> Result<()> {
                         Vec::new()
                     }
                     _ if let Some(b) = balloon => {
-                        draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), unix_now(), follow, me.as_ref());
+                        let heard = balloons.heard_by(&b.0.latest.serial, unix_now());
+                        draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), &heard, unix_now(), follow, me.as_ref());
                         Vec::new()
                     }
                     _ if let Some(s) = ship => {
@@ -5710,6 +5749,19 @@ async fn main() -> Result<()> {
                     follow = false;
                 }
                 map.set_data(BALLOONS, &balloons.points(unix_now() - SONDE_DELAY))?;
+                map.set_data(STATIONS, &balloons.station_points(unix_now()))?;
+                let links = match selected_balloon.as_deref() {
+                    Some(sn) => balloons.links(sn, unix_now() - SONDE_DELAY, unix_now()),
+                    None => serde_json::json!({"type": "FeatureCollection", "features": []}),
+                };
+                map.set_data(STATION_LINKS, &links)?;
+                // New or moved stations, kept for next time (at most every 5 minutes).
+                if balloons.stations_changed() && stations_saved.elapsed() >= Duration::from_secs(300) {
+                    stations_saved = Instant::now();
+                    if let Err(e) = balloons.save_stations(&mapterm::sondehub::stations_file()) {
+                        dlog(|| format!("sondes: saving stations: {e:#}"));
+                    }
+                }
                 trails_dirty = true;
             }
             // Go easy on the free feed: nothing when zoomed out past ADSB_MIN_ZOOM, a circle of
@@ -5949,7 +6001,9 @@ async fn main() -> Result<()> {
                                 "balloons" => {
                                     a.sondes = true;
                                     let before = under(&map, &[TRAILS, AIRCRAFT, SATS]);
-                                    add_points(&mut map, BALLOONS, SONDE_CREDIT, mapterm::sondehub::layer(BALLOONS, BALLOONS), before.as_deref())?;
+                                    add_balloons(&mut map, before.as_deref())?;
+                                    balloons.load_stations(&mapterm::sondehub::stations_file(), unix_now());
+                                    map.set_data(STATIONS, &balloons.station_points(unix_now()))?;
                                     tokio::spawn(mapterm::sondehub::stream(sonde_area_rx.clone(), sonde_sel_rx.clone(), btx.clone()));
                                     trails_kitty |= mapterm::kitty::supported();
                                 }
@@ -6512,7 +6566,7 @@ async fn main() -> Result<()> {
                             status.entry("balloons").or_default().heard(now, Some(balloons.len()));
                         }
                         mapterm::sondehub::Event::Update(t) => {
-                            balloons.apply(t, unix_now());
+                            balloons.apply(*t, unix_now());
                             status.entry("balloons").or_default().heard(unix_now(), Some(balloons.len()));
                         }
                         mapterm::sondehub::Event::Prediction(p) => balloons.set_prediction(p),
@@ -7578,6 +7632,10 @@ async fn main() -> Result<()> {
     }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
+    // The balloon stations heard this run, for next time.
+    if a.sondes && balloons.stations_changed() {
+        let _ = balloons.save_stations(&mapterm::sondehub::stations_file());
+    }
     // Keep this run in the history, for --continue and --resume.
     let sn = session_now(
         a.session.as_ref().map_or("run", |s| s.name.as_str()),

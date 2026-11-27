@@ -54,6 +54,14 @@ pub struct Telemetry {
     pub t: f64,
     /// The receiving station's callsign.
     pub uploader: Option<String>,
+    /// Where the receiving station is, as it reports: (lat, lon).
+    pub uploader_position: Option<(f64, f64)>,
+    /// The receiving station's altitude, meters.
+    pub uploader_alt: Option<f64>,
+    /// The receiving station's antenna, as its operator describes it.
+    pub uploader_antenna: Option<String>,
+    /// How strongly it was heard: signal-to-noise ratio, dB.
+    pub snr: Option<f64>,
 }
 
 /// Seconds since the Unix epoch for an RFC 3339 UTC time (`2026-11-26T00:57:16.999Z`).
@@ -98,7 +106,26 @@ pub fn parse_one(v: &Json) -> Option<Telemetry> {
         frequency: num("frequency").or_else(|| num("tx_frequency")),
         t: text("datetime").as_deref().and_then(unix_time)?,
         uploader: text("uploader_callsign"),
+        uploader_position: position(v.get("uploader_position")),
+        uploader_alt: num("uploader_alt"),
+        uploader_antenna: text("uploader_antenna"),
+        snr: num("snr"),
     })
+}
+
+/// A station's position as reports give it: `"lat,lon"`, or `[lat, lon(, alt)]`. None when
+/// it isn't one (or is 0,0, a station that hasn't set it).
+fn position(v: Option<&Json>) -> Option<(f64, f64)> {
+    let (lat, lon) = match v? {
+        Json::String(s) => {
+            let (a, b) = s.split_once(',')?;
+            (a.trim().parse::<f64>().ok()?, b.trim().parse::<f64>().ok()?)
+        }
+        Json::Array(a) => (a.first()?.as_f64()?, a.get(1)?.as_f64()?),
+        _ => return None,
+    };
+    let ok = lat.is_finite() && lon.is_finite() && lat.abs() <= 90.0 && lon.abs() <= 180.0 && !(lat == 0.0 && lon == 0.0);
+    ok.then_some((lat, lon))
 }
 
 /// The reports in an MQTT message: one object, or a list (the batch topics).
@@ -329,11 +356,47 @@ impl Balloon {
     }
 }
 
-/// Every balloon heard lately, and the latest prediction for the ones asked for.
+/// A receiving station: an amateur's radio that hears balloons and uploads what it hears.
+#[derive(Clone, Debug)]
+pub struct Station {
+    /// Its callsign.
+    pub callsign: String,
+    /// Degrees.
+    pub lat: f64,
+    /// Degrees.
+    pub lon: f64,
+    /// Meters.
+    pub alt: Option<f64>,
+    /// Its antenna, as its operator describes it.
+    pub antenna: Option<String>,
+    /// When it last uploaded a report (receive time, Unix seconds).
+    pub seen: f64,
+    /// The balloons it heard lately: when last, and how strongly (SNR, dB).
+    pub heard: HashMap<String, (f64, Option<f64>)>,
+}
+
+/// A station heard a balloon this recently (seconds) to count as hearing it now: a link is
+/// drawn, and it's listed first.
+pub const HEARING: f64 = 300.0;
+
+/// Stations are remembered (on disk too) this long after they last uploaded, seconds: they
+/// rarely move, and show before any balloon is heard.
+pub const STATION_KEEP: f64 = 30.0 * 86400.0;
+
+/// Where the stations are kept between runs.
+pub fn stations_file() -> std::path::PathBuf {
+    crate::source::cache_root().join("sondehub").join("stations.json")
+}
+
+/// Every balloon heard lately, the stations hearing them, and the latest prediction for the
+/// ones asked for.
 #[derive(Default)]
 pub struct Balloons {
     by_serial: HashMap<String, Balloon>,
     predictions: HashMap<String, Prediction>,
+    stations: HashMap<String, Station>,
+    /// A station came, moved or changed since the stations were last saved.
+    stations_changed: bool,
 }
 
 impl Balloons {
@@ -348,9 +411,83 @@ impl Balloons {
                 (Some(s), Some(h)) if s > 0.5 => Some(Velocity { speed: s, bearing: h }),
                 _ => None,
             });
-            b.latest = t;
+            b.latest = t.clone();
         }
         b.seen = now;
+        // The station that heard it, where it says it is.
+        if let (Some(call), Some((lat, lon))) = (t.uploader.clone(), t.uploader_position) {
+            let s = self.stations.entry(call.clone()).or_insert_with(|| Station {
+                callsign: call,
+                lat,
+                lon,
+                alt: None,
+                antenna: None,
+                seen: now,
+                heard: HashMap::new(),
+            });
+            let antenna = t.uploader_antenna.clone().or(s.antenna.take());
+            let alt = t.uploader_alt.or(s.alt);
+            // New, moved or changed: worth saving (the time it was heard alone isn't, often).
+            self.stations_changed |= s.heard.is_empty() || (s.lat, s.lon) != (lat, lon) || s.antenna != antenna || s.alt != alt || now - s.seen > 3600.0;
+            (s.lat, s.lon, s.seen, s.alt, s.antenna) = (lat, lon, now, alt, antenna);
+            s.heard.insert(t.serial.clone(), (now, t.snr));
+        }
+    }
+
+    /// The stations heard from lately.
+    pub fn stations(&self) -> impl Iterator<Item = &Station> {
+        self.stations.values()
+    }
+
+    /// The stations that heard balloon `serial`, the ones hearing it now (within [`HEARING`]
+    /// of `now`) first, then by how strongly.
+    pub fn heard_by(&self, serial: &str, now: f64) -> Vec<(&Station, f64, Option<f64>)> {
+        let mut v: Vec<(&Station, f64, Option<f64>)> = self.stations.values().filter_map(|s| s.heard.get(serial).map(|&(t, snr)| (s, t, snr))).collect();
+        v.sort_by(|a, b| {
+            let (na, nb) = (now - a.1 <= HEARING, now - b.1 <= HEARING);
+            nb.cmp(&na).then(b.2.unwrap_or(f64::MIN).total_cmp(&a.2.unwrap_or(f64::MIN))).then(a.0.callsign.cmp(&b.0.callsign))
+        });
+        v
+    }
+
+    /// The stations as GeoJSON points (`glyph`, `label`, and what's known of each).
+    pub fn station_points(&self, now: f64) -> Json {
+        let features: Vec<Json> = self
+            .stations
+            .values()
+            .map(|s| {
+                let hearing = s.heard.values().filter(|(t, _)| now - t <= HEARING).count();
+                json!({
+                    "type": "Feature",
+                    "id": format!("station:{}", s.callsign),
+                    "geometry": {"type": "Point", "coordinates": [s.lon, s.lat]},
+                    "properties": {
+                        "glyph": "⌂", "label": s.callsign, "callsign": s.callsign, "antenna": s.antenna, "alt_m": s.alt,
+                        "hearing": hearing, "heard": s.heard.len(), "kind": "receiving station",
+                        "last_upload_min": ((now - s.seen) / 60.0).round(),
+                    }
+                })
+            })
+            .collect();
+        json!({"type": "FeatureCollection", "features": features})
+    }
+
+    /// Lines from balloon `serial` (where it is at time `t`) to each station hearing it now.
+    pub fn links(&self, serial: &str, t: f64, now: f64) -> Json {
+        let Some((_, at)) = self.get(serial, t) else { return json!({"type": "FeatureCollection", "features": []}) };
+        let features: Vec<Json> = self
+            .heard_by(serial, now)
+            .into_iter()
+            .filter(|(_, heard, _)| now - heard <= HEARING)
+            .map(|(s, _, snr)| {
+                json!({
+                    "type": "Feature",
+                    "geometry": {"type": "LineString", "coordinates": [[at.lon, at.lat], [s.lon, s.lat]]},
+                    "properties": {"callsign": s.callsign, "snr": snr},
+                })
+            })
+            .collect();
+        json!({"type": "FeatureCollection", "features": features})
     }
 
     /// Keep a prediction (for the balloon it's about).
@@ -368,6 +505,58 @@ impl Balloons {
         self.by_serial.retain(|_, b| now - b.seen < GONE);
         let keep: HashSet<&String> = self.by_serial.keys().collect();
         self.predictions.retain(|s, _| keep.contains(s));
+        // Stations keep the balloons heard within the hour, and are remembered for a month.
+        for st in self.stations.values_mut() {
+            st.heard.retain(|_, (t, _)| now - *t < GONE);
+        }
+        self.stations.retain(|_, st| now - st.seen < STATION_KEEP);
+    }
+
+    /// Add the stations saved in `path` (unless known already, or not heard for a month).
+    pub fn load_stations(&mut self, path: &std::path::Path, now: f64) {
+        let Ok(raw) = std::fs::read(path) else { return };
+        let Ok(Json::Array(list)) = serde_json::from_slice::<Json>(&raw) else { return };
+        for v in list {
+            let (Some(call), Some(lat), Some(lon), Some(seen)) = (v["callsign"].as_str(), v["lat"].as_f64(), v["lon"].as_f64(), v["seen"].as_f64()) else {
+                continue;
+            };
+            if now - seen >= STATION_KEEP || self.stations.contains_key(call) {
+                continue;
+            }
+            self.stations.insert(
+                call.to_string(),
+                Station {
+                    callsign: call.to_string(),
+                    lat,
+                    lon,
+                    alt: v["alt"].as_f64(),
+                    antenna: v["antenna"].as_str().map(str::to_string),
+                    seen,
+                    heard: HashMap::new(),
+                },
+            );
+        }
+    }
+
+    /// Whether the stations changed since they were last saved.
+    pub fn stations_changed(&self) -> bool {
+        self.stations_changed
+    }
+
+    /// Save the stations to `path` (written aside, then moved into place).
+    pub fn save_stations(&mut self, path: &std::path::Path) -> Result<()> {
+        let mut list: Vec<&Station> = self.stations.values().collect();
+        list.sort_by(|a, b| a.callsign.cmp(&b.callsign));
+        let v: Vec<Json> =
+            list.iter().map(|s| json!({"callsign": s.callsign, "lat": s.lat, "lon": s.lon, "alt": s.alt, "antenna": s.antenna, "seen": s.seen})).collect();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let tmp = path.with_extension("part");
+        std::fs::write(&tmp, serde_json::to_vec(&v)?)?;
+        std::fs::rename(&tmp, path)?;
+        self.stations_changed = false;
+        Ok(())
     }
 
     /// How many balloons are known.
@@ -471,6 +660,23 @@ pub fn layer(id: &str, source: &str) -> crate::StyleLayer {
     crate::StyleLayer::symbol(id, source).glyph(json!(["get", "glyph"])).text(json!(["get", "label"])).color("#c9d1d9").paint("icon-color", Json::Array(stops))
 }
 
+/// The style layer for receiving stations from source `source`: ⌂ with their callsigns from
+/// zoom 7 (brighter while hearing a balloon).
+pub fn station_layer(id: &str, source: &str) -> crate::StyleLayer {
+    crate::StyleLayer::symbol(id, source)
+        .glyph(json!(["get", "glyph"]))
+        .text(json!(["step", ["zoom"], "", 7, ["get", "label"]]))
+        .color("#8b949e")
+        .paint("icon-color", json!(["case", [">", ["get", "hearing"], 0], "#7ee787", "#6e7681"]))
+}
+
+/// The style layer for the lines from the selected balloon to the stations hearing it.
+pub fn link_layer(id: &str, source: &str) -> crate::StyleLayer {
+    let v =
+        json!({"id": id, "type": "line", "source": source, "paint": {"line-color": "#7ee787", "line-width": 1, "line-opacity": 0.6, "line-dasharray": [2, 2]}});
+    crate::StyleLayer::from_json(&v).expect("a valid line layer").0
+}
+
 /// The area to follow: a circle, (lat, lon, radius in meters).
 pub type Area = (f64, f64, f64);
 
@@ -480,7 +686,7 @@ pub enum Event {
     /// The balloons the API knew around the area (once per area).
     Snapshot(Vec<Telemetry>),
     /// A live report.
-    Update(Telemetry),
+    Update(Box<Telemetry>),
     /// A landing prediction.
     Prediction(Prediction),
     /// Connected, following this many balloons.
@@ -588,12 +794,12 @@ async fn follow(
                                     let d = crate::adsb::distance_nm((here.1, here.0), (t.lon, t.lat)) * 1852.0;
                                     if d <= here.2 && serials.insert(t.serial.clone()) {
                                         ws.send_binary(&mqtt::subscribe(next_id(), &[format!("sondes/{}", t.serial)])).await?;
-                                        let _ = tx.send(Event::Update(t));
+                                        let _ = tx.send(Event::Update(Box::new(t)));
                                     }
                                 }
                             } else {
                                 for t in parse_payload(&payload) {
-                                    let _ = tx.send(Event::Update(t));
+                                    let _ = tx.send(Event::Update(Box::new(t)));
                                 }
                             }
                         }
@@ -653,6 +859,70 @@ async fn follow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A report of balloon `serial` at (lat, lon), heard by `call` at `pos` with `snr`.
+    fn heard(serial: &str, lat: f64, lon: f64, call: &str, pos: &str, snr: f64) -> Telemetry {
+        let v = json!({"serial": serial, "lat": lat, "lon": lon, "alt": 5000.0, "datetime": "2026-11-26T00:57:16.999Z",
+            "uploader_callsign": call, "uploader_position": pos, "uploader_alt": 120.0, "uploader_antenna": "1/4 wave", "snr": snr});
+        parse_one(&v).expect("a report")
+    }
+
+    #[test]
+    fn station_fields_parse() {
+        let t = heard("S1", 39.0, -77.0, "AC3Q", "40.46418013,-79.83163748", 12.5);
+        assert_eq!(t.uploader_position, Some((40.46418013, -79.83163748)));
+        assert_eq!((t.uploader_alt, t.snr, t.uploader_antenna.as_deref()), (Some(120.0), Some(12.5), Some("1/4 wave")));
+        assert_eq!(position(Some(&json!([38.5, -76.0, 10.0]))), Some((38.5, -76.0)));
+        assert_eq!(position(Some(&json!("0,0"))), None, "unset");
+        assert_eq!(position(Some(&json!("north"))), None);
+    }
+
+    #[test]
+    fn stations_hearing_a_balloon() {
+        let mut b = Balloons::default();
+        let now = 1_795_700_000.0;
+        b.apply(heard("S1", 39.0, -77.0, "FAR", "41.0,-79.0", 3.0), now - 100.0);
+        b.apply(heard("S1", 39.0, -77.0, "NEAR", "39.1,-77.1", 20.0), now - 10.0);
+        b.apply(heard("S1", 39.0, -77.0, "OLD", "38.0,-76.0", 30.0), now - 1200.0);
+        b.apply(heard("S2", 40.0, -78.0, "FAR", "41.0,-79.0", 5.0), now - 5.0);
+        let by: Vec<&str> = b.heard_by("S1", now).iter().map(|(s, ..)| s.callsign.as_str()).collect();
+        assert_eq!(by, vec!["NEAR", "FAR", "OLD"], "hearing now first, strongest first; then earlier");
+        assert_eq!(b.stations().count(), 3);
+        // Lines only to the stations hearing it now.
+        let links = b.links("S1", 1_795_662_237.0, now);
+        assert_eq!(links["features"].as_array().unwrap().len(), 2);
+        let pts = b.station_points(now);
+        let far = pts["features"].as_array().unwrap().iter().find(|f| f["properties"]["callsign"] == "FAR").unwrap();
+        assert_eq!(far["properties"]["hearing"], 2);
+        // An hour on, what they heard goes; the stations stay (a month).
+        b.prune(now + 2.0 * 3600.0);
+        assert_eq!(b.stations().count(), 3);
+        assert!(b.heard_by("S1", now).is_empty());
+        b.prune(now + STATION_KEEP + 1.0);
+        assert_eq!(b.stations().count(), 0);
+    }
+
+    #[test]
+    fn stations_are_saved_and_loaded() {
+        let dir = std::env::temp_dir().join(format!("mapterm-stations-{}", std::process::id()));
+        let path = dir.join("stations.json");
+        let now = 1_795_700_000.0;
+        let mut b = Balloons::default();
+        assert!(!b.stations_changed());
+        b.apply(heard("S1", 39.0, -77.0, "AC3Q", "40.46,-79.83", 9.0), now);
+        assert!(b.stations_changed());
+        b.save_stations(&path).unwrap();
+        assert!(!b.stations_changed());
+        let mut c = Balloons::default();
+        c.load_stations(&path, now + 86400.0);
+        let s = c.stations().next().expect("loaded");
+        assert_eq!((s.callsign.as_str(), s.lat, s.lon, s.antenna.as_deref()), ("AC3Q", 40.46, -79.83, Some("1/4 wave")));
+        assert!(s.heard.is_empty(), "heard nothing yet this run");
+        let mut d = Balloons::default();
+        d.load_stations(&path, now + STATION_KEEP + 1.0);
+        assert_eq!(d.stations().count(), 0, "too old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     const REPORT: &str = r#"{"serial":"Y0922379","type":"RS41","subtype":"RS41-SGP","manufacturer":"Vaisala","lat":43.4855,"lon":-77.2331,"alt":31995.4,
         "vel_v":4.22,"vel_h":22.7,"heading":69.8,"temp":-45.1,"humidity":3.0,"batt":2.6,"frequency":401.5,"datetime":"2026-11-26T00:57:16.999Z","uploader_callsign":"VE3IRR-2"}"#;
