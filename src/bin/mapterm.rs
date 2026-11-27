@@ -850,6 +850,64 @@ fn set_imagery(map: &mut Map, layers: &ImageryLayers) -> Result<()> {
     Ok(())
 }
 
+/// A data layer's source (`--geojson`), for the data sources picker.
+struct DataInfo {
+    /// What was given: a path or URL.
+    spec: String,
+    /// Features read (None for a dataset loaded as the map moves).
+    features: Option<usize>,
+    /// Its format and size: `GeoJSON · 2.1 MB`, `GeoParquet, loaded as the map moves`.
+    what: String,
+    /// When it was read (Unix seconds).
+    loaded: f64,
+}
+
+impl DataInfo {
+    fn new(spec: &str, features: Option<usize>, streamed: bool) -> Self {
+        let path = spec.split(['?', '#']).next().unwrap_or(spec);
+        let ext = path.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+        let format = match ext.as_str() {
+            "geojson" | "json" => "GeoJSON",
+            "csv" | "tsv" => "CSV",
+            "gpx" => "GPX",
+            "kml" => "KML",
+            "fgb" => "FlatGeobuf",
+            "shp" | "zip" => "shapefile",
+            "parquet" | "geoparquet" => "GeoParquet",
+            _ if mapterm::msbuildings::is_spec(spec) => "Microsoft building footprints",
+            _ if mapterm::overture::is_spec(spec) => "Overture Maps",
+            _ => "data",
+        };
+        let remote = spec.starts_with("https://") || spec.starts_with("http://");
+        let size = (!remote).then(|| std::fs::metadata(path).ok()).flatten().map(|m| format!(" · {}", human_bytes(m.len())));
+        let how = if streamed { ", loaded as the map moves" } else { "" };
+        DataInfo { spec: spec.to_string(), features, what: format!("{format}{how}{}", size.unwrap_or_default()), loaded: unix_now() }
+    }
+}
+
+/// A path or URL in at most `max` characters: the home folder as `~`, and when that's still
+/// too long, its end (where the file name is) after `…`.
+fn short_path(spec: &str, max: usize) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let s = match spec.strip_prefix(home.as_str()) {
+        Some(rest) if !home.is_empty() => format!("~{rest}"),
+        _ => spec.to_string(),
+    };
+    let n = s.chars().count();
+    if n <= max { s } else { format!("…{}", s.chars().skip(n - max + 1).collect::<String>()) }
+}
+
+/// A size in bytes, readably: `512 B`, `2.1 MB`.
+fn human_bytes(n: u64) -> String {
+    let n = n as f64;
+    match n {
+        n if n < 1024.0 => format!("{n:.0} B"),
+        n if n < 1024.0 * 1024.0 => format!("{:.0} KB", n / 1024.0),
+        n if n < 1024.0 * 1024.0 * 1024.0 => format!("{:.1} MB", n / 1024.0 / 1024.0),
+        n => format!("{:.1} GB", n / 1024.0 / 1024.0 / 1024.0),
+    }
+}
+
 /// GeoJSON layers with more single points than this cluster them.
 const CLUSTER_ABOVE: usize = 1000;
 
@@ -3286,6 +3344,8 @@ async fn main() -> Result<()> {
     };
     // GeoJSON layers over the basemap, each in its own color.
     let mut legend: Vec<(String, Color)> = Vec::new();
+    // Each data layer's source, beside `legend`: what was given, features, how it loads.
+    let mut data_info: Vec<DataInfo> = Vec::new();
     let mut datasets: Vec<Loading> = Vec::new();
     let mut opened = opened.into_iter().peekable();
     for (i, g) in geo.into_iter().enumerate() {
@@ -3294,6 +3354,9 @@ async fn main() -> Result<()> {
         if map.source(&id).is_some() {
             id = format!("{id}-{}", i + 1);
         }
+        let spec = a.geojson.get(i).cloned().unwrap_or_default();
+        let streamed = opened.peek().is_some_and(|(at, ..)| *at == i);
+        data_info.push(DataInfo::new(&spec, (!streamed).then_some(g.features.len()), streamed));
         // Many points cluster (as MapLibre's `cluster: true`) so they don't bury the map.
         let points = g.features.iter().filter(|f| f.geom == mapterm::mvt::GeomType::Point && f.parts.len() == 1).count();
         let mut src = MapSource::from(g);
@@ -4992,9 +5055,12 @@ async fn main() -> Result<()> {
                                 }
                                 Row::Data(i) => {
                                     let (id, _) = legend.get(i)?;
+                                    let d = data_info.get(i)?;
                                     let off = if data_on(i) { "" } else { "off · " };
-                                    let credit = map.source(id).and_then(MapSource::attribution).unwrap_or("");
-                                    Some((format!("{off}loaded at start"), format!("· timeless · data file (--geojson) {credit}")))
+                                    let n = d.features.map(|n| format!("{} · ", thousands(n))).unwrap_or_default();
+                                    let credit = map.source(id).and_then(MapSource::attribution).map(|c| format!(" · {c}")).unwrap_or_default();
+                                    let ago = mapterm::sessions::ago(d.loaded, now);
+                                    Some((format!("{off}{n}{} · read {ago}", d.what), format!("· timeless · {}{credit}", short_path(&d.spec, 56))))
                                 }
                                 _ => None,
                             }
@@ -7379,5 +7445,25 @@ mod tests {
         let lines = super::credit_lines(&long, 20);
         assert!(lines.iter().all(|l| l.chars().count() <= 20), "{lines:?}");
         assert_eq!(lines.iter().map(|l| l.trim()).collect::<Vec<_>>().join(" "), long[0]);
+    }
+}
+
+#[cfg(test)]
+mod data_info_tests {
+    use super::{human_bytes, short_path};
+
+    #[test]
+    fn paths_keep_their_file_names() {
+        assert_eq!(short_path("/tmp/a.geojson", 40), "/tmp/a.geojson");
+        let long = format!("/data/{}/parcels.geojson", "x".repeat(60));
+        let s = short_path(&long, 30);
+        assert_eq!(s.chars().count(), 30);
+        assert!(s.starts_with('…') && s.ends_with("/parcels.geojson"));
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(human_bytes(268), "268 B");
+        assert_eq!(human_bytes(2 * 1024 * 1024 + 100_000), "2.1 MB");
     }
 }
