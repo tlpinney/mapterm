@@ -3524,6 +3524,7 @@ async fn main() -> Result<()> {
     let mut list_rows: Vec<(u16, usize)> = Vec::new();
     let mut panel_area = Rect::default();
     let mut last_panel = Rect::default();
+    let mut last_switcher = Rect::default();
     // The timeline (with --radar or --alerts): where it was drawn, the span it shows, and
     // whether the user moved that span (then it no longer follows the data).
     let mut timeline_area = Rect::default();
@@ -4794,12 +4795,19 @@ async fn main() -> Result<()> {
             frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
             if sync {
                 let mut out = std::io::stdout();
-                // What's drawn over the map (legends, the panel): images keep clear of it.
-                let holes: Vec<Rect> = legend_rects.iter().copied().chain((panel_area.width > 0).then_some(panel_area)).collect();
+                // What's drawn over the map (legends, the panel, the base map switcher): images
+                // keep clear of it.
+                let holes: Vec<Rect> = legend_rects
+                    .iter()
+                    .copied()
+                    .chain((panel_area.width > 0).then_some(panel_area))
+                    .chain((switcher_rect.width > 0).then_some(switcher_rect))
+                    .collect();
                 kstate.holes = holes.clone();
                 // A panel opened or closed: the satellite and trail images take the new holes now.
-                if panel_area != last_panel {
+                if panel_area != last_panel || switcher_rect != last_switcher {
                     last_panel = panel_area;
+                    last_switcher = switcher_rect;
                     trails_dirty = true;
                     sat_dots_drawn = Instant::now() - Duration::from_secs(10);
                 }

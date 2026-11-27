@@ -2927,7 +2927,7 @@ mod tests {
         assert_eq!(render(&map, &cam, area)[(20, 10)].bg, Color::Reset);
         let mut k = KittyState::default();
         let first = map.kitty_commands(&cam, area, &mut k);
-        assert!(first.contains("a=t,f=100") && first.contains(&format!("z={},", crate::kitty::under_cells(-1000))));
+        assert!(first.contains("a=t,f=100") && first.contains("z=-1000"));
         assert!(!first.contains("d=a"), "never everything: other images on screen are the caller's");
         let second = map.kitty_commands(&cam, area, &mut k);
         assert!(!second.contains("a=t,") && second.contains("a=p,") && !second.contains("a=d,"), "placed again in place");

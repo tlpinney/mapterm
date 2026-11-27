@@ -175,21 +175,12 @@ pub fn transmit_shm(id: u32, png: &[u8]) -> Option<String> {
     }
 }
 
-/// Where an image goes for stacking order `z`: kitty draws images with z below `i32::MIN / 2`
-/// under cells that have a background color, as well as under the text. The map's images go
-/// there, so anything drawn over the map with a background (the base map switcher, legends) is
-/// opaque; the map itself leaves cell backgrounds unset over imagery. Order among them stays.
-pub fn under_cells(z: i32) -> i32 {
-    i32::MIN / 2 - 1 + z.min(0)
-}
-
 /// Show source rectangle `src` (x, y, w, h pixels) of image `id`, scaled to `cols` x `rows`
 /// cells with its top-left at absolute cell (`col`, `row`), underneath the text. `z` is the
 /// stacking order among images (negative: under the text).
 #[allow(clippy::too_many_arguments)]
 pub fn place(id: u32, placement: u32, col: u16, row: u16, src: (u32, u32, u32, u32), cols: u16, rows: u16, z: i32) -> String {
     let (x, y, w, h) = src;
-    let z = under_cells(z);
     format!("\x1b[{};{}H\x1b_Ga=p,i={id},p={placement},x={x},y={y},w={w},h={h},c={cols},r={rows},z={z},C=1,q=2\x1b\\", row as u32 + 1, col as u32 + 1)
 }
 
@@ -198,7 +189,6 @@ pub fn place(id: u32, placement: u32, col: u16, row: u16, src: (u32, u32, u32, u
 #[allow(clippy::too_many_arguments)]
 pub fn place_offset(id: u32, placement: u32, col: u16, row: u16, src: (u32, u32, u32, u32), cols: u16, rows: u16, z: i32, x_off: u32, y_off: u32) -> String {
     let (x, y, w, h) = src;
-    let z = under_cells(z);
     format!(
         "\x1b[{};{}H\x1b_Ga=p,i={id},p={placement},x={x},y={y},w={w},h={h},c={cols},r={rows},X={x_off},Y={y_off},z={z},C=1,q=2\x1b\\",
         row as u32 + 1,
@@ -230,7 +220,7 @@ pub const FREE_ALL: &str = "\x1b_Ga=d,d=A,q=2\x1b\\";
 #[allow(clippy::too_many_arguments)]
 pub fn show_rgba(id: u32, w: u32, h: u32, rgba: &[u8], col: u16, row: u16, cols: u16, rows: u16, z: i32, shm: bool) -> String {
     let mut out = format!("\x1b[{};{}H", row + 1, col + 1);
-    let keys = format!("a=T,f=32,s={w},v={h},i={id},p=1,c={cols},r={rows},C=1,z={},q=2", under_cells(z));
+    let keys = format!("a=T,f=32,s={w},v={h},i={id},p=1,c={cols},r={rows},C=1,z={z},q=2");
     #[cfg(unix)]
     if shm && let Some(name) = shm_write(rgba) {
         let _ = write!(out, "\x1b_G{keys},t=s,S={};{}\x1b\\", rgba.len(), base64(name.as_bytes()));
@@ -318,7 +308,6 @@ pub fn transmit_rgba(id: u32, w: u32, h: u32, rgba: &[u8], shm: bool) -> String 
 #[allow(clippy::too_many_arguments)]
 pub fn place_px(id: u32, col: u16, row: u16, x_off: u32, y_off: u32, src: (u32, u32, u32, u32), z: i32) -> String {
     let (x, y, w, h) = src;
-    let z = under_cells(z);
     format!("\x1b[{};{}H\x1b_Ga=p,i={id},p=1,x={x},y={y},w={w},h={h},X={x_off},Y={y_off},C=1,z={z},q=2\x1b\\", row + 1, col + 1)
 }
 
@@ -396,6 +385,6 @@ mod tests {
         assert!(t.ends_with("\x1b\\") && t.contains("\x1b_Gm=0;"));
         assert_eq!(t.matches("\x1b_G").count(), 2, "8000 base64 chars -> two chunks");
         let p = place(7, 3, 4, 2, (10, 20, 30, 40), 5, 6, -1);
-        assert_eq!(p, "\x1b[3;5H\x1b_Ga=p,i=7,p=3,x=10,y=20,w=30,h=40,c=5,r=6,z=-1073741826,C=1,q=2\x1b\\");
+        assert_eq!(p, "\x1b[3;5H\x1b_Ga=p,i=7,p=3,x=10,y=20,w=30,h=40,c=5,r=6,z=-1,C=1,q=2\x1b\\");
     }
 }
