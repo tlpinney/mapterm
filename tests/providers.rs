@@ -204,3 +204,15 @@ fn overture_addresses_catalog() {
         assert!(doc["links"].as_array().is_some_and(|l| l.iter().filter(|l| l["rel"] == "item").count() > 10), "few items");
     });
 }
+
+#[test]
+#[ignore = "nightly provider check"]
+fn chart_traffic_speeds() {
+    block_on(async {
+        let s = mapterm::traffic::sensors().await.expect("CHART speed sensors");
+        // Many sensors are offline at any time; some must be working, with speeds.
+        assert!(s.len() >= 20, "only {} working CHART speed sensors", s.len());
+        assert!(s.iter().all(|s| (37.5..40.0).contains(&s.lat) && !s.zones.is_empty()), "sensors outside Maryland or without speeds");
+        assert!(s.iter().any(|s| s.zones.iter().any(|z| z.heading().is_some())), "no directions (NORTH, OUTER_LOOP...)");
+    });
+}

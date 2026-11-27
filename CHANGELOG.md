@@ -8,6 +8,10 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Traffic speeds (`--traffic`): Maryland CHART's speed sensors, a dot per sensor colored by
+  its slowest direction, speeds labeled from zoom 10. With a route, each choice shows its
+  time with traffic beside the free-flow time. `mapterm::traffic`.
+
 - Route choices: up to three routes (Valhalla's `alternates`), the others drawn dim, the panel
   listing each one's time, distance and main road; `1`–`3` picks one.
 
