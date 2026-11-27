@@ -134,6 +134,16 @@ recover one, read SondeHub's
 [Radiosonde Hunting Etiquette](https://github.com/projecthorus/sondehub-tracker/wiki/Radiosonde-Hunting-Etiquette)
 first.
 
+## Antenna structures
+
+`--towers` draws the structures registered with the FCC's
+[Antenna Structure Registration](https://www.fcc.gov/wireless/systems-utilities/antenna-structure-registration)
+(US; public domain, no key): towers, masts, poles and antennas on buildings that are tall or
+near airports, about 142,000 standing. Each is a † with its height (from zoom 8, as there
+are so many); `i` shows the structure type, owner, place and registration number. These are
+the physical structures only: which carriers or radios are on them isn't in the database.
+mapterm keeps the FCC's weekly file (~38 MB) for a week.
+
 ## Satellites
 
 `--sats` shows satellites, placed from [CelesTrak](https://celestrak.org)'s orbital

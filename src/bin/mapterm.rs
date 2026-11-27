@@ -171,6 +171,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 radio receivers (no key): ▲ climbing, ▼ falling, colored by altitude, with
                 their flight as a trail; click or Tab for readings, frequency and the
                 predicted landing
+  --towers      antenna structures registered with the FCC (US; no key): † with their height,
+                from zoom 8; inspect (i) for the structure type, owner and registration.
+                The FCC's weekly file (~38 MB) is kept for a week
   --nasa-balloons [all]
                 NASA's scientific balloons from its balloon facility (CSBF, no key): ◓ with
                 the payload's name and its track so far, for flights heard in the last 3
@@ -311,6 +314,8 @@ struct Args {
     sondes: bool,
     /// --nasa-balloons: NASA's scientific balloons; `all`: past flights too.
     nasa: Option<bool>,
+    /// --towers: the FCC's registered antenna structures.
+    towers: bool,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
     /// --floods: river and creek gauges from NOAA NWPS.
@@ -397,6 +402,7 @@ fn args() -> Result<Args> {
         radar: false,
         sondes: false,
         nasa: None,
+        towers: false,
         alerts: false,
         outages: false,
         quakes: None,
@@ -569,6 +575,7 @@ fn args() -> Result<Args> {
             "--ais" => a.ais = true,
             "--sondes" | "--balloons" => a.sondes = true,
             "--nasa-balloons" => a.nasa = Some(it.next_if(|n| n == "all").is_some()),
+            "--towers" => a.towers = true,
             "--radar" => a.radar = true,
             "--alerts" => a.alerts = true,
             "--outages" => a.outages = true,
@@ -735,6 +742,7 @@ fn live_sources(key: &str) -> &'static [&'static str] {
         "satellites" => &[SATS],
         "balloons" => &[BALLOONS, STATIONS, STATION_LINKS, STATION_AREAS, STATION_LINK_TILES, LAUNCH_SITES],
         "nasa" => &[NASA, NASA_TRACKS],
+        "towers" => &[TOWERS],
         "alerts" => &[ALERTS, ALERT_TILES],
         "quakes" => &[QUAKES],
         "fires" => &[FIRES, FIRE_AREAS, FIRE_TILES],
@@ -1130,6 +1138,10 @@ const BALLOONS: &str = "balloons";
 const STATIONS: &str = "balloon-stations";
 /// NASA's scientific balloons (--nasa-balloons) and their tracks.
 const NASA: &str = "nasa-balloons";
+/// The FCC's registered antenna structures (--towers).
+const TOWERS: &str = "fcc-towers";
+/// Towers are drawn from this zoom (142,000 of them).
+const TOWERS_MIN_ZOOM: f64 = 8.0;
 const NASA_TRACKS: &str = "nasa-tracks";
 const STATION_LINKS: &str = "balloon-links";
 /// The stations' areas (where each is, somewhere inside).
@@ -3243,7 +3255,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
             || id == ROUTE
             || id == format!("{ROUTE}-line")
             || [CLOSURES, GAUGES, FIRES, QUAKES, TRAFFIC].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')))
-            || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS, LAUNCH_SITES].contains(&id.as_str())
+            || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS, LAUNCH_SITES, TOWERS].contains(&id.as_str())
             || id.starts_with(STATION_AREAS);
         if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
@@ -3278,6 +3290,7 @@ const STARTABLE: &[(&str, &str)] = &[
     ("aircraft", "--adsb"),
     ("balloons", "--sondes"),
     ("nasa", "--nasa-balloons"),
+    ("towers", "--towers"),
     ("alerts", "--alerts"),
     ("quakes", "--quakes"),
     ("fires", "--fires"),
@@ -4169,6 +4182,10 @@ async fn main() -> Result<()> {
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS || *id == AIRCRAFT).map(str::to_string);
         add_nasa(&mut map, above.as_deref())?;
     }
+    if a.towers {
+        let above = under(&map, MOVING);
+        add_points(&mut map, TOWERS, mapterm::towers::CREDIT, mapterm::towers::layer(TOWERS, TOWERS), above.as_deref())?;
+    }
     // The lines from a selected balloon to the stations hearing it, as image tiles.
     let link_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
     if a.sondes {
@@ -4753,6 +4770,19 @@ async fn main() -> Result<()> {
     let mut nasa_tracks: std::collections::HashMap<String, Vec<mapterm::csbf::TrackPoint>> = std::collections::HashMap::new();
     let mut nasa_new = false;
     let (nasatx, mut nasarx) = mpsc::unbounded_channel::<NasaMsg>();
+    // --towers: the FCC's structures (read once, kept a week), and the view they were last
+    // drawn for.
+    let mut towers: Vec<mapterm::towers::Tower> = Vec::new();
+    let mut towers_drawn: Option<(i32, i64, i64)> = None;
+    let (towertx, mut towerrx) = mpsc::unbounded_channel::<Result<Vec<mapterm::towers::Tower>>>();
+    let load_towers = |tx: mpsc::UnboundedSender<Result<Vec<mapterm::towers::Tower>>>| {
+        tokio::spawn(async move {
+            let _ = tx.send(mapterm::towers::load().await);
+        });
+    };
+    if a.towers {
+        load_towers(towertx.clone());
+    }
     if let Some(all) = a.nasa {
         spawn_nasa(nasatx.clone(), all);
     }
@@ -4834,6 +4864,7 @@ async fn main() -> Result<()> {
             "satellites" => a.sats.is_some(),
             "balloons" => a.sondes,
             "nasa" => a.nasa.is_some(),
+            "towers" => a.towers,
             "radar" => radar.is_some(),
             "alerts" => a.alerts,
             "quakes" => a.quakes.is_some(),
@@ -5350,6 +5381,20 @@ async fn main() -> Result<()> {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let of = sat_filter.describe();
                     spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
+                }
+                if a.towers && !live_off.contains_key("towers") {
+                    let text = if towers.is_empty() {
+                        "† … ".to_string()
+                    } else if cam.zoom < TOWERS_MIN_ZOOM {
+                        "† zoom in for towers ".to_string()
+                    } else {
+                        let vp = Viewport::new(&cam, map_area);
+                        let (w, n) = vp.cell_to_lonlat(0, 0);
+                        let (e, s) = vp.cell_to_lonlat(map_area.width, map_area.height);
+                        let inview = towers.iter().filter(|t| t.lon >= w && t.lon <= e && t.lat >= s && t.lat <= n).count();
+                        format!("† {} towers ", thousands(inview))
+                    };
+                    spans.push(Span::styled(text, TStyle::new().fg(Color::Rgb(0x8a, 0xa4, 0xc8))));
                 }
                 if a.nasa.is_some() && !live_off.contains_key("nasa") {
                     let flying = nasa_flights.iter().filter(|f| unix_now() - f.t <= mapterm::csbf::RECENT).count();
@@ -6060,6 +6105,21 @@ async fn main() -> Result<()> {
                 map.put_raster_tile(FIRE_TILES, None, true);
                 (fires_new, fires_shown_selected) = (false, selected_fire.clone());
             }
+            // Towers around the view, drawn again when it moves a quarter of its width (or the
+            // zoom changes); none zoomed out.
+            if a.towers && !towers.is_empty() && map_area.width > 0 {
+                let vp = Viewport::new(&cam, map_area);
+                let (west, north) = vp.cell_to_lonlat(0, 0);
+                let (east, south) = vp.cell_to_lonlat(map_area.width, map_area.height);
+                let step = ((east - west).abs() / 4.0).max(1e-9);
+                let key = if cam.zoom >= TOWERS_MIN_ZOOM { (cam.zoom.floor() as i32, (cam.lon / step).round() as i64, (cam.lat / step).round() as i64) } else { (-1, 0, 0) };
+                if towers_drawn != Some(key) {
+                    towers_drawn = Some(key);
+                    let (dx, dy) = ((east - west).abs() / 2.0, (north - south).abs() / 2.0);
+                    let pts = if key.0 < 0 { serde_json::json!({"type": "FeatureCollection", "features": []}) } else { mapterm::towers::points(&towers, (west - dx, south - dy, east + dx, north + dy)) };
+                    map.set_data(TOWERS, &pts)?;
+                }
+            }
             if let (Some(all), true) = (a.nasa, nasa_new) {
                 nasa_new = false;
                 let now = unix_now();
@@ -6355,6 +6415,12 @@ async fn main() -> Result<()> {
                                         let _ = map.set_visibility(TRAILS, false);
                                     }
                                     adsb_feed = Some(feed);
+                                }
+                                "towers" => {
+                                    a.towers = true;
+                                    let before = under(&map, MOVING);
+                                    add_points(&mut map, TOWERS, mapterm::towers::CREDIT, mapterm::towers::layer(TOWERS, TOWERS), before.as_deref())?;
+                                    load_towers(towertx.clone());
                                 }
                                 "nasa" => {
                                     a.nasa = Some(false);
@@ -6932,6 +6998,20 @@ async fn main() -> Result<()> {
                             launch_sites = v;
                         }
                         Err(e) => note = Some((Instant::now(), format!("launch sites: {e:#}"))),
+                    }
+                }
+                Some(r) = towerrx.recv() => {
+                    match r {
+                        Ok(v) => {
+                            status.entry("towers").or_default().ok(unix_now(), Some(v.len()));
+                            dlog(|| format!("towers: {}", v.len()));
+                            towers = v;
+                            towers_drawn = None;
+                        }
+                        Err(e) => {
+                            status.entry("towers").or_default().fail(unix_now(), format!("{e:#}"));
+                            note = Some((Instant::now(), format!("towers: {e:#}")));
+                        }
                     }
                 }
                 Some(m) = nasarx.recv() => {

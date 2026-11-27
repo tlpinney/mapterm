@@ -134,6 +134,7 @@ pub mod tilecache;
 pub mod timelayer;
 pub mod timeline;
 pub mod timeseries;
+pub mod towers;
 pub mod traffic;
 pub mod upperair;
 pub mod ws;

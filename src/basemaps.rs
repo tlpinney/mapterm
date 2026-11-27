@@ -149,6 +149,7 @@ pub const LIVE: &[Live] = &[
     Live { key: "satellites", label: "satellites", detail: "orbits from CelesTrak" },
     Live { key: "balloons", label: "weather balloons", detail: "radiosondes, SondeHub" },
     Live { key: "nasa", label: "NASA balloons", detail: "scientific balloons, CSBF" },
+    Live { key: "towers", label: "antenna structures", detail: "FCC tower registrations" },
     Live { key: "radar", label: "radar", detail: "rain and snow · R" },
     Live { key: "alerts", label: "weather alerts", detail: "NWS warnings and watches" },
     Live { key: "quakes", label: "earthquakes", detail: "USGS" },

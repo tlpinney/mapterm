@@ -8,6 +8,11 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Antenna structures (`--towers`, or from `L`): the towers and other structures registered
+  with the FCC (US, public domain), 142,000 constructed ones, as † with their height from
+  zoom 8; inspect for the structure type, owner and registration. The FCC's weekly file
+  (~38 MB) is kept for a week. `mapterm::towers`, with a small zip reader.
+
 - Weather balloon launch sites (with `--sondes`): NOAA's upper-air stations still
   launching (~800 worldwide, from the IGRA station list, public domain, cached 30 days) as
   ⊙. Click one for its WMO number, how long it's launched, its usual launch times and the
