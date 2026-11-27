@@ -8,6 +8,9 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- A disclaimer: with a live or hazard layer on, "Not for navigation or emergencies (? more)"
+  follows the credits at the bottom of the map, and the `?` key list ends with it in full
+  (also in `--help`, the README and the live layers guide).
 - Virginia in `--closures` with your own VDOT SmarterRoads token (`--vdot-key-cmd` or
   `VDOT_SMARTERROADS_TOKEN`): VDOT's WZDx work zones and its road closures (VaTraffic
   events: type, location, direction, jurisdiction, lanes, times, the 511 text). The token goes only

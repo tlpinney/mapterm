@@ -163,6 +163,15 @@ frame.render_widget(map.view(&ctl.cam), area);
 
 More in [docs/library.md](docs/library.md) and on [docs.rs](https://docs.rs/mapterm).
 
+## Disclaimer
+
+mapterm shows maps and live data from other people's services as they publish them:
+aircraft, ships, satellites, weather radar and alerts, power outages, earthquakes, wildfires,
+river levels, flight restrictions and road closures. That data can be late, incomplete or
+wrong, and a service can change or stop. mapterm is not for navigation, flight planning or
+emergencies; follow official sources and local authorities. While a live layer is on, the
+map says so after its credits, and `?` shows this in full. The software comes with no warranty (see the license).
+
 ## License
 
 MIT. Map data © OpenStreetMap contributors.

@@ -222,7 +222,12 @@ inspect mode (i): hover shows what's under the pointer; click lists every featur
 
 experimental: MAPTERM_SMOOTH=shift (pixel-smooth dragging) or MAPTERM_SMOOTH=1 (smooth
       up/down panning) on the Ghostty Smooth terminal fork; `s` then toggles it.
-      See https://github.com/tlpinney/ghostty (branch smooth).";
+      See https://github.com/tlpinney/ghostty (branch smooth).
+
+disclaimer: mapterm shows other people's data as they publish it: live layers (aircraft,
+      ships, weather, alerts, outages, quakes, fires, river levels, flight restrictions,
+      road closures) may be late, incomplete or wrong. Not for navigation, flight planning
+      or emergencies: follow official sources and local authorities.";
 
 struct Args {
     source: Option<String>,
@@ -1041,7 +1046,22 @@ fn draw_help(f: &mut ratatui::Frame, area: Rect, on: HelpOn) {
         l
     };
     let sections = help_sections(on);
-    let all: Vec<Vec<Line>> = sections.iter().map(section_lines).collect();
+    let mut all: Vec<Vec<Line>> = sections.iter().map(section_lines).collect();
+    // The disclaimer, wrapped to the column, last.
+    let mut d = vec![Line::from(Span::styled(" disclaimer", TStyle::new().fg(DISCLAIMER_COLOR).add_modifier(Modifier::BOLD)))];
+    let mut cur = String::new();
+    for word in DISCLAIMER_FULL.split_whitespace() {
+        if cur.chars().count() + word.chars().count() + 1 > 54 {
+            d.push(Line::from(Span::styled(format!("  {cur}"), TStyle::new().fg(Color::Rgb(0xe6, 0xe6, 0xe6)))));
+            cur.clear();
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur += word;
+    }
+    d.push(Line::from(Span::styled(format!("  {cur}"), TStyle::new().fg(Color::Rgb(0xe6, 0xe6, 0xe6)))));
+    all.push(d);
     let total: usize = all.iter().map(Vec::len).sum();
     let two = area.width >= 110 && total + 2 > area.height as usize;
     // Split into two columns at the section nearest half way.
@@ -1094,6 +1114,27 @@ fn logo_spans() -> Vec<Span<'static>> {
 
 /// The mark's width in cells.
 const LOGO_W: u16 = 12;
+
+/// Shown after the credits while a live or hazard layer is on.
+const DISCLAIMER: &str = "Not for navigation or emergencies (? more)";
+
+/// The disclaimer's color: amber, bold, so it stands out from the dim credits.
+const DISCLAIMER_COLOR: Color = Color::Rgb(0xff, 0xc8, 0x3c);
+
+/// A line of credits in `dim`, with the disclaimer in it (where it is) bold and amber.
+fn credit_spans(line: &str, dim: TStyle) -> Vec<Span<'static>> {
+    match line.find(DISCLAIMER) {
+        Some(i) => vec![
+            Span::styled(line[..i].to_string(), dim),
+            Span::styled(DISCLAIMER, TStyle::new().fg(DISCLAIMER_COLOR).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::styled(line[i + DISCLAIMER.len()..].to_string(), dim),
+        ],
+        None => vec![Span::styled(line.to_string(), dim)],
+    }
+}
+
+/// The full disclaimer, at the end of the ? key list.
+const DISCLAIMER_FULL: &str = "mapterm shows other people's data as they publish it. Live layers (aircraft, ships, weather, alerts, outages, quakes, fires, river levels, flight restrictions, road closures) can be late, incomplete or wrong, and a service can change or stop. Not for navigation, flight planning or emergencies: follow official sources and local authorities.";
 
 /// The credits as lines `width` wide: each line starts with a space, credits are joined
 /// with " · " and broken between credits, and only a credit wider than a whole line is
@@ -2453,6 +2494,19 @@ fn base_visibility(map: &Map) -> std::collections::HashMap<String, bool> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut a = args()?;
+    // Live or hazard data on the map: the disclaimer shows with the credits.
+    let live_data = a.adsb.is_some()
+        || a.ais
+        || a.sats.is_some()
+        || a.sondes
+        || a.radar
+        || a.alerts
+        || a.outages
+        || a.quakes.is_some()
+        || a.fires
+        || a.floods
+        || a.tfrs
+        || a.closures;
     // Road closures over rendered roads: Esri's Dark Gray Canvas underneath (quiet greys,
     // made for overlays, no labels of its own), with mapterm's road and place names on top;
     // unless another map was asked for.
@@ -4191,7 +4245,11 @@ async fn main() -> Result<()> {
                 {
                     credits.push(c.to_string());
                 }
-                let credit_items = if credits.is_empty() { vec![basemap_name.clone()] } else { credits };
+                let mut credit_items = if credits.is_empty() { vec![basemap_name.clone()] } else { credits };
+                // With a live or hazard layer on, mapterm's disclaimer after the credits.
+                if live_data {
+                    credit_items.push(DISCLAIMER.to_string());
+                }
                 let credits = credit_items.join(" · ");
                 // While the finder is open, the status line is its prompt.
                 if let Some(fd) = finder.as_ref() {
@@ -4236,7 +4294,7 @@ async fn main() -> Result<()> {
                 }
                 status_rows = 1 + credit_rows;
                 if credit_rows == 0 || s.height < 2 {
-                    spans.push(Span::styled(format!("· {credits} · ? keys · q quit"), dim));
+                    spans.extend(credit_spans(&format!("· {credits} · ? keys · q quit"), dim));
                     let row = Rect { y: s.bottom() - 1, height: 1, ..s };
                     f.render_widget(Paragraph::new(Line::from(spans)), row);
                     if logo_w > 0 {
@@ -4247,7 +4305,7 @@ async fn main() -> Result<()> {
                     // Bottom-aligned, so a frame where the rows haven't caught up yet loses
                     // the top line, not the end of the last.
                     let shown = lines.len().min(above.height as usize);
-                    let text: Vec<Line> = lines[lines.len() - shown..].iter().map(|l| Line::from(Span::styled(l.clone(), dim))).collect();
+                    let text: Vec<Line> = lines[lines.len() - shown..].iter().map(|l| Line::from(credit_spans(l, dim))).collect();
                     f.render_widget(Paragraph::new(text), Rect { y: above.bottom() - shown as u16, height: shown as u16, ..above });
                     if logo_w > 0 && shown > 0 {
                         f.render_widget(Paragraph::new(Line::from(logo)), Rect { x: above.right() - LOGO_W, y: above.bottom() - 1, width: LOGO_W, height: 1 });

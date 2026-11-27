@@ -1,7 +1,13 @@
 # Live layers
 
 Things that move or change while the map is open: where you are, aircraft, ships and
-satellites.
+satellites, weather, outages, earthquakes, fires, river levels, flight restrictions and
+road closures.
+
+> **Disclaimer.** mapterm shows other people's data as they publish it, and that data can be
+> late, incomplete or wrong. mapterm is not for navigation, flight planning or emergencies:
+> follow official sources and local authorities. While a live layer is on, a short version
+> shows after the credits at the bottom of the map, and `?` shows it in full.
 
 ## Your location
 
