@@ -434,6 +434,31 @@ blasts and ice quakes; their panel says so.
 USGS updates the feeds every minute, and mapterm asks once a minute with
 `If-Modified-Since`.
 
+## Directions
+
+```
+mapterm --route 'Alexandria, VA' 'Annapolis, MD'
+mapterm --route here 38.98,-76.49 --closures       # from where you are, around closed roads
+mapterm --route here 'Great Falls Park' --route-mode bike
+```
+
+Each end is `here` (your location), `LAT,LON`, or a place to search for, as `/` does. Or
+search with `/` and press `d`: directions there from your location (after `g` or `--at
+here`), else from the map's center. The route is a bright cyan line (an image where the
+terminal shows images), the map fits it, the status line has its distance and time (⮕ 42
+mi · 46 min), and a panel lists the turns; `Esc` hides the panel, `x` clears the route.
+`--route-mode` is `car` (the default), `bike` or `walk`.
+
+With `--closures`, routes avoid the closed roads near the trip: once the closures are in,
+the route is asked for again leaving those roads out, and the panel says how many points it
+avoided. Times are estimates, without traffic.
+
+Routes come from Valhalla, the open routing engine over OpenStreetMap: by default the
+public server FOSSGIS runs, which is fair-use like OpenStreetMap's other demo services, so
+mapterm asks only when you ask for a route, at most once a second, and identifies itself
+(`X-Client-Id: mapterm`). For heavier use, run your own Valhalla and give `--router URL`
+(or `MAPTERM_ROUTER`). Not for navigation.
+
 ## Legends
 
 Whatever is colored gets a legend in the map's lower left, with how many of each:
