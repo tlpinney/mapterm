@@ -8,7 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
-- Clicking a receiving station in a weather balloon's panel flies the map to it.
+- Clicking a receiving station in a weather balloon's panel flies the map to it, centered in
+  the part of the map the panel doesn't cover.
+- Receiving stations are shown, measured from and kept only as an area (the middle of a
+  ~5 km grid cell), the way a phone's approximate location works: operators report where
+  their radio is, often their home. From zoom 9 the area itself is drawn, faintly, the
+  station somewhere inside. A cache from an earlier version is replaced on load.
 
 - NASA's scientific balloons (`--nasa-balloons`, or from `L`): the flights of NASA's
   balloon facility (CSBF) from its campaign and flight pages (no key): ◓ with the payload's

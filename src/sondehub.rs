@@ -361,9 +361,9 @@ impl Balloon {
 pub struct Station {
     /// Its callsign.
     pub callsign: String,
-    /// Degrees.
+    /// Degrees: the middle of its area (see [`approximate`]), not where it is exactly.
     pub lat: f64,
-    /// Degrees.
+    /// Degrees, likewise.
     pub lon: f64,
     /// Meters.
     pub alt: Option<f64>,
@@ -382,6 +382,20 @@ pub const HEARING: f64 = 300.0;
 /// Stations are remembered (on disk too) this long after they last uploaded, seconds: they
 /// rarely move, and show before any balloon is heard.
 pub const STATION_KEEP: f64 = 30.0 * 86400.0;
+
+/// Stations are placed on a grid this many degrees across (about 5.5 km north to south): the
+/// middle of the cell their reported position falls in. Operators report where their radio is,
+/// often their home to the meter; mapterm shows, measures from and keeps only the area, the
+/// way a phone's "approximate location" does.
+pub const STATION_GRID: f64 = 0.05;
+
+/// A station's approximate position: the middle of the [`STATION_GRID`] cell (lat, lon) is in.
+pub fn approximate(lat: f64, lon: f64) -> (f64, f64) {
+    let snap = |v: f64| ((v / STATION_GRID).floor() + 0.5) * STATION_GRID;
+    // Rounded to the grid's own precision (no float tails in the cache).
+    let tidy = |v: f64| (v * 1000.0).round() / 1000.0;
+    (tidy(snap(lat).clamp(-90.0, 90.0)), tidy(snap(lon).clamp(-180.0, 180.0)))
+}
 
 /// Where the stations are kept between runs.
 pub fn stations_file() -> std::path::PathBuf {
@@ -415,7 +429,7 @@ impl Balloons {
         }
         b.seen = now;
         // The station that heard it, where it says it is.
-        if let (Some(call), Some((lat, lon))) = (t.uploader.clone(), t.uploader_position) {
+        if let (Some(call), Some((lat, lon))) = (t.uploader.clone(), t.uploader_position.map(|(a, o)| approximate(a, o))) {
             let s = self.stations.entry(call.clone()).or_insert_with(|| Station {
                 callsign: call,
                 lat,
@@ -464,8 +478,29 @@ impl Balloons {
                     "properties": {
                         "glyph": "⌂", "label": s.callsign, "callsign": s.callsign, "antenna": s.antenna, "alt_m": s.alt,
                         "hearing": hearing, "heard": s.heard.len(), "kind": "receiving station",
+                        "position": "approximate: the middle of its ~5 km area",
                         "last_upload_min": ((now - s.seen) / 60.0).round(),
                     }
+                })
+            })
+            .collect();
+        json!({"type": "FeatureCollection", "features": features})
+    }
+
+    /// Each station's area (its [`STATION_GRID`] cell) as a GeoJSON polygon: where it is,
+    /// somewhere inside.
+    pub fn station_areas(&self, now: f64) -> Json {
+        let h = STATION_GRID / 2.0;
+        let features: Vec<Json> = self
+            .stations
+            .values()
+            .map(|s| {
+                let (w, e, so, n) = (s.lon - h, s.lon + h, s.lat - h, s.lat + h);
+                let hearing = s.heard.values().any(|(t, _)| now - t <= HEARING);
+                json!({
+                    "type": "Feature",
+                    "geometry": {"type": "Polygon", "coordinates": [[[w, so], [e, so], [e, n], [w, n], [w, so]]]},
+                    "properties": {"callsign": s.callsign, "hearing": hearing},
                 })
             })
             .collect();
@@ -523,6 +558,9 @@ impl Balloons {
             if now - seen >= STATION_KEEP || self.stations.contains_key(call) {
                 continue;
             }
+            // Kept by an earlier mapterm where it was exactly: kept again as its area.
+            let (lat, lon) = approximate(lat, lon);
+            self.stations_changed |= (lat, lon) != (v["lat"].as_f64().unwrap_or(lat), v["lon"].as_f64().unwrap_or(lon));
             self.stations.insert(
                 call.to_string(),
                 Station {
@@ -668,6 +706,16 @@ pub fn station_layer(id: &str, source: &str) -> crate::StyleLayer {
         .text(json!(["step", ["zoom"], "", 7, ["get", "label"]]))
         .color("#8b949e")
         .paint("icon-color", json!(["case", [">", ["get", "hearing"], 0], "#7ee787", "#6e7681"]))
+}
+
+/// The style layers for the stations' areas, from zoom 9 (where a ~5 km cell is big enough
+/// to see): a faint fill and its outline, greener while hearing a balloon.
+pub fn area_layers(id: &str, source: &str) -> Vec<crate::StyleLayer> {
+    let color = json!(["case", ["get", "hearing"], "#7ee787", "#8b949e"]);
+    let fill = json!({"id": id, "type": "fill", "source": source, "minzoom": 9, "paint": {"fill-color": color, "fill-opacity": 0.12}});
+    let line = json!({"id": format!("{id}-outline"), "type": "line", "source": source, "minzoom": 9,
+        "paint": {"line-color": color, "line-width": 1, "line-opacity": 0.5, "line-dasharray": [1, 2]}});
+    vec![crate::StyleLayer::from_json(&fill).expect("a valid fill layer").0, crate::StyleLayer::from_json(&line).expect("a valid line layer").0]
 }
 
 /// The style layer for the lines from the selected balloon to the stations hearing it.
@@ -903,6 +951,33 @@ mod tests {
     }
 
     #[test]
+    fn stations_are_only_approximate() {
+        // The middle of a 0.05° cell, whatever the exact spot in it.
+        assert_eq!(approximate(40.46418013, -79.83163748), (40.475, -79.825));
+        assert_eq!(approximate(40.4501, -79.8499), (40.475, -79.825));
+        assert_eq!(approximate(-33.86, 151.21), (-33.875, 151.225));
+        let mut b = Balloons::default();
+        b.apply(heard("S1", 39.0, -77.0, "AC3Q", "40.46418013,-79.83163748", 9.0), 1000.0);
+        let s = b.stations().next().unwrap();
+        assert_eq!((s.lat, s.lon), (40.475, -79.825), "never the exact spot");
+        // An exact position kept by an earlier version is snapped, and saved again.
+        let dir = std::env::temp_dir().join(format!("mapterm-stations-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stations.json");
+        std::fs::write(&path, br#"[{"callsign":"OLD","lat":38.5326,"lon":-76.0305,"seen":1000.0}]"#).unwrap();
+        let mut c = Balloons::default();
+        c.load_stations(&path, 2000.0);
+        assert_eq!(c.stations().map(|s| (s.lat, s.lon)).next(), Some((38.525, -76.025)));
+        assert!(c.stations_changed(), "to replace the exact one on disk");
+        // Its area: the cell around it, ~5 km across.
+        let a = c.station_areas(2000.0);
+        let ring = a["features"][0]["geometry"]["coordinates"][0].as_array().unwrap().clone();
+        assert_eq!(ring.len(), 5);
+        assert!((ring[0][0].as_f64().unwrap() - -76.05).abs() < 1e-9 && (ring[2][1].as_f64().unwrap() - 38.55).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn stations_are_saved_and_loaded() {
         let dir = std::env::temp_dir().join(format!("mapterm-stations-{}", std::process::id()));
         let path = dir.join("stations.json");
@@ -916,7 +991,7 @@ mod tests {
         let mut c = Balloons::default();
         c.load_stations(&path, now + 86400.0);
         let s = c.stations().next().expect("loaded");
-        assert_eq!((s.callsign.as_str(), s.lat, s.lon, s.antenna.as_deref()), ("AC3Q", 40.46, -79.83, Some("1/4 wave")));
+        assert_eq!((s.callsign.as_str(), s.lat, s.lon, s.antenna.as_deref()), ("AC3Q", 40.475, -79.825, Some("1/4 wave")));
         assert!(s.heard.is_empty(), "heard nothing yet this run");
         let mut d = Balloons::default();
         d.load_stations(&path, now + STATION_KEEP + 1.0);
