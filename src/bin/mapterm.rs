@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--fires] [--floods] [--tfrs] [--closures] [--route FROM TO] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--fires] [--floods] [--tfrs] [--closures] [--traffic] [--route FROM TO] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -143,6 +143,9 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 ahead), Montgomery County, Prince William County, Fairfax County, and
                 MD, DE and NJ work zones; red closed, orange restricted, amber lanes,
                 purple planned. Click one for its road, reason, times and source
+  --traffic     traffic speeds: Maryland's CHART speed sensors (no key, each minute),
+                a dot per sensor in its slowest direction's color, speeds from zoom 10.
+                With a route, its time with traffic beside the free-flow time
   --route FROM TO
                 directions, each end `here`, LAT,LON or a place to search for: the
                 route drawn on the map, its distance and time (no traffic) on the status
@@ -282,6 +285,8 @@ struct Args {
     tfrs: bool,
     /// --closures: road closures and work zones.
     closures: bool,
+    /// --traffic: traffic speeds.
+    traffic: bool,
     /// --route FROM TO: directions.
     route: Option<(String, String)>,
     /// --route-mode: car, bike or walk.
@@ -357,6 +362,7 @@ fn args() -> Result<Args> {
         floods: false,
         tfrs: false,
         closures: false,
+        traffic: false,
         route: None,
         route_mode: mapterm::route::Mode::Car,
         router: None,
@@ -478,6 +484,7 @@ fn args() -> Result<Args> {
             "--floods" | "--rivers" | "--gauges" => a.floods = true,
             "--tfrs" | "--tfr" | "--restrictions" => a.tfrs = true,
             "--closures" | "--roads" | "--workzones" => a.closures = true,
+            "--traffic" | "--speeds" => a.traffic = true,
             "--route" | "--directions" => {
                 let from = it.next().context("--route FROM TO")?;
                 let to = it.next().context("--route FROM TO")?;
@@ -735,6 +742,7 @@ const FIRES: &str = "fires";
 const GAUGES: &str = "gauges";
 const CLOSURES: &str = "closures";
 const ROUTE: &str = "route";
+const TRAFFIC: &str = "traffic";
 /// The route as an image tile layer (where the terminal shows images).
 const ROUTE_TILES: &str = "route-tiles";
 /// The closures' lines as image tiles drawn here (where the terminal shows images).
@@ -1177,7 +1185,7 @@ fn credit_spans(line: &str, dim: TStyle) -> Vec<Span<'static>> {
 }
 
 /// The full disclaimer, at the end of the ? key list.
-const DISCLAIMER_FULL: &str = "mapterm shows other people's data as they publish it. Live layers (aircraft, ships, weather, alerts, outages, quakes, fires, river levels, flight restrictions, road closures) can be late, incomplete or wrong, and a service can change or stop. Not for navigation, flight planning or emergencies: follow official sources and local authorities.";
+const DISCLAIMER_FULL: &str = "mapterm shows other people's data as they publish it. Live layers (aircraft, ships, weather, alerts, outages, quakes, fires, river levels, flight restrictions, road closures, traffic) can be late, incomplete or wrong, and a service can change or stop. Not for navigation, flight planning or emergencies: follow official sources and local authorities.";
 
 /// The credits as lines `width` wide: each line starts with a space, credits are joined
 /// with " · " and broken between credits, and only a credit wider than a whole line is
@@ -1847,7 +1855,7 @@ async fn route_end(spec: &str, geo: &mapterm::geocode::Geocoder, location_cmd: O
 }
 
 /// The directions panel: the trip, then each step with its distance.
-fn draw_route(f: &mut ratatui::Frame, area: Rect, routes: &[mapterm::route::Route], pick: usize) {
+fn draw_route(f: &mut ratatui::Frame, area: Rect, routes: &[mapterm::route::Route], pick: usize, traffic: &[Option<mapterm::traffic::Estimate>]) {
     let Some(r) = routes.get(pick) else { return };
     use ratatui::style::Modifier;
     use ratatui::widgets::{Borders, Wrap};
@@ -1861,13 +1869,31 @@ fn draw_route(f: &mut ratatui::Frame, area: Rect, routes: &[mapterm::route::Rout
         format!(" {} {} · {}", r.mode.verb(), mapterm::route::distance(r.miles), mapterm::route::duration(r.seconds)),
         cyan.add_modifier(Modifier::BOLD),
     ))];
-    l.push(Line::from(Span::styled(" estimated, without traffic", dim)));
+    let with = |i: usize| traffic.get(i).cloned().flatten();
+    match with(pick) {
+        Some(e) => {
+            let late = (e.seconds - r.seconds) / 60.0;
+            let st = TStyle::new().fg(if late >= 5.0 {
+                Color::Rgb(0xf9, 0x73, 0x16)
+            } else if late >= 1.0 {
+                Color::Rgb(0xea, 0xb3, 0x08)
+            } else {
+                Color::Rgb(0x22, 0xc5, 0x5e)
+            });
+            l.push(Line::from(vec![
+                Span::styled(format!(" {} with traffic", mapterm::route::duration(e.seconds)), st.add_modifier(Modifier::BOLD)),
+                Span::styled(format!(" · {} sensor{} on the way", e.sensors, if e.sensors == 1 { "" } else { "s" }), dim),
+            ]));
+        }
+        None => l.push(Line::from(Span::styled(" estimated, without traffic", dim))),
+    }
     // The choices: each one's time, miles and main road; the picked one bright.
     if routes.len() > 1 {
         l.push(Line::default());
         for (i, o) in routes.iter().enumerate() {
             let via = o.via().map(|v| format!("  via {v}")).unwrap_or_default();
-            let text = format!(" {} {:>9} · {}{via}", i + 1, mapterm::route::duration(o.seconds), mapterm::route::distance(o.miles));
+            let t = with(i).map(|e| format!(" → {}", mapterm::route::duration(e.seconds))).unwrap_or_default();
+            let text = format!(" {} {:>9}{t} · {}{via}", i + 1, mapterm::route::duration(o.seconds), mapterm::route::distance(o.miles));
             let st = if i == pick { cyan.add_modifier(Modifier::BOLD | Modifier::REVERSED) } else { TStyle::new().fg(Color::Gray) };
             l.push(Line::from(Span::styled(text, st)));
         }
@@ -2573,7 +2599,7 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
             || id == ROUTE_TILES
             || id == ROUTE
             || id == format!("{ROUTE}-line")
-            || [CLOSURES, GAUGES, FIRES, QUAKES].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')));
+            || [CLOSURES, GAUGES, FIRES, QUAKES, TRAFFIC].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')));
         if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
         }
@@ -2616,11 +2642,12 @@ async fn main() -> Result<()> {
         || a.fires
         || a.floods
         || a.tfrs
+        || a.traffic
         || a.closures;
     // Road closures over rendered roads: Esri's Dark Gray Canvas underneath (quiet greys,
     // made for overlays, no labels of its own), with mapterm's road and place names on top;
     // unless another map was asked for.
-    let closures_raster = a.closures && a.raster.is_none() && a.source.is_none() && a.style.is_none() && !a.light;
+    let closures_raster = (a.closures || a.traffic) && a.raster.is_none() && a.source.is_none() && a.style.is_none() && !a.light;
     if closures_raster {
         a.raster = Some("esri-dark".into());
     }
@@ -2975,6 +3002,15 @@ async fn main() -> Result<()> {
         let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
         map.add_layers(vec![mapterm::quakes::layer(QUAKES, QUAKES)], above.as_deref())?;
     }
+    // Traffic speeds (--traffic): over the closures and the route, under what moves.
+    let add_traffic = |map: &mut Map| -> Result<()> {
+        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
+        map.add_source(TRAFFIC, MapSource::geojson(&empty)?)?;
+        map.set_attribution(TRAFFIC, mapterm::traffic::CREDIT)?;
+        let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
+        map.add_layers(vec![mapterm::traffic::layer(TRAFFIC, TRAFFIC)], above.as_deref())?;
+        Ok(())
+    };
     // Road closures (--closures): under the live layers.
     let closure_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
     if a.closures {
@@ -3012,6 +3048,9 @@ async fn main() -> Result<()> {
         if mapterm::kitty::supported() {
             map.set_visibility(&format!("{ROUTE}-line"), false)?;
         }
+    }
+    if a.traffic {
+        add_traffic(&mut map)?;
     }
     // River gauges (--floods), with the quakes.
     if a.floods {
@@ -3320,6 +3359,23 @@ async fn main() -> Result<()> {
             }
             .await;
             let _ = tx.send(r);
+        });
+    }
+    // --traffic: CHART's speed sensors each minute, and each route's time with them.
+    let mut sensors: Vec<mapterm::traffic::Sensor> = Vec::new();
+    let mut sensors_new = false;
+    let mut route_traffic: Vec<Option<mapterm::traffic::Estimate>> = Vec::new();
+    let (traffictx, mut trafficrx) = mpsc::unbounded_channel::<Result<Vec<mapterm::traffic::Sensor>>>();
+    if a.traffic {
+        tokio::spawn(async move {
+            loop {
+                let r = mapterm::traffic::sensors().await;
+                let wait = if r.is_ok() { mapterm::traffic::REFRESH } else { 300 };
+                if traffictx.send(r).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
         });
     }
     // Search results from the map's own data, waiting for the geocoder's.
@@ -4136,6 +4192,9 @@ async fn main() -> Result<()> {
                     if a.quakes.is_some() && !quakes.is_empty() {
                         legends.push(mapterm::quakes::legend(&quakes, unix_now()));
                     }
+                    if a.traffic && !sensors.is_empty() {
+                        legends.push(mapterm::traffic::legend(&sensors));
+                    }
                     let mut room = m;
                     for l in &legends {
                         let r = l.rect(room, mapterm::legend::Corner::BottomLeft);
@@ -4200,7 +4259,7 @@ async fn main() -> Result<()> {
                         Vec::new()
                     }
                     _ if let Some(r) = show_route => {
-                        draw_route(f, panel, r, route_pick);
+                        draw_route(f, panel, r, route_pick, &route_traffic);
                         Vec::new()
                     }
                     _ => Vec::new(),
@@ -4337,9 +4396,15 @@ async fn main() -> Result<()> {
                 }
                 if let Some(r) = &route {
                     let st = TStyle::new().fg(Color::Rgb(0x22, 0xd3, 0xee));
-                    spans.push(Span::styled(format!("⮕ {} · {} ", mapterm::route::distance(r.miles), mapterm::route::duration(r.seconds)), st));
+                    let with = route_traffic.get(route_pick).cloned().flatten().map(|e| format!(" ({} with traffic)", mapterm::route::duration(e.seconds))).unwrap_or_default();
+                    spans.push(Span::styled(format!("⮕ {} · {}{with} ", mapterm::route::distance(r.miles), mapterm::route::duration(r.seconds)), st));
                 } else if route_asking {
                     spans.push(Span::styled("⮕ routing… ", TStyle::new().fg(Color::Rgb(0x22, 0xd3, 0xee))));
+                }
+                if a.traffic {
+                    let slow = sensors.iter().filter(|s| s.level() >= mapterm::traffic::Level::Heavy).count();
+                    let text = if sensors.is_empty() { "● traffic … ".to_string() } else { format!("● {} speed sensors · {slow} under 35 mph ", sensors.len()) };
+                    spans.push(Span::styled(text, TStyle::new().fg(Color::Rgb(0x22, 0xc5, 0x5e))));
                 }
                 if a.closures {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x7a, 0x32));
@@ -4800,6 +4865,14 @@ async fn main() -> Result<()> {
                 map.set_data(QUAKES, &mapterm::quakes::points(&quakes, unix_now(), selected_quake.as_deref()))?;
                 (quakes_new, quakes_drawn, quakes_shown_selected) = (false, Instant::now(), selected_quake.clone());
             }
+            // Traffic: drawn when new readings come; each route's time with them again.
+            if sensors_new || route_new {
+                if sensors_new {
+                    map.set_data(TRAFFIC, &mapterm::traffic::points(&sensors))?;
+                }
+                route_traffic = routes.iter().map(|r| mapterm::traffic::estimate(r, &sensors)).collect();
+                sensors_new = false;
+            }
             // The route: drawn when a new one comes (or it's cleared).
             if route_new {
                 // The others dim, the picked one bright and on top.
@@ -5131,6 +5204,19 @@ async fn main() -> Result<()> {
                             dlog(|| format!("floods: {lid}: {e}"));
                             gauge_details.remove(&lid);
                             note = Some((Instant::now(), format!("gauge {lid}: {e}")));
+                        }
+                    }
+                }
+                Some(r) = trafficrx.recv() => {
+                    match r {
+                        Ok(s) => {
+                            dlog(|| format!("traffic: {} sensors", s.len()));
+                            sensors = s;
+                            sensors_new = true;
+                        }
+                        Err(e) => {
+                            dlog(|| format!("traffic: {e:#}"));
+                            note = Some((Instant::now(), format!("traffic: {e:#}")));
                         }
                     }
                 }

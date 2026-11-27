@@ -129,6 +129,7 @@ pub mod tilecache;
 pub mod timelayer;
 pub mod timeline;
 pub mod timeseries;
+pub mod traffic;
 pub mod ws;
 
 pub use interact::{Click, Controller};

@@ -142,7 +142,7 @@ with the keys for whatever layers are on (radar, alerts, live aircraft and satel
 - [Live layers](docs/live-layers.md): your location, weather radar (`--radar`) and alerts (`--alerts`), aircraft (`--adsb`), ships
   (`--ais`), weather balloons (`--sondes`), satellites (`--sats`), earthquakes
   (`--quakes`), wildfires (`--fires`), river levels (`--floods`), flight restrictions
-  (`--tfrs`), road closures (`--closures`), directions (`--route`), power outages
+  (`--tfrs`), road closures (`--closures`), directions (`--route`), traffic speeds (`--traffic`), power outages
   (`--outages`)
 - [Use it in your own app](docs/library.md): the library API
 - [Network and proxies](docs/network.md): `--proxy` (SOCKS5 or HTTP) for everything

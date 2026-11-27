@@ -434,6 +434,24 @@ blasts and ice quakes; their panel says so.
 USGS updates the feeds every minute, and mapterm asks once a minute with
 `If-Modified-Since`.
 
+## Traffic speeds
+
+```
+mapterm --traffic --at 39.0,-76.9 -z 10
+mapterm --traffic --route 'Bethesda, MD' 'Baltimore, MD'
+```
+
+`--traffic` shows Maryland's CHART speed sensors (MDOT SHA's public data feed, no key,
+asked once a minute): a dot per working sensor in its slowest direction's color, green 50+
+mph, yellow 35–50, orange 20–35, red under 20, with each direction's speed and heading
+labeled from zoom 10. Offline sensors, and readings over half an hour old, are left out.
+The status line counts the sensors and those under 35 mph.
+
+With a route, mapterm works out its time with traffic: where the route passes a sensor
+going the same way, the sensor's speed stands in for about a mile around it, and the rest
+keeps Valhalla's free-flow speed. Each route choice shows both (`45 min → 52 min`).
+Sensors are on the main highways only, so it's a rough guide.
+
 ## Directions
 
 ```
