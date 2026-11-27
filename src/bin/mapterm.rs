@@ -73,6 +73,13 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 loading it as the map moves
   --at          start position (default: fit the GeoJSON layers, else the source's center);
                 `here` is where you are (see --location-cmd), zoomed to its accuracy
+  --session NAME  open a session saved with S: its layers, view, base map, overlays and
+                layers turned off (options given after it win over its own)
+  --continue, -c  open the last run again, as it was when it ended
+  --resume [NAME]  pick a saved session or a recent run from a list (typing filters), or
+                open NAME
+  --sessions    list the saved sessions and recent runs, then exit (kept in
+                ~/.config/mapterm/sessions, or $XDG_CONFIG_HOME/mapterm/sessions)
   --adsb [FEED]  live aircraft over the map, from a free ADS-B feed: lol (adsb.lol, the
                 default), fi (adsb.fi), or a URL with {lat}, {lon} and {nm}. Polled for the
                 area in view (adsb.lol every 30 s, 12 s with a key; others every 10 s);
@@ -223,8 +230,20 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
 
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
-      +/- zoom · sideways swipe pans · / search · i inspect · m next style · t theme ·
-      c copy coordinates · v vector overlay · n labels · q quit
+      +/- zoom · sideways swipe pans · / search · i inspect · b base map · L layers ·
+      S sessions · m/M next or previous base map · ' the one before · t theme · c copy
+      coordinates · v vector overlay · n labels · q quit
+
+pickers, in the middle of the map, fzf-style (typing filters, matched letters lit, best
+      first; up/down or ctrl-n/p choose; esc closes):
+  b   the base map, one of the map styles or imagery (satellite and aerial photos; keyed
+      providers once their key is set): space picks it, enter picks it and closes
+  L   what's over it, each on or off (enter or space): the live layers running, imagery
+      overlays (hillshade, Esri roads and places, NASA's daily picture), data layers,
+      labels, the vector map over imagery, legends
+  S   sessions saved and recent runs, with when each was made and opened: enter opens one;
+      the first row saves this view under what's typed
+      Imagery goes under the style's roads and names (v: all, names only, none).
 
 search (/): type a place and press enter; one match flies there, several open a list
       (up/down or tab, enter or click to fly); esc clears the marker. Uses Photon
@@ -323,6 +342,13 @@ struct Args {
     /// smoothly, `shift` makes dragging pixel-exact (smooth protocol v3).
     smooth: bool,
     shift: bool,
+    /// The session opened (--session, --resume NAME, --continue): what to put back once the
+    /// map is up.
+    session: Option<mapterm::sessions::Session>,
+    /// --resume without a name: open on the list of sessions.
+    resume: bool,
+    /// The options to keep in a saved session (mapterm::sessions::keep_args).
+    kept: Vec<String>,
 }
 
 fn args() -> Result<Args> {
@@ -376,6 +402,9 @@ fn args() -> Result<Args> {
         location_cmd: None,
         raster_headers: Vec::new(),
         raster_cache: None,
+        session: None,
+        resume: false,
+        kept: Vec::new(),
         raster_limit: None,
         raster_params: Vec::new(),
         list_mosaics: false,
@@ -404,7 +433,46 @@ fn args() -> Result<Args> {
     if let Ok(v) = std::env::var("MAPTERM_RASTER_LIMIT") {
         a.raster_limit = Some(parse_limit(&v)?);
     }
-    let mut it = std::env::args().skip(1).peekable();
+    // Sessions first: --session NAME (or --resume NAME) and --continue put the session's
+    // options before the ones given, which win over them; --resume alone opens on the list.
+    let given: Vec<String> = std::env::args().skip(1).collect();
+    let mut argv: Vec<String> = Vec::new();
+    let mut session: Option<mapterm::sessions::Session> = None;
+    let mut gi = given.into_iter().peekable();
+    while let Some(x) = gi.next() {
+        match x.as_str() {
+            "--sessions" => {
+                let now = unix_now();
+                let all = mapterm::sessions::all();
+                if all.is_empty() {
+                    println!("no sessions yet: S in the viewer saves one, and each run is kept when it ends");
+                }
+                for (s, past) in all {
+                    let name = if past { "(recent)".to_string() } else { s.name.clone() };
+                    println!("{name:<24} {:<14} {:.4},{:.4} z{:.1}  {}", mapterm::sessions::ago(s.saved_at, now), s.lat, s.lon, s.zoom, s.summary());
+                }
+                std::process::exit(0);
+            }
+            "--continue" | "-c" => {
+                session = Some(mapterm::sessions::latest().context("--continue: no earlier run kept yet")?);
+            }
+            "--session" | "--resume" => match gi.peek() {
+                Some(n) if !n.starts_with('-') => {
+                    let n = gi.next().expect("peeked");
+                    session = Some(mapterm::sessions::open(&n, unix_now())?);
+                }
+                _ if x == "--resume" => a.resume = true,
+                _ => bail!("--session NAME (mapterm --sessions lists them)"),
+            },
+            _ => argv.push(x),
+        }
+    }
+    if let Some(s) = &session {
+        argv = s.command_line().into_iter().chain(argv).collect();
+    }
+    a.kept = mapterm::sessions::keep_args(&argv);
+    a.session = session;
+    let mut it = argv.into_iter().peekable();
     while let Some(x) = it.next() {
         match x.as_str() {
             "--at" => {
@@ -632,6 +700,151 @@ async fn load_basemap(spec: &str, source: &str, dark: bool, cam: Camera) -> Resu
     } else {
         Ok((Map::from_style(spec).await?, None, spec.to_string()))
     }
+}
+
+/// The map sources of a live layer (mapterm::basemaps::LIVE's keys): its style layers are
+/// the ones drawing from them.
+fn live_sources(key: &str) -> &'static [&'static str] {
+    match key {
+        "aircraft" => &[AIRCRAFT, TRAILS],
+        "ships" => &[SHIPS],
+        "satellites" => &[SATS],
+        "balloons" => &[BALLOONS],
+        "alerts" => &[ALERTS, ALERT_TILES],
+        "quakes" => &[QUAKES],
+        "fires" => &[FIRES, FIRE_AREAS, FIRE_TILES],
+        "gauges" => &[GAUGES],
+        "outages" => &[OUTAGES, OUTAGE_TILES],
+        "tfrs" => &[TFRS, TFR_TILES],
+        "closures" => &[CLOSURES, CLOSURE_TILES],
+        "traffic" => &[TRAFFIC],
+        _ => &[],
+    }
+}
+
+/// The images a live layer draws outside the map's layers (trails, satellite dots).
+fn live_images(key: &str) -> &'static [u32] {
+    match key {
+        "aircraft" => &[TRAIL_IMAGE],
+        "ships" => &[SHIP_TRAIL_IMAGE],
+        "satellites" => &[SAT_IMAGE, PATH_IMAGE],
+        "balloons" => &[BALLOON_TRAIL_IMAGE],
+        _ => &[],
+    }
+}
+
+/// Take a live layer's style layers off the map, to put back with [`show_live`]: them, and
+/// the layer they were under.
+fn hide_live(map: &mut Map, key: &str) -> (Vec<StyleLayer>, Option<String>) {
+    hide_sources(map, live_sources(key))
+}
+
+/// Take the style layers drawing from `sources` off the map, to put back with [`show_live`]:
+/// them, and the layer they were under.
+fn hide_sources(map: &mut Map, sources: &[&str]) -> (Vec<StyleLayer>, Option<String>) {
+    let ids: Vec<String> = map.layer_ids().into_iter().map(str::to_string).collect();
+    let mine = |id: &str| map.layer(id).and_then(|l| l.source.as_deref()).is_some_and(|s| sources.contains(&s));
+    let taken: Vec<StyleLayer> = ids.iter().filter(|id| mine(id)).filter_map(|id| map.layer(id).cloned()).collect();
+    // The first layer above the last of them that stays: they go back under it.
+    let last = ids.iter().rposition(|id| mine(id));
+    let before = last.and_then(|at| ids[at + 1..].iter().find(|id| !mine(id)).cloned());
+    let refs: Vec<&str> = taken.iter().map(|l| l.id.as_str()).collect();
+    map.remove_layers(&refs);
+    (taken, before)
+}
+
+/// Put back a live layer's style layers that [`hide_live`] took.
+fn show_live(map: &mut Map, (layers, before): (Vec<StyleLayer>, Option<String>)) -> Result<()> {
+    let before = before.filter(|b| map.layer_ids().contains(&b.as_str()));
+    map.add_layers(layers, before.as_deref())
+}
+
+/// Ids of the imagery overlays' sources and layers start with this.
+const OVERLAY_PREFIX: &str = "mapterm-imagery-overlay-";
+
+/// The source and layer id of imagery overlay `i` (of mapterm::basemaps::OVERLAYS).
+fn overlay_id(i: usize) -> String {
+    format!("{OVERLAY_PREFIX}{}", mapterm::basemaps::OVERLAYS[i].preset)
+}
+
+/// Imagery layers: source and layer id, the provider, and the zoom it shows from (bottom first;
+/// the last is "the" imagery for credits and billing).
+type ImageryLayers = Vec<(String, Arc<mapterm::raster::RasterSource>, f64)>;
+/// A base map switch's imagery, loaded: its spec, and its layers (none: no imagery).
+type ImageryDone = (String, Result<ImageryLayers>);
+
+/// Imagery requests a minute: --raster-limit's, else 300 for keyed (billed) providers.
+fn imagery_limiter(limit: Option<Option<u32>>, billed: bool) -> Option<Bucket> {
+    match limit {
+        Some(n) => n,
+        None if billed => Some(300),
+        None => None,
+    }
+    .map(|n| Bucket::new(n.max(1)))
+}
+
+/// A provider for the base map switcher, keyed from the environment (or Mapbox's token).
+async fn open_preset(name: &str, max_zoom: Option<u8>, cache: Option<bool>) -> Result<mapterm::raster::RasterSource> {
+    let p = mapterm::raster::preset(name).with_context(|| format!("no imagery called {name}"))?;
+    let mut key = mapterm::raster::find_key(None, p.key_env)?;
+    if key.is_none() && p.name == "mapbox" {
+        key = mapterm::mapbox::access_token();
+    }
+    let mut r = mapterm::raster::RasterSource::from_preset(p, key)?;
+    if let Some(z) = max_zoom {
+        r.max_zoom = r.max_zoom.min(z);
+    }
+    r.start_session().await?;
+    let missing = r.missing_params();
+    if !missing.is_empty() {
+        bail!("{name} needs {}", missing.iter().map(|m| format!("{{{m}}}")).collect::<Vec<_>>().join(", "));
+    }
+    if let Some(c) = cache {
+        r.cache = c;
+    }
+    Ok(r)
+}
+
+/// Imagery for the base map switcher: a provider, or a stack of them (`planetary`), each
+/// layer under its own source id so tiles still loading for other imagery don't land in it.
+async fn open_imagery(spec: String, cache: Option<bool>, cam: Camera) -> Result<ImageryLayers> {
+    if let Some(st) = mapterm::raster::stack(&spec) {
+        let mut v = Vec::new();
+        for (i, sl) in st.layers.iter().enumerate() {
+            let r = open_preset(sl.preset, sl.max_zoom, cache).await?;
+            v.push((format!("{RASTER}-{spec}-{i}"), Arc::new(r), sl.min_zoom as f64));
+        }
+        return Ok(v);
+    }
+    let mut r = open_preset(&spec, None, cache).await?;
+    if r.is_google() {
+        let span = 360.0 / 2f64.powf(cam.zoom) * 2.0;
+        let bounds = ((cam.lat + span * 0.4).min(85.0), (cam.lat - span * 0.4).max(-85.0), cam.lon + span, cam.lon - span);
+        if let Ok(c) = r.google_credits(cam.zoom.round().clamp(0.0, 22.0) as u8, bounds).await {
+            r.attribution = c;
+        }
+    }
+    Ok(vec![(format!("{RASTER}-{spec}"), Arc::new(r), 0.0)])
+}
+
+/// Swap the imagery under the map for `layers` (none: take it away).
+fn set_imagery(map: &mut Map, layers: &ImageryLayers) -> Result<()> {
+    let old: Vec<String> = map.layer_ids().into_iter().filter(|id| is_imagery(id)).map(str::to_string).collect();
+    let ids: Vec<&str> = old.iter().map(String::as_str).collect();
+    map.remove_layers(&ids);
+    let sources: Vec<String> = map.sources().map(|(id, _)| id.to_string()).filter(|id| is_imagery(id)).collect();
+    for id in &sources {
+        map.remove_source(id);
+    }
+    if layers.is_empty() {
+        return Ok(());
+    }
+    let bottom = map.layer_ids().first().map(|s| s.to_string());
+    for (id, r, _) in layers {
+        map.add_source(id, MapSource::raster(r.clone()))?;
+    }
+    map.add_layers(layers.iter().map(|(id, _, z)| StyleLayer::raster(id, id).min_zoom(*z)).collect(), bottom.as_deref())?;
+    Ok(())
 }
 
 /// GeoJSON layers with more single points than this cluster them.
@@ -1019,16 +1232,19 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
                 ("shift+drag", "zoom to a box"),
                 ("g", "go to your location"),
                 ("c", "copy the coordinates"),
+                ("S", "sessions: open one, or save this view"),
             ],
         ),
         (
             "look",
             vec![
-                ("m", "next style"),
+                ("b", "base map: one style or imagery"),
+                ("L", "layers: live, imagery overlays, data, legends"),
+                ("m M", "next or previous base map"),
+                ("'", "back to the base map before"),
                 ("t", "light or dark"),
                 ("n", "labels on or off"),
                 ("v", "vector overlay: all, labels, none"),
-                ("L", "legends on or off"),
             ],
         ),
         (
@@ -1407,6 +1623,175 @@ fn draw_finder(f: &mut ratatui::Frame, area: Rect, fd: &Finder) {
         })
         .collect();
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The base map switcher's background.
+const SWITCHER_BG: Color = Color::Rgb(17, 24, 39);
+
+/// The base map switcher (b): a box in the middle of the map with the styles, the imagery and
+/// what's drawn over it. Returns the box and each row's screen line, for clicks.
+#[allow(clippy::too_many_arguments)]
+fn draw_switcher(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    sw: &mapterm::basemaps::Switcher,
+    list: &[mapterm::basemaps::Entry],
+    current: usize,
+    loading: bool,
+    labels: bool,
+    vector: u8,
+    overlays: &[(bool, bool)],
+    live_on: &dyn Fn(usize) -> bool,
+    data_on: &dyn Fn(usize) -> bool,
+    legends: bool,
+) -> (Rect, Vec<(u16, mapterm::basemaps::Row)>) {
+    use mapterm::basemaps::{Picker, Row};
+    use ratatui::style::Modifier;
+    let dim = TStyle::new().fg(Color::Rgb(148, 163, 184));
+    let accent = Color::Rgb(127, 178, 255);
+    let head = TStyle::new().fg(accent).add_modifier(Modifier::BOLD);
+    // Lines: section headings (while nothing is typed) and rows.
+    let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
+    // Sessions say more (what, when made, when opened): wider.
+    let width = if sw.kind == Picker::Sessions { 84u16 } else { 58 }.min(area.width.saturating_sub(4));
+    let w = width.saturating_sub(4) as usize;
+    let mut section = "";
+    for (n, row) in sw.rows.iter().enumerate() {
+        let name = match row {
+            Row::Base(i) if list[*i].base.is_imagery() => "imagery",
+            Row::Base(_) => "maps",
+            Row::Live(_) => "live layers",
+            Row::Data(_) => "data",
+            Row::Labels | Row::Vector | Row::Legends => "map",
+            Row::Session(_) | Row::SaveAs => "",
+            Row::Overlay(_) => "imagery overlays",
+        };
+        if sw.query.is_empty() && name != section {
+            if !section.is_empty() {
+                lines.push((None, Line::raw("")));
+            }
+            lines.push((None, Line::styled(format!(" {name}"), head)));
+            section = name;
+        }
+        let (mark, label, detail) = match row {
+            Row::Base(i) => {
+                let e = &list[*i];
+                let mark = if *i == current && loading {
+                    "◌"
+                } else if *i == current {
+                    "●"
+                } else {
+                    "○"
+                };
+                let detail = if e.keyed { format!("{} · key", e.detail) } else { e.detail.clone() };
+                (mark, e.label.clone(), detail)
+            }
+            Row::Labels => (if labels { "☑" } else { "☐" }, "labels".to_string(), "place and road names · n".to_string()),
+            Row::Vector => {
+                let state = ["roads and names", "names only", "nothing"][vector.min(2) as usize];
+                ("▤", "over imagery".to_string(), format!("{state} · v"))
+            }
+            Row::Overlay(i) => {
+                let o = &mapterm::basemaps::OVERLAYS[*i];
+                let (on, loading) = overlays.get(*i).copied().unwrap_or_default();
+                (
+                    if loading {
+                        "◌"
+                    } else if on {
+                        "☑"
+                    } else {
+                        "☐"
+                    },
+                    o.label.to_string(),
+                    o.detail.to_string(),
+                )
+            }
+            Row::Session(i) => {
+                let (name, detail) = &sw.sessions[*i];
+                ("↺", name.clone(), detail.clone())
+            }
+            Row::SaveAs => ("＋", sw.text(Row::SaveAs, list).0, "S".to_string()),
+            Row::Data(i) => (if data_on(*i) { "☑" } else { "☐" }, sw.data[*i].clone(), "data layer".to_string()),
+            Row::Legends => (if legends { "☑" } else { "☐" }, "legends".to_string(), "keys to the colors".to_string()),
+            Row::Live(i) => {
+                let l = &mapterm::basemaps::LIVE[*i];
+                (if live_on(*i) { "☑" } else { "☐" }, l.label.to_string(), l.detail.to_string())
+            }
+        };
+        let chosen = n == sw.sel;
+        let st = if chosen { TStyle::new().add_modifier(Modifier::REVERSED) } else { TStyle::new() };
+        let dst = if chosen { st } else { dim };
+        // The name with the letters the query matched picked out, as fzf does.
+        let hit = st.fg(accent).add_modifier(Modifier::BOLD);
+        let marks = sw.marks.get(n).map_or(&[][..], Vec::as_slice);
+        let mut spans = vec![Span::styled(format!(" {mark} "), st)];
+        for (k, c) in label.chars().enumerate() {
+            spans.push(Span::styled(c.to_string(), if marks.contains(&k) { hit } else { st }));
+        }
+        let left = 3 + mark.chars().count() + label.chars().count();
+        let room = w.saturating_sub(left + 2);
+        let detail: String =
+            if detail.chars().count() > room { format!("{}…", detail.chars().take(room.saturating_sub(1)).collect::<String>()) } else { detail };
+        let pad = " ".repeat(w.saturating_sub(left + detail.chars().count()));
+        spans.push(Span::styled(format!("{pad}{detail} "), dst));
+        lines.push((Some(n), Line::from(spans)));
+    }
+    if sw.rows.is_empty() {
+        lines.push((None, Line::styled(" nothing matches", dim)));
+    }
+    // Rows, then a rule and the prompt line.
+    let height = (lines.len() as u16 + 4).min(area.height.saturating_sub(2)).max(5);
+    let rect = Rect { x: area.x + (area.width.saturating_sub(width)) / 2, y: area.y + (area.height.saturating_sub(height)) / 2, width, height };
+    // Opaque: its own colors (whatever the terminal's), over the map and its images (which
+    // kitty puts under cells with a background; see mapterm::kitty::under_cells).
+    let block = Block::bordered()
+        .style(TStyle::new().bg(SWITCHER_BG).fg(Color::Rgb(226, 232, 240)))
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(TStyle::new().fg(accent))
+        .title(Span::styled(format!(" {} ", sw.kind.title()), head))
+        .title_bottom(
+            Line::styled(
+                match sw.kind {
+                    Picker::Base => " ↑↓ choose · space pick · enter pick and close · esc close ",
+                    Picker::Layers => " ↑↓ choose · enter or space on/off · esc close ",
+                    Picker::Sessions => " ↑↓ choose · enter open or save · esc close ",
+                },
+                dim,
+            )
+            .right_aligned(),
+        );
+    let outer = block.inner(rect);
+    f.render_widget(ratatui::widgets::Clear, rect);
+    f.render_widget(block, rect);
+    // fzf's prompt: what's typed, a cursor, and how many rows match of all of them.
+    let count = format!("{}/{} ", sw.rows.len(), sw.total);
+    let typed = format!(" > {}", sw.query);
+    let gap = (outer.width as usize).saturating_sub(typed.chars().count() + 1 + count.chars().count());
+    let prompt = Line::from(vec![
+        Span::styled(" > ", TStyle::new().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::raw(sw.query.clone()),
+        Span::styled("█", TStyle::new().fg(accent)),
+        Span::styled(format!("{}{count}", " ".repeat(gap)), dim),
+    ]);
+    let prompt_at = Rect { y: outer.bottom().saturating_sub(1), height: 1, ..outer };
+    f.render_widget(Paragraph::new(prompt), prompt_at);
+    let rule = Rect { y: outer.bottom().saturating_sub(2), height: 1, ..outer };
+    f.render_widget(Paragraph::new(Line::styled("─".repeat(outer.width as usize), dim)), rule);
+    let inner = Rect { height: outer.height.saturating_sub(2), ..outer };
+    // Keep the chosen row in view.
+    let rows = inner.height as usize;
+    let at = lines.iter().position(|(n, _)| *n == Some(sw.sel)).unwrap_or(0);
+    let first = (at + 1).saturating_sub(rows);
+    let mut hits = Vec::new();
+    let mut shown = Vec::new();
+    for (k, (n, line)) in lines.into_iter().skip(first).take(rows).enumerate() {
+        if let Some(n) = n {
+            hits.push((inner.y + k as u16, sw.rows[n]));
+        }
+        shown.push(line);
+    }
+    f.render_widget(Paragraph::new(shown), inner);
+    (rect, hits)
 }
 
 /// The --sats source and layer.
@@ -2772,9 +3157,17 @@ async fn main() -> Result<()> {
         }
     }
     let mut style_at = 0usize;
+    // The base maps `b`, `m`, `M` and `'` switch between: the styles, then imagery (the
+    // providers that need no key, or whose key is set; and what --raster named).
+    let bases = mapterm::basemaps::entries(&styles, a.raster.as_deref(), |p| {
+        mapterm::raster::find_key(None, p.key_env).ok().flatten().is_some() || (p.name == "mapbox" && mapterm::mapbox::access_token().is_some())
+    });
+    let mut base_at = a.raster.as_deref().and_then(|r| bases.iter().position(|e| e.base == mapterm::basemaps::Base::Imagery(r.to_string()))).unwrap_or(0);
 
-    // Optional raster layer under the vector map.
-    let raster = match &a.raster {
+    // Optional raster layer under the vector map; its layers are kept for the base map
+    // switcher to put back.
+    let mut start_imagery: ImageryLayers = Vec::new();
+    let mut raster = match &a.raster {
         // Several providers by zoom (`planetary`): each its own source and layer, bottom
         // first; the top one is "the" imagery for the status bar.
         Some(spec) if let Some(st) = mapterm::raster::stack(spec) => {
@@ -2796,6 +3189,7 @@ async fn main() -> Result<()> {
                 let r = Arc::new(r);
                 map.add_source(&id, MapSource::raster(r.clone()))?;
                 layers.push(StyleLayer::raster(&id, &id).min_zoom(sl.min_zoom as f64));
+                start_imagery.push((id, r.clone(), sl.min_zoom as f64));
                 top = Some(r);
             }
             map.add_layers(layers, bottom.as_deref())?;
@@ -2866,6 +3260,7 @@ async fn main() -> Result<()> {
                 r.attribution = t.clone();
             }
             let r = Arc::new(r);
+            start_imagery.push((RASTER.to_string(), r.clone(), 0.0));
             map.add_source(RASTER, MapSource::raster(r.clone()))?;
             let bottom = map.layer_ids().first().map(|s| s.to_string());
             map.add_layers(vec![StyleLayer::raster(RASTER, RASTER)], bottom.as_deref())?;
@@ -3211,7 +3606,8 @@ async fn main() -> Result<()> {
 
     // Raster drawing: real images with kitty graphics, else cell background colors.
     let has_raster = map.sources().any(|(_, s)| matches!(s, MapSource::Raster(_)));
-    let kitty = (has_raster || a.radar) && mapterm::kitty::supported();
+    // Imagery picked later (b, m) turns it on then.
+    let mut kitty = (has_raster || a.radar) && mapterm::kitty::supported();
     // Experimental pixel mode: fills and lines as an image, labels as text (MAPTERM_PIXELS=1).
     let pixels_on = std::env::var("MAPTERM_PIXELS").is_ok_and(|v| !v.is_empty() && v != "0") && mapterm::kitty::supported();
     // Tile images placed last frame, to take down the ones that left the view.
@@ -3254,7 +3650,8 @@ async fn main() -> Result<()> {
     if trails_kitty {
         let _ = map.set_visibility(TRAILS, false);
     }
-    let shm = (kitty || pixels_on || trails_kitty) && mapterm::kitty::shm_supported();
+    // Asked wherever images can show, for imagery the base map switcher may add later.
+    let shm = (mapterm::kitty::supported() || pixels_on || trails_kitty) && mapterm::kitty::shm_supported();
     dlog(|| format!("kitty medium: {}", if shm { "shared memory" } else { "inline" }));
     kstate.shm = kitty && shm;
     let pixels_shm = shm;
@@ -3305,6 +3702,7 @@ async fn main() -> Result<()> {
     let mut list_rows: Vec<(u16, usize)> = Vec::new();
     let mut panel_area = Rect::default();
     let mut last_panel = Rect::default();
+    let mut last_switcher = Rect::default();
     // The timeline (with --radar or --alerts): where it was drawn, the span it shows, and
     // whether the user moved that span (then it no longer follows the data).
     let mut timeline_area = Rect::default();
@@ -3383,19 +3781,50 @@ async fn main() -> Result<()> {
     let (gtx, mut grx) = mpsc::unbounded_channel::<(String, Result<Vec<mapterm::geocode::Place>>)>();
     // Style switching (m) loads on a task; the pointer (dots in the map) is for c.
     let (stx, mut srx) = mpsc::unbounded_channel::<StyleDone>();
+    // Base map switching: the one asked for (applied once nothing is loading), the one before
+    // (for `'`), imagery loading, the switcher (b) and when its choice last moved (it previews
+    // after a pause), and the imagery loaded so far, to put back without asking again.
+    let mut want_base: Option<usize> = None;
+    let mut base_prev: Option<usize> = None;
+    let (itx, mut irx) = mpsc::unbounded_channel::<ImageryDone>();
+    let mut imagery_loading: Option<String> = None;
+    let mut switcher: Option<mapterm::basemaps::Switcher> = None;
+    // A row picked (enter, space or a click), handled with everything else in the loop.
+    let mut switcher_picks: Vec<mapterm::basemaps::Row> = Vec::new();
+    // Sessions: one to open in place (its layers are running) once nothing is loading, the
+    // command line to start again with (one that needs other layers), and S's name prompt.
+    let mut restart_with: Option<mapterm::sessions::Session> = None;
+    let mut naming: Option<String> = None;
+    // Data layers (--geojson and the like) turned off in L: their style layers, to put back.
+    let mut data_off: std::collections::HashMap<String, (Vec<StyleLayer>, Option<String>)> = std::collections::HashMap::new();
+    // When this run started (a run in the history is created then).
+    let run_started = unix_now();
+    let mut session_list: Vec<(mapterm::sessions::Session, bool)> = Vec::new();
+    // Imagery overlays (by their place in mapterm::basemaps::OVERLAYS): on, loading.
+    let mut overlay_on = vec![false; mapterm::basemaps::OVERLAYS.len()];
+    let mut overlay_loading: HashSet<usize> = HashSet::new();
+    // Live layers turned off in the switcher: their style layers, kept to put back. Their data
+    // keeps coming; their images (trails, satellite dots) are freed and not drawn.
+    let mut live_off: std::collections::HashMap<&'static str, (Vec<StyleLayer>, Option<String>)> = std::collections::HashMap::new();
+    let mut free_images: Vec<u32> = Vec::new();
+    let (ovtx, mut ovrx) = mpsc::unbounded_channel::<(usize, Result<Arc<mapterm::raster::RasterSource>>)>();
+    let mut switcher_rows: Vec<(u16, mapterm::basemaps::Row)> = Vec::new();
+    let mut switcher_rect = Rect::default();
+    let mut imagery_kept: std::collections::HashMap<String, ImageryLayers> = std::collections::HashMap::new();
+    if let Some(spec) = &a.raster
+        && !start_imagery.is_empty()
+    {
+        imagery_kept.insert(spec.clone(), start_imagery.clone());
+    }
+    let mut raster_id = start_imagery.last().map_or(RASTER.to_string(), |l| l.0.clone());
     let mut style_loading: Option<String> = None;
     let mut pointer: Option<(f64, f64)> = None;
     // Google's credits follow the view: once it has stayed on a new spot for a moment, ask
     // for the credits there (a quarter of the view's width counts as a new spot).
-    let google = raster.as_ref().filter(|r| r.is_google()).cloned();
-    let billed_raster = raster.as_ref().is_some_and(|r| r.is_google() || r.wants_key());
+    let mut google = raster.as_ref().filter(|r| r.is_google()).cloned();
+    let mut billed_raster = raster.as_ref().is_some_and(|r| r.is_google() || r.wants_key());
     // Imagery requests a minute: a bucket that holds a minute's worth and refills steadily.
-    let mut limiter = match a.raster_limit {
-        Some(n) => n,
-        None if billed_raster => Some(300),
-        None => None,
-    }
-    .map(|n| Bucket::new(n.max(1)));
+    let mut limiter = imagery_limiter(a.raster_limit, billed_raster);
     let mut held_back = false;
     let mut throttled_at: Option<Instant> = None;
     let (ctx, mut crx) = mpsc::unbounded_channel::<Result<String>>();
@@ -3891,6 +4320,40 @@ async fn main() -> Result<()> {
     let mut credit_view: Option<(i32, i64, i64)> = None;
     let mut credit_seen: Option<((i32, i64, i64), Instant)> = None;
     let mut credit_pending = false;
+    // The live layers running: each can be turned off and on.
+    let live_running: Vec<usize> = mapterm::basemaps::LIVE
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| match l.key {
+            "aircraft" => adsb_feed.is_some(),
+            "ships" => ais_key.is_some(),
+            "satellites" => a.sats.is_some(),
+            "balloons" => a.sondes,
+            "radar" => radar.is_some(),
+            "alerts" => a.alerts,
+            "quakes" => a.quakes.is_some(),
+            "fires" => a.fires,
+            "gauges" => a.floods,
+            "outages" => a.outages,
+            "tfrs" => a.tfrs,
+            "closures" => a.closures,
+            "traffic" => a.traffic,
+            _ => false,
+        })
+        .map(|(i, _)| i)
+        .collect();
+    // A session opened: its base map, overlays, layers turned off and overlay setting.
+    let mut session_open: Option<mapterm::sessions::Session> = a.session.clone();
+    // --resume: open on the sessions to pick one.
+    if a.resume {
+        session_list = mapterm::sessions::all();
+        let rows = session_rows(&session_list);
+        if rows.is_empty() {
+            note = Some((Instant::now(), "no sessions yet: S saves one, and each run is kept when it ends".into()));
+        } else {
+            switcher = Some(mapterm::basemaps::Switcher::sessions(rows, true));
+        }
+    }
     let result: Result<()> = async {
         loop {
             while demo.last().is_some_and(|(t, _)| demo_start.elapsed().as_secs_f64() >= *t) {
@@ -4165,34 +4628,34 @@ async fn main() -> Result<()> {
                 legend_rects.clear();
                 if show_legend {
                     let mut legends: Vec<mapterm::legend::Legend> = Vec::new();
-                    legends.extend(sat_legend.clone().filter(|_| !sats.is_empty()));
-                    if adsb_feed.is_some() && !aircraft.is_empty() {
+                    legends.extend(sat_legend.clone().filter(|_| !sats.is_empty() && !live_off.contains_key("satellites")));
+                    if adsb_feed.is_some() && !aircraft.is_empty() && !live_off.contains_key("aircraft") {
                         legends.push(mapterm::adsb::legend(&aircraft));
                     }
-                    if ais_key.is_some() && !fleet.is_empty() {
+                    if ais_key.is_some() && !fleet.is_empty() && !live_off.contains_key("ships") {
                         legends.push(mapterm::ais::legend(&fleet));
                     }
-                    if a.outages {
+                    if a.outages && !live_off.contains_key("outages") {
                         legends.extend(outages.legends(mapterm::outages::Level::at(cam.zoom)));
                     }
-                    if a.floods && !gauges.is_empty() {
+                    if a.floods && !gauges.is_empty() && !live_off.contains_key("gauges") {
                         legends.push(mapterm::floods::legend(&gauges));
                     }
-                    if a.closures && !closures.is_empty() {
+                    if a.closures && !closures.is_empty() && !live_off.contains_key("closures") {
                         let all: Vec<mapterm::closures::Closure> = closures.values().flatten().cloned().collect();
                         legends.push(mapterm::closures::legend(&all, unix_now()));
                     }
-                    if a.tfrs && !(tfr_live.is_empty() && tfr_standing.is_empty()) {
+                    if a.tfrs && !(tfr_live.is_empty() && tfr_standing.is_empty()) && !live_off.contains_key("tfrs") {
                         let all: Vec<mapterm::tfrs::Restriction> = tfr_standing.iter().chain(&tfr_live).cloned().collect();
                         legends.push(mapterm::tfrs::legend(&all));
                     }
-                    if a.fires && !fires.is_empty() {
+                    if a.fires && !fires.is_empty() && !live_off.contains_key("fires") {
                         legends.push(mapterm::fires::legend(&fires));
                     }
-                    if a.quakes.is_some() && !quakes.is_empty() {
+                    if a.quakes.is_some() && !quakes.is_empty() && !live_off.contains_key("quakes") {
                         legends.push(mapterm::quakes::legend(&quakes, unix_now()));
                     }
-                    if a.traffic && !sensors.is_empty() {
+                    if a.traffic && !sensors.is_empty() && !live_off.contains_key("traffic") {
                         legends.push(mapterm::traffic::legend(&sensors));
                     }
                     let mut room = m;
@@ -4334,12 +4797,24 @@ async fn main() -> Result<()> {
                     };
                     spans.push(Span::styled(tag, TStyle::new().fg(Color::Cyan)));
                 }
-                if let Some(r) = &raster {
-                    // Its credit is with the others at the end; this says how it draws.
-                    let mode = ["", "· labels ", "· raster only "][vector as usize];
-                    let how = if kitty { "" } else { "(cells) " };
-                    let name = if r.attribution.is_empty() { format!("{} ", r.name) } else { String::new() };
-                    spans.push(Span::styled(format!("imagery {name}{how}{mode}"), TStyle::new().fg(Color::LightBlue)));
+                // The imagery and overlays by name (their credits are with the others at the
+                // end), and how they draw.
+                let on: Vec<&str> = overlay_on.iter().zip(mapterm::basemaps::OVERLAYS).filter(|(on, _)| **on).map(|(_, o)| o.label).collect();
+                if raster.is_some() || !on.is_empty() {
+                    let mut parts: Vec<String> = Vec::new();
+                    if raster.is_some() {
+                        parts.push(bases.get(base_at).map_or("imagery".into(), |e| e.label.clone()));
+                    }
+                    if !on.is_empty() {
+                        parts.push(format!("+ {}", on.join(", ")));
+                    }
+                    if !kitty {
+                        parts.push("(cells)".into());
+                    }
+                    if raster.is_some() && vector > 0 {
+                        parts.push(["", "· labels", "· raster only"][vector as usize].into());
+                    }
+                    spans.push(Span::styled(format!("◧ {} ", parts.join(" ")), TStyle::new().fg(Color::LightBlue)));
                 }
                 // Each data layer with how many of its features are in view (to compare layers).
                 for (name, color) in &legend {
@@ -4349,21 +4824,21 @@ async fn main() -> Result<()> {
                         None => spans.push(Span::styled(format!("{name} "), dim)),
                     }
                 }
-                if a.sats.is_some() {
+                if a.sats.is_some() && !live_off.contains_key("satellites") {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let of = sat_filter.describe();
                     spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
                 }
-                if a.sondes {
+                if a.sondes && !live_off.contains_key("balloons") {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     spans.push(Span::styled(format!("▲ {} sondes{} ", balloons.len(), sonde_state), st));
                 }
-                if ais_key.is_some() {
+                if ais_key.is_some() && !live_off.contains_key("ships") {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let text = if cam.zoom < AIS_MIN_ZOOM { "⛴ zoom in for ships ".to_string() } else { format!("⛴ {}{} ", fleet.len(), ais_state) };
                     spans.push(Span::styled(text, st));
                 }
-                if adsb_feed.is_some() {
+                if adsb_feed.is_some() && !live_off.contains_key("aircraft") {
                     let st = TStyle::new().fg(Color::Rgb(127, 178, 255));
                     let text = match aircraft_retry.map(|t| t.saturating_duration_since(Instant::now())) {
                         _ if cam.zoom < ADSB_MIN_ZOOM => "✈ zoom in for aircraft ".to_string(),
@@ -4401,12 +4876,12 @@ async fn main() -> Result<()> {
                 } else if route_asking {
                     spans.push(Span::styled("⮕ routing… ", TStyle::new().fg(Color::Rgb(0x22, 0xd3, 0xee))));
                 }
-                if a.traffic {
+                if a.traffic && !live_off.contains_key("traffic") {
                     let slow = sensors.iter().filter(|s| s.level() >= mapterm::traffic::Level::Heavy).count();
                     let text = if sensors.is_empty() { "● traffic … ".to_string() } else { format!("● {} speed sensors · {slow} under 35 mph ", sensors.len()) };
                     spans.push(Span::styled(text, TStyle::new().fg(Color::Rgb(0x22, 0xc5, 0x5e))));
                 }
-                if a.closures {
+                if a.closures && !live_off.contains_key("closures") {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x7a, 0x32));
                     let now = unix_now();
                     let shown = closures.values().flatten().filter(|c| c.shown(now));
@@ -4414,18 +4889,18 @@ async fn main() -> Result<()> {
                     let text = if closures.is_empty() { "━ … ".to_string() } else { format!("━ {} closures · {} planned ", current.len(), planned.len()) };
                     spans.push(Span::styled(text, st));
                 }
-                if a.tfrs {
+                if a.tfrs && !live_off.contains_key("tfrs") {
                     let st = TStyle::new().fg(Color::Rgb(0xc8, 0x4d, 0xe8));
                     let text = if tfr_live.is_empty() { "⛔ … ".to_string() } else { format!("⛔ {} TFRs ", tfr_live.len()) };
                     spans.push(Span::styled(text, st));
                 }
-                if a.fires {
+                if a.fires && !live_off.contains_key("fires") {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x45, 0x3a));
                     let wild = fires.iter().filter(|f| f.kind != "RX").count();
                     let text = if fires.is_empty() { "✹ … ".to_string() } else { format!("✹ {wild} wildfires · {} perimeters ", fire_perimeters.len()) };
                     spans.push(Span::styled(text, st));
                 }
-                if let Some(period) = a.quakes {
+                if let Some(period) = a.quakes.filter(|_| !live_off.contains_key("quakes")) {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0x9f, 0x0a));
                     let biggest = quakes.iter().filter(|q| q.mag.is_some()).max_by(|a, b| a.mag.unwrap_or(0.0).total_cmp(&b.mag.unwrap_or(0.0)));
                     let text = match biggest {
@@ -4434,7 +4909,7 @@ async fn main() -> Result<()> {
                     };
                     spans.push(Span::styled(text, st));
                 }
-                if a.outages {
+                if a.outages && !live_off.contains_key("outages") {
                     let st = TStyle::new().fg(Color::Rgb(0xff, 0xb4, 0x46));
                     let totals = outages.totals();
                     let text = if totals.is_empty() {
@@ -4463,6 +4938,21 @@ async fn main() -> Result<()> {
                     }
                 }
                 spans.push(Span::styled(format!("{frame_ms:.0} ms "), dim));
+                // The base map switcher over everything on the map.
+                (switcher_rect, switcher_rows) = match &switcher {
+                    Some(sw) => {
+                        let loading = style_loading.is_some() || imagery_loading.is_some() || want_base.is_some();
+                        let ov: Vec<(bool, bool)> = overlay_on.iter().enumerate().map(|(i, on)| (*on, overlay_loading.contains(&i))).collect();
+                        let radar_on = radar.as_ref().is_some_and(|r| !r.is_off());
+                        let live_on = |i: usize| {
+                            let key = mapterm::basemaps::LIVE[i].key;
+                            if key == "radar" { radar_on } else { !live_off.contains_key(key) }
+                        };
+                        let data_on = |i: usize| legend.get(i).is_none_or(|(id, _)| !data_off.contains_key(id));
+                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, &live_on, &data_on, show_legend)
+                    }
+                    None => (Rect::default(), Vec::new()),
+                };
                 // Credits of the sources being drawn, as the style or tiles give them.
                 let mut credits = map.attributions(cam.zoom);
                 // The aircraft feed's credit (ODbL for adsb.lol) first, where it isn't cut off.
@@ -4494,6 +4984,15 @@ async fn main() -> Result<()> {
                         Span::raw(format!(" > {}", fd.query)),
                         Span::styled("█", TStyle::new().fg(Color::Rgb(127, 178, 255))),
                         Span::styled("  ↑↓ choose · enter go · esc close ", dim),
+                    ];
+                }
+                // While naming a session, the status line is its prompt.
+                if let Some(name) = &naming {
+                    spans = vec![
+                        Span::styled(" save session ", TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255))),
+                        Span::raw(format!(" > {name}")),
+                        Span::styled("█", TStyle::new().fg(Color::Rgb(127, 178, 255))),
+                        Span::styled("  enter save · esc cancel", dim),
                     ];
                 }
                 // While typing a search, the status line is the search box.
@@ -4554,12 +5053,23 @@ async fn main() -> Result<()> {
             frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
             if sync {
                 let mut out = std::io::stdout();
-                // What's drawn over the map (legends, the panel): images keep clear of it.
-                let holes: Vec<Rect> = legend_rects.iter().copied().chain((panel_area.width > 0).then_some(panel_area)).collect();
+                // Images of live layers just turned off.
+                for id in free_images.drain(..) {
+                    out.write_all(mapterm::kitty::free(id).as_bytes())?;
+                }
+                // What's drawn over the map (legends, the panel, the base map switcher): images
+                // keep clear of it.
+                let holes: Vec<Rect> = legend_rects
+                    .iter()
+                    .copied()
+                    .chain((panel_area.width > 0).then_some(panel_area))
+                    .chain((switcher_rect.width > 0).then_some(switcher_rect))
+                    .collect();
                 kstate.holes = holes.clone();
                 // A panel opened or closed: the satellite and trail images take the new holes now.
-                if panel_area != last_panel {
+                if panel_area != last_panel || switcher_rect != last_switcher {
                     last_panel = panel_area;
+                    last_switcher = switcher_rect;
                     trails_dirty = true;
                     sat_dots_drawn = Instant::now() - Duration::from_secs(10);
                 }
@@ -4604,9 +5114,9 @@ async fn main() -> Result<()> {
                         let vp = Viewport::new(&cam, map_area);
                         let now = unix_now();
                         let sets: [TrailSet; 3] = [
-                            (a.sondes, balloons.trail_paths().collect(), now - SONDE_DELAY, SONDE_TRAIL, BALLOON_TRAIL_IMAGE, -12, &mut trails_shown.3),
+                            (a.sondes && !live_off.contains_key("balloons"), balloons.trail_paths().collect(), now - SONDE_DELAY, SONDE_TRAIL, BALLOON_TRAIL_IMAGE, -12, &mut trails_shown.3),
                             (
-                                adsb_feed.is_some(),
+                                adsb_feed.is_some() && !live_off.contains_key("aircraft"),
                                 mapterm::adsb::trail_paths(&aircraft).collect(),
                                 now - adsb_delay,
                                 ADSB_TRAIL,
@@ -4614,7 +5124,7 @@ async fn main() -> Result<()> {
                                 -10,
                                 &mut trails_shown.0,
                             ),
-                            (ais_key.is_some(), fleet.trail_paths().collect(), now - AIS_DELAY, AIS_TRAIL, SHIP_TRAIL_IMAGE, -11, &mut trails_shown.1),
+                            (ais_key.is_some() && !live_off.contains_key("ships"), fleet.trail_paths().collect(), now - AIS_DELAY, AIS_TRAIL, SHIP_TRAIL_IMAGE, -11, &mut trails_shown.1),
                         ];
                         for (on, paths, t, secs, id, z, shown) in sets {
                             let any = paths.iter().any(|(p, _)| p.trail_samples(t, secs).len() >= 2);
@@ -4651,7 +5161,7 @@ async fn main() -> Result<()> {
                     // still; the cell glyphs and text names stand in while it moves. Full
                     // resolution when there are names to draw (text needs it), else half,
                     // scaled up by the terminal (dots don't).
-                    let want_dots = !sats.is_empty() && settled;
+                    let want_dots = !sats.is_empty() && settled && !live_off.contains_key("satellites");
                     if want_dots && sat_dots_drawn.elapsed() >= sat_every {
                         sat_dots_drawn = Instant::now();
                         // Full resolution when there's text to draw: names, or the selected one's.
@@ -4763,9 +5273,9 @@ async fn main() -> Result<()> {
             // where it will stop (a jump's destination, the end of a zoom or glide), not for
             // every view on the way.
             let target = ctl.target().filter(|_| billed_raster);
-            let mut reqs: Vec<_> = map.tile_requests(&draw_cam, map_area).into_iter().filter(|r| target.is_none() || r.source != RASTER).collect();
+            let mut reqs: Vec<_> = map.tile_requests(&draw_cam, map_area).into_iter().filter(|r| target.is_none() || r.source != raster_id).collect();
             if let Some(t) = target {
-                reqs.extend(map.tile_requests(&t, map_area).into_iter().filter(|r| r.source == RASTER));
+                reqs.extend(map.tile_requests(&t, map_area).into_iter().filter(|r| r.source == raster_id));
             }
             // Dataset layers: the chunks under the view, into their own slots; far ones dropped.
             {
@@ -4818,14 +5328,14 @@ async fn main() -> Result<()> {
                 }
                 // The provider said "too many requests" (or its daily quota is used up): ask it
                 // nothing for a minute, rather than every waiting tile asking on its own.
-                if req.source == RASTER && throttled_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+                if req.source == raster_id && throttled_at.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
                     continue;
                 }
                 if radar.as_ref().is_some_and(|r| r.owns(&req.source)) && !radar_bucket.take() {
                     held_back = true;
                     continue;
                 }
-                if req.source == RASTER
+                if req.source == raster_id
                     && let Some(b) = limiter.as_mut()
                     && !b.take()
                 {
@@ -5116,6 +5626,187 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // A session opened in place: the view, then the rest as switcher picks.
+            if let Some(sn) = session_open.take() {
+                use mapterm::basemaps::{OVERLAYS, Row};
+                ctl.fly_to(Camera::new(sn.lon, sn.lat, sn.zoom));
+                if let Some(b) = &sn.base
+                    && let Some(i) = bases.iter().position(|e| e.base.spec() == b)
+                {
+                    want_base = Some(i);
+                }
+                for (i, o) in OVERLAYS.iter().enumerate() {
+                    if overlay_on[i] != sn.overlays.iter().any(|x| x == o.preset) && !overlay_loading.contains(&i) {
+                        switcher_picks.push(Row::Overlay(i));
+                    }
+                }
+                for &i in &live_running {
+                    let key = mapterm::basemaps::LIVE[i].key;
+                    if key != "radar" && live_off.contains_key(key) != sn.live_off.iter().any(|k| k == key) {
+                        switcher_picks.push(Row::Live(i));
+                    }
+                }
+                vector = sn.vector;
+                apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                if switcher.as_ref().is_some_and(|s| s.kind == mapterm::basemaps::Picker::Sessions) {
+                    switcher = None;
+                }
+                note = Some((Instant::now(), format!("session {}", sn.name)));
+            }
+            // Start again with another session's layers.
+            if restart_with.is_some() {
+                return Ok(());
+            }
+            // What was picked in the switcher.
+            for row in std::mem::take(&mut switcher_picks) {
+                use mapterm::basemaps::{OVERLAYS, Row};
+                match row {
+                    Row::Session(i) => {
+                        if let Some((sn, past)) = session_list.get(i) {
+                            if !past {
+                                let _ = mapterm::sessions::open(&sn.name, unix_now());
+                            }
+                            if sn.args == a.kept {
+                                session_open = Some(sn.clone());
+                            } else {
+                                // Other layers: start again with them.
+                                restart_with = Some(sn.clone());
+                            }
+                        }
+                    }
+                    Row::Base(i) => want_base = Some(i),
+                    Row::SaveAs => {}
+                    Row::Legends => show_legend = !show_legend,
+                    Row::Data(i) => {
+                        if let Some((id, _)) = legend.get(i) {
+                            match data_off.remove(id) {
+                                Some(saved) => {
+                                    if let Err(e) = show_live(&mut map, saved) {
+                                        note = Some((Instant::now(), format!("{id}: {e:#}")));
+                                    }
+                                }
+                                None => {
+                                    let saved = hide_sources(&mut map, &[id.as_str()]);
+                                    data_off.insert(id.clone(), saved);
+                                }
+                            }
+                        }
+                    }
+                    Row::Labels => labels = !labels,
+                    Row::Vector => vector = (vector + 1) % 3,
+                    Row::Live(i) if mapterm::basemaps::LIVE[i].key == "radar" => {
+                        if let Some(r) = radar.as_mut() {
+                            let off = !r.is_off();
+                            r.set_off(&mut map, off);
+                            if off {
+                                clock.go_live(unix_now());
+                            }
+                        }
+                    }
+                    Row::Live(i) => {
+                        let key = mapterm::basemaps::LIVE[i].key;
+                        match live_off.remove(key) {
+                            Some(saved) => {
+                                if let Err(e) = show_live(&mut map, saved) {
+                                    note = Some((Instant::now(), format!("{key}: {e:#}")));
+                                }
+                            }
+                            None => {
+                                live_off.insert(key, hide_live(&mut map, key));
+                                free_images.extend(live_images(key));
+                                // Nothing hidden stays chosen.
+                                match key {
+                                    "aircraft" => selected = None,
+                                    "ships" => selected_ship = None,
+                                    "satellites" => selected_sat = None,
+                                    "balloons" => selected_balloon = None,
+                                    "alerts" => selected_alert = None,
+                                    "quakes" => selected_quake = None,
+                                    "fires" => selected_fire = None,
+                                    "gauges" => selected_gauge = None,
+                                    "outages" => selected_outage = None,
+                                    "tfrs" => selected_tfr = None,
+                                    "closures" => selected_closure = None,
+                                    _ => {}
+                                }
+                            }
+                        }
+                        trails_dirty = true;
+                        sat_dots_drawn = Instant::now() - Duration::from_secs(10);
+                    }
+                    Row::Overlay(i) if overlay_on[i] => {
+                        let id = overlay_id(i);
+                        map.remove_layers(&[id.as_str()]);
+                        map.remove_source(&id);
+                        overlay_on[i] = false;
+                    }
+                    Row::Overlay(i) => {
+                        if overlay_loading.insert(i) {
+                            let (ovtx, cache, o) = (ovtx.clone(), a.raster_cache, OVERLAYS[i]);
+                            note = Some((Instant::now(), format!("loading {}…", o.label)));
+                            tokio::spawn(async move {
+                                let r = open_preset(o.preset, None, cache).await.map(|mut r| {
+                                    r.overlay = true;
+                                    r.opacity = o.opacity;
+                                    r.shade = o.shade;
+                                    Arc::new(r)
+                                });
+                                let _ = ovtx.send((i, r));
+                            });
+                        }
+                    }
+                }
+                base = base_visibility(&map);
+                apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+            }
+            // Switch base maps, one at a time: a style swaps the vector map (and takes away any
+            // imagery); imagery goes under the style's roads and names.
+            if let Some(i) = want_base.filter(|_| style_loading.is_none() && imagery_loading.is_none()) {
+                want_base = None;
+                if i != base_at && i < bases.len() {
+                    base_prev = Some(base_at);
+                    base_at = i;
+                    match bases[i].base.clone() {
+                        mapterm::basemaps::Base::Style(spec) => {
+                            vector = 0;
+                            if raster.is_some() {
+                                imagery_loading = Some(String::new());
+                                let _ = itx.send((String::new(), Ok(Vec::new())));
+                            }
+                            if styles[style_at] != spec {
+                                style_at = styles.iter().position(|s| *s == spec).unwrap_or(style_at);
+                                let (source, dark, cam, stx) = (builtin_source.clone(), theme.map_or(!a.light, |t| t.1), ctl.cam, stx.clone());
+                                let sp = spec.clone();
+                                tokio::spawn(async move {
+                                    let r = load_basemap(&sp, &source, dark, cam).await;
+                                    let _ = stx.send((sp, r));
+                                });
+                                note = Some((Instant::now(), format!("loading style {spec}…")));
+                                style_loading = Some(spec);
+                            } else {
+                                apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                            }
+                        }
+                        mapterm::basemaps::Base::Imagery(spec) => {
+                            imagery_loading = Some(spec.clone());
+                            match imagery_kept.get(&spec) {
+                                Some(l) => {
+                                    let _ = itx.send((spec, Ok(l.clone())));
+                                }
+                                None => {
+                                    note = Some((Instant::now(), format!("loading imagery {spec}…")));
+                                    let (itx, cache, cam) = (itx.clone(), a.raster_cache, ctl.cam);
+                                    tokio::spawn(async move {
+                                        let r = open_imagery(spec.clone(), cache, cam).await;
+                                        let _ = itx.send((spec, r));
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // ~60 fps while animating, otherwise wake only for input, tiles, or a slow tick.
             let idle = if ctl.animating() || pixels_pending > 0 || !demo.is_empty() || clock.is_playing() || stitching {
                 Duration::from_millis(16)
@@ -5156,6 +5847,10 @@ async fn main() -> Result<()> {
                     for (source, id, r) in batch {
                         pending.remove(&(source.clone(), id));
                         dlog(|| format!("done {source} {id:?}"));
+                        // A base map switched away while it loaded: nowhere to put it.
+                        if map.source(&source).is_none() {
+                            continue;
+                        }
                         if let Err(e) = map.insert_loaded(&source, id, r) {
                             // The map asks for it again after a growing wait.
                             dlog(|| format!("{e:#}"));
@@ -5510,7 +6205,66 @@ async fn main() -> Result<()> {
                     credit_pending = false;
                     // On failure keep the credits shown; the next new view asks again.
                     if let Ok(text) = c {
-                        let _ = map.set_attribution(RASTER, &text);
+                        let _ = map.set_attribution(&raster_id, &text);
+                    }
+                }
+                Some((i, r)) = ovrx.recv() => {
+                    overlay_loading.remove(&i);
+                    let id = overlay_id(i);
+                    let added = r.and_then(|src| {
+                        map.add_source(&id, MapSource::raster(src))?;
+                        // Over the imagery and the overlays before it, under everything else.
+                        let before = map.layer_ids().into_iter().find(|l| !is_imagery(l) && !l.starts_with(OVERLAY_PREFIX)).map(str::to_string);
+                        map.add_layers(vec![StyleLayer::raster(&id, &id)], before.as_deref())
+                    });
+                    match added {
+                        Ok(()) => {
+                            overlay_on[i] = true;
+                            if !kitty && mapterm::kitty::supported() {
+                                kitty = true;
+                                map.raster_mode = RasterMode::Kitty { cell_px: cpx };
+                                kstate.shm = shm;
+                            }
+                            base = base_visibility(&map);
+                            apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                        }
+                        Err(e) => {
+                            map.remove_source(&id);
+                            note = Some((Instant::now(), format!("{} failed: {e:#}", mapterm::basemaps::OVERLAYS[i].label)));
+                        }
+                    }
+                }
+                Some((spec, r)) = irx.recv() => {
+                    imagery_loading = None;
+                    let r = r.and_then(|layers| set_imagery(&mut map, &layers).map(|_| layers));
+                    match r {
+                        Ok(layers) => {
+                            if !spec.is_empty() {
+                                imagery_kept.insert(spec.clone(), layers.clone());
+                                note = Some((Instant::now(), format!("imagery: {spec}")));
+                            }
+                            raster = layers.last().map(|l| l.1.clone());
+                            raster_id = layers.last().map_or(RASTER.to_string(), |l| l.0.clone());
+                            google = raster.as_ref().filter(|r| r.is_google()).cloned();
+                            credit_view = None;
+                            billed_raster = raster.as_ref().is_some_and(|r| r.is_google() || r.wants_key());
+                            limiter = imagery_limiter(a.raster_limit, billed_raster);
+                            // Imagery shows as images where the terminal can.
+                            if raster.is_some() && !kitty && mapterm::kitty::supported() {
+                                kitty = true;
+                                map.raster_mode = RasterMode::Kitty { cell_px: cpx };
+                                kstate.shm = shm;
+                            }
+                            base = base_visibility(&map);
+                            apply_toggles(&mut map, &base, labels, vector, raster.is_some());
+                        }
+                        Err(e) => {
+                            note = Some((Instant::now(), format!("imagery {spec} failed: {e:#}")));
+                            // Back to what was showing.
+                            if let Some(p) = base_prev.take() {
+                                base_at = p;
+                            }
+                        }
                     }
                 }
                 Some((spec, r)) = srx.recv() => {
@@ -5579,6 +6333,91 @@ async fn main() -> Result<()> {
                     for ev in queued {
                         match ev {
                             Event::Key(k) if k.kind != KeyEventKind::Release => {
+                                // S's name prompt takes every key while it's open.
+                                if let Some(name) = naming.as_mut() {
+                                    match k.code {
+                                        KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
+                                        KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => name.clear(),
+                                        KeyCode::Esc => naming = None,
+                                        KeyCode::Enter => {
+                                            let base_spec = bases.get(base_at).map(|e| e.base.spec().to_string());
+                                            let sn = session_now(name.trim(), &a.kept, &ctl.cam, base_spec, &overlay_on, &live_off, vector, unix_now());
+                                            match sn.save() {
+                                                Ok(_) => {
+                                                    note = Some((Instant::now(), format!("saved session {} · mapterm --session {:?}", sn.name, sn.name)));
+                                                    naming = None;
+                                                }
+                                                Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                                            }
+                                        }
+                                        KeyCode::Char(c) => name.push(c),
+                                        KeyCode::Backspace => {
+                                            name.pop();
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
+                                // The base map switcher takes every key while it's open, as fzf:
+                                // typing filters, up/down (ctrl-n/p, ctrl-j/k) choose and preview,
+                                // enter keeps, space toggles or picks and stays, esc goes back.
+                                if let Some(sw) = switcher.as_mut() {
+                                    use mapterm::basemaps::Row;
+                                    let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+                                    let mut refilter = false;
+                                    let mut close = false;
+                                    match k.code {
+                                        KeyCode::Char('c') if ctrl => return Ok(()),
+                                        KeyCode::Char('u') if ctrl => {
+                                            sw.query.clear();
+                                            refilter = true;
+                                        }
+                                        KeyCode::Char('n' | 'j') if ctrl => sw.step(true),
+                                        KeyCode::Char('p' | 'k') if ctrl => sw.step(false),
+                                        KeyCode::Esc => close = true,
+                                        KeyCode::Enter if sw.row() == Some(Row::SaveAs) => {
+                                            // Save under what's typed, or ask for a name.
+                                            let typed = sw.query.trim().to_string();
+                                            let base_spec = bases.get(base_at).map(|e| e.base.spec().to_string());
+                                            if mapterm::sessions::valid_name(&typed) {
+                                                let sn = session_now(&typed, &a.kept, &ctl.cam, base_spec, &overlay_on, &live_off, vector, unix_now());
+                                                note = Some((Instant::now(), match sn.save() {
+                                                    Ok(_) => format!("saved session {} · mapterm --session {:?}", sn.name, sn.name),
+                                                    Err(e) => format!("{e:#}"),
+                                                }));
+                                            } else {
+                                                naming = Some(a.session.as_ref().map(|s| s.name.clone()).filter(|n| n != "run" && typed.is_empty()).unwrap_or(typed));
+                                            }
+                                            close = true;
+                                        }
+                                        KeyCode::Enter => {
+                                            let row = sw.row();
+                                            if matches!(row, Some(Row::Base(_) | Row::Session(_))) {
+                                                close = true;
+                                            }
+                                            switcher_picks.extend(row);
+                                        }
+                                        KeyCode::Char(' ') => switcher_picks.extend(sw.row()),
+                                        KeyCode::Down | KeyCode::Tab => sw.step(true),
+                                        KeyCode::Up | KeyCode::BackTab => sw.step(false),
+                                        KeyCode::Char(c) if !ctrl => {
+                                            sw.query.push(c);
+                                            refilter = true;
+                                        }
+                                        KeyCode::Backspace => {
+                                            sw.query.pop();
+                                            refilter = true;
+                                        }
+                                        _ => {}
+                                    }
+                                    if refilter {
+                                        sw.refilter(&bases);
+                                    }
+                                    if close {
+                                        switcher = None;
+                                    }
+                                    continue;
+                                }
                                 // The finder takes every key while it's open.
                                 if let Some(fd) = finder.as_mut() {
                                     let mut refilter = false;
@@ -5823,9 +6662,11 @@ async fn main() -> Result<()> {
                                         note = Some((Instant::now(), if off { "radar off · R shows it" } else { "radar on" }.into()));
                                     }
                                     KeyCode::Char('?') => show_help = true,
+                                    // L: what's over the base map, on and off.
                                     KeyCode::Char('L') => {
-                                        show_legend = !show_legend;
-                                        note = Some((Instant::now(), if show_legend { "legend on" } else { "legend off" }.into()));
+                                        finder = None;
+                                        let data: Vec<String> = legend.iter().map(|(id, _)| id.clone()).collect();
+                                        switcher = Some(mapterm::basemaps::Switcher::layers(&live_running, data));
                                     }
                                     KeyCode::Char('p') if !sats.is_empty() || !aircraft.is_empty() || !fleet.is_empty() => {
                                         finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &sats_hidden, &sat_filter, &aircraft, &fleet) });
@@ -6008,17 +6849,27 @@ async fn main() -> Result<()> {
                                             out.flush()?;
                                         }
                                     }
-                                    KeyCode::Char('m') if style_loading.is_none() => {
-                                        style_at = (style_at + 1) % styles.len();
-                                        let spec = styles[style_at].clone();
-                                        let (source, dark, cam, stx) = (builtin_source.clone(), theme.map_or(!a.light, |t| t.1), ctl.cam, stx.clone());
-                                        let sp = spec.clone();
-                                        tokio::spawn(async move {
-                                            let r = load_basemap(&sp, &source, dark, cam).await;
-                                            let _ = stx.send((sp, r));
-                                        });
-                                        note = Some((Instant::now(), format!("loading style {spec}…")));
-                                        style_loading = Some(spec);
+                                    // m / M: the next or previous base map; ': the one before; b: the
+                                    // switcher.
+                                    KeyCode::Char(c @ ('m' | 'M')) => {
+                                        let i = mapterm::basemaps::step(bases.len(), want_base.unwrap_or(base_at), c == 'm');
+                                        want_base = Some(i);
+                                        note = Some((Instant::now(), format!("base map: {}", bases[i].label)));
+                                    }
+                                    KeyCode::Char('\'') => match base_prev {
+                                        Some(p) => want_base = Some(p),
+                                        None => note = Some((Instant::now(), "' goes back to the base map before; there's none yet".into())),
+                                    },
+                                    // S: save what's shown as a named session (the one opened, by default).
+                                    // S: the sessions, to open one or save this.
+                                    KeyCode::Char('S') => {
+                                        finder = None;
+                                        session_list = mapterm::sessions::all();
+                                        switcher = Some(mapterm::basemaps::Switcher::sessions(session_rows(&session_list), false));
+                                    }
+                                    KeyCode::Char('b') => {
+                                        finder = None;
+                                        switcher = Some(mapterm::basemaps::Switcher::base(&bases, base_at));
                                     }
                                     KeyCode::Char('c') if !k.modifiers.contains(KeyModifiers::CONTROL) => {
                                         // The pointer's position on the map, else the center.
@@ -6104,6 +6955,27 @@ async fn main() -> Result<()> {
                                             let back = m.kind == event::MouseEventKind::ScrollLeft;
                                             timeline.pan((timeline.stop - timeline.start) * if back { -0.1 } else { 0.1 });
                                             timeline_moved = true;
+                                        }
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
+                                // The switcher: a click picks a row (and previews it); wheel
+                                // moves; the map under it sees nothing.
+                                if let Some(sw) = switcher.as_mut()
+                                    && switcher_rect.contains(pos)
+                                {
+                                    match m.kind {
+                                        event::MouseEventKind::Down(event::MouseButton::Left) => {
+                                            if let Some(&(_, row)) = switcher_rows.iter().find(|(r, _)| *r == cell.1)
+                                                && let Some(n) = sw.rows.iter().position(|r| *r == row)
+                                            {
+                                                sw.sel = n;
+                                                switcher_picks.push(row);
+                                            }
+                                        }
+                                        event::MouseEventKind::ScrollDown | event::MouseEventKind::ScrollUp => {
+                                            sw.step(m.kind == event::MouseEventKind::ScrollDown);
                                         }
                                         _ => {}
                                     }
@@ -6299,7 +7171,83 @@ async fn main() -> Result<()> {
     }
     let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
     ratatui::restore();
+    // Keep this run in the history, for --continue and --resume.
+    let sn = session_now(
+        a.session.as_ref().map_or("run", |s| s.name.as_str()),
+        &a.kept,
+        &ctl.cam,
+        bases.get(base_at).map(|e| e.base.spec().to_string()),
+        &overlay_on,
+        &live_off,
+        vector,
+        run_started,
+    );
+    if let Err(e) = sn.save_history() {
+        dlog(|| format!("history: {e:#}"));
+    }
+    // A session with other layers: this program again, continuing it (it goes in the history
+    // as the latest run, after this one).
+    if let Some(mut sn) = restart_with {
+        use std::os::unix::process::CommandExt;
+        sn.saved_at = unix_now() + 0.001;
+        sn.save_history()?;
+        let exe = std::env::current_exe().context("finding mapterm to start again")?;
+        let e = std::process::Command::new(exe).arg("--continue").exec();
+        return Err(e).context("starting mapterm again");
+    }
     result
+}
+
+/// What the viewer shows now, as a session called `name`.
+#[allow(clippy::too_many_arguments)]
+fn session_now(
+    name: &str,
+    kept: &[String],
+    cam: &Camera,
+    base: Option<String>,
+    overlay_on: &[bool],
+    live_off: &std::collections::HashMap<&'static str, (Vec<StyleLayer>, Option<String>)>,
+    vector: u8,
+    created: f64,
+) -> mapterm::sessions::Session {
+    let mut off: Vec<String> = live_off.keys().map(|k| k.to_string()).collect();
+    off.sort();
+    mapterm::sessions::Session {
+        name: name.to_string(),
+        args: kept.to_vec(),
+        lon: cam.lon,
+        lat: cam.lat,
+        zoom: cam.zoom,
+        base,
+        overlays: overlay_on.iter().zip(mapterm::basemaps::OVERLAYS).filter(|(on, _)| **on).map(|(_, o)| o.preset.to_string()).collect(),
+        live_off: off,
+        vector,
+        saved_at: unix_now(),
+        created_at: created,
+        viewed_at: unix_now(),
+    }
+}
+
+/// The switcher's rows for sessions: a name (or when, for a recent run) and what it shows.
+fn session_rows(list: &[(mapterm::sessions::Session, bool)]) -> Vec<(String, String)> {
+    let now = unix_now();
+    list.iter()
+        .map(|(s, past)| {
+            use mapterm::sessions::ago;
+            let name = match (*past, s.name.as_str()) {
+                (true, "run") => format!("run {}", ago(s.saved_at, now)),
+                (true, n) => format!("{n} · run {}", ago(s.saved_at, now)),
+                (false, n) => n.to_string(),
+            };
+            let opened = if s.viewed_at > 0.0 { ago(s.viewed_at, now) } else { "never".into() };
+            let detail = if *past {
+                format!("{} · started {}", s.summary(), ago(s.created_at, now))
+            } else {
+                format!("{} · made {} · opened {opened}", s.summary(), ago(s.created_at, now))
+            };
+            (name, detail)
+        })
+        .collect()
 }
 
 /// A token bucket for --raster-limit: holds a minute's worth of requests, refilled steadily.

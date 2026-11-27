@@ -6,9 +6,15 @@
 /// How well `query` matches `text` (higher is better), or None when it doesn't. Spaces in the
 /// query are ignored; an empty query matches everything with 0.
 pub fn score(query: &str, text: &str) -> Option<i32> {
+    matches(query, text).map(|(s, _)| s)
+}
+
+/// [`score`] and where the query's characters matched: indices into `text`'s characters (for
+/// highlighting them, as fzf does). Empty for an empty query.
+pub fn matches(query: &str, text: &str) -> Option<(i32, Vec<usize>)> {
     let q: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
     if q.is_empty() {
-        return Some(0);
+        return Some((0, Vec::new()));
     }
     let t: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
     let word_start = |i: usize| i == 0 || !t[i - 1].is_alphanumeric() || (t[i].is_ascii_digit() && !t[i - 1].is_ascii_digit());
@@ -17,6 +23,7 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
     let mut s = 0i32;
     let mut at = 0usize;
     let mut last: Option<usize> = None;
+    let mut hits = Vec::with_capacity(q.len());
     for &c in &q {
         let mut found = None;
         for (i, &tc) in t.iter().enumerate().skip(at) {
@@ -44,6 +51,7 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
             s += 4;
         }
         last = Some(i);
+        hits.push(i);
         at = i + 1;
     }
     // A plain substring (spaces and case aside) is what was meant, likely.
@@ -55,13 +63,26 @@ pub fn score(query: &str, text: &str) -> Option<i32> {
             s += 6;
         }
     }
+    // Positions in the lowercased text are the text's own unless lowercasing changed its
+    // length (a few non-ASCII letters): then none are shown.
+    if t.len() != text.chars().count() {
+        hits.clear();
+    }
     // Among equals, shorter names first.
-    Some(s * 4 - (t.len() as i32 / 8))
+    Some((s * 4 - (t.len() as i32 / 8), hits))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positions_for_highlighting() {
+        assert_eq!(matches("usg", "usgs").unwrap().1, vec![0, 1, 2]);
+        assert_eq!(matches("ei", "esri imagery").unwrap().1, vec![0, 5]);
+        assert_eq!(matches("", "esri").unwrap().1, Vec::<usize>::new());
+        assert!(matches("zz", "esri").is_none());
+    }
 
     fn best<'a>(q: &str, names: &[&'a str]) -> Vec<&'a str> {
         let mut v: Vec<(i32, &str)> = names.iter().filter_map(|n| score(q, n).map(|s| (s, *n))).collect();

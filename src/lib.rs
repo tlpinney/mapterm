@@ -71,6 +71,7 @@
 pub mod adsb;
 pub mod ais;
 pub mod areas;
+pub mod basemaps;
 pub mod cache;
 pub mod clock;
 pub mod closures;
@@ -117,6 +118,7 @@ pub mod render;
 pub mod route;
 pub mod satellites;
 pub mod satnogs;
+pub mod sessions;
 pub mod shp;
 pub mod smooth;
 pub mod sondehub;

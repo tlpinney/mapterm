@@ -8,6 +8,30 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Pickers in the middle of the map, filtered fzf-style as you type (matched letters lit,
+  best first, a count of matches):
+  - `b`, the base map: one of the map styles or imagery (satellite and aerial photos; keyed
+    providers once their key is set). Space picks, Enter picks and closes. Imagery can now
+    be switched while the viewer runs; `m`/`M` step through the list, `'` flips back to the
+    one before.
+  - `L`, what's over it, each on or off: the live layers running (aircraft, ships,
+    satellites, balloons, radar, alerts, quakes, fires, river levels, outages, TFRs,
+    closures, traffic), imagery overlays (hillshade drawn as shading, Esri roads and places,
+    NASA GIBS's daily picture half transparent), data layers, labels, the vector map over
+    imagery, legends (`L` used to toggle the legends alone). Off takes a layer off the map,
+    its legend and the status line; its data keeps coming.
+  - `S`, sessions: saved ones and recent runs, with when each was made and last opened;
+    Enter opens one, and the first row saves this view under what's typed.
+  The status line names the imagery and overlays on (`◧ usgs + hillshade`).
+  `mapterm::basemaps`; `RasterSource::opacity` and `shade`; `--raster esri-hillshade`,
+  `esri-roads`, `esri-places`.
+
+- Sessions: a saved session keeps the options mapterm started with, the view, base map,
+  imagery overlays and layers turned off; `--session NAME` opens it again. Each run is kept
+  when it ends (the last 50): `--continue` (`-c`) reopens the last, `--resume` opens the
+  sessions picker. Opening one that needs other layers starts mapterm again with them.
+  `--sessions` lists them. `mapterm::sessions`.
+
 - Traffic speeds (`--traffic`): Maryland CHART's speed sensors, a dot per sensor colored by
   its slowest direction, speeds labeled from zoom 10. With a route, each choice shows its
   time with traffic beside the free-flow time. `mapterm::traffic`.
