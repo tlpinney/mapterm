@@ -722,7 +722,7 @@ fn live_sources(key: &str) -> &'static [&'static str] {
         "aircraft" => &[AIRCRAFT, TRAILS],
         "ships" => &[SHIPS],
         "satellites" => &[SATS],
-        "balloons" => &[BALLOONS, STATIONS, STATION_LINKS],
+        "balloons" => &[BALLOONS, STATIONS, STATION_LINKS, STATION_AREAS],
         "nasa" => &[NASA, NASA_TRACKS],
         "alerts" => &[ALERTS, ALERT_TILES],
         "quakes" => &[QUAKES],
@@ -919,6 +919,20 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
+/// The camera that shows `target`'s center in the middle of the map left of `panel` (which
+/// floats over the map's right side), rather than under the panel.
+fn beside_panel(target: Camera, map: Rect, panel: Rect) -> Camera {
+    if panel.width == 0 || map.width <= panel.width {
+        return target;
+    }
+    let vp = Viewport::new(&target, map);
+    let (cx, cy) = (map.x + map.width / 2, map.y + map.height / 2);
+    // The center moves right by half the panel, so the target sits mid-way across the rest.
+    let (lon0, _) = vp.cell_to_lonlat(cx, cy);
+    let (lon1, _) = vp.cell_to_lonlat(cx + panel.width / 2, cy);
+    Camera::new(target.lon + (lon1 - lon0), target.lat, target.zoom)
+}
+
 /// A receiving station's line in the balloon panel: its screen row, where it is, its callsign.
 struct StationRow {
     row: u16,
@@ -1036,6 +1050,8 @@ const STATIONS: &str = "balloon-stations";
 const NASA: &str = "nasa-balloons";
 const NASA_TRACKS: &str = "nasa-tracks";
 const STATION_LINKS: &str = "balloon-links";
+/// The stations' areas (where each is, somewhere inside).
+const STATION_AREAS: &str = "balloon-station-areas";
 const QUAKES: &str = "quakes";
 const FIRES: &str = "fires";
 const GAUGES: &str = "gauges";
@@ -2773,7 +2789,7 @@ fn draw_balloon(
         let ago = if now_ { String::new() } else { format!(" · {}", mapterm::sessions::ago(*when, now)) };
         let name = format!("⌂ {}", s.callsign);
         let room = (inner.width as usize).saturating_sub(15 + name.chars().count());
-        let rest: String = format!("  {km:.0} km{snr}{ago}").chars().take(room).collect();
+        let rest: String = format!("  ≈ {km:.0} km{snr}{ago}").chars().take(room).collect();
         rows.push((l.len(), StationRow { row: 0, lon: s.lon, lat: s.lat, callsign: s.callsign.clone() }));
         l.push(Line::from(vec![key(if i == 0 { "heard by" } else { "" }), Span::styled(name, st), Span::styled(rest, dim)]));
     }
@@ -3127,7 +3143,8 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
             || id == ROUTE
             || id == format!("{ROUTE}-line")
             || [CLOSURES, GAUGES, FIRES, QUAKES, TRAFFIC].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')))
-            || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS].contains(&id.as_str());
+            || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS].contains(&id.as_str())
+            || id.starts_with(STATION_AREAS);
         if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
         }
@@ -3236,6 +3253,8 @@ fn add_closures(map: &mut Map, tiles: &Arc<mapterm::areas::AreaTiles>, tiles_bef
 /// The weather balloons over the stations receiving them and the lines between, all under
 /// `before` (None: on top).
 fn add_balloons(map: &mut Map, before: Option<&str>) -> Result<()> {
+    map.add_source(STATION_AREAS, empty_source()?)?;
+    map.add_layers(mapterm::sondehub::area_layers(STATION_AREAS, STATION_AREAS), before)?;
     add_points(map, STATION_LINKS, SONDE_CREDIT, mapterm::sondehub::link_layer(STATION_LINKS, STATION_LINKS), before)?;
     add_points(map, STATIONS, SONDE_CREDIT, mapterm::sondehub::station_layer(STATIONS, STATIONS), before)?;
     add_points(map, BALLOONS, SONDE_CREDIT, mapterm::sondehub::layer(BALLOONS, BALLOONS), before)
@@ -4586,7 +4605,12 @@ async fn main() -> Result<()> {
     let mut stations_saved = Instant::now();
     if a.sondes {
         balloons.load_stations(&mapterm::sondehub::stations_file(), unix_now());
+        // Exact positions an earlier version kept: replaced by their areas at once.
+        if balloons.stations_changed() {
+            let _ = balloons.save_stations(&mapterm::sondehub::stations_file());
+        }
         map.set_data(STATIONS, &balloons.station_points(unix_now()))?;
+        map.set_data(STATION_AREAS, &balloons.station_areas(unix_now()))?;
     }
     let (sonde_area_tx, sonde_area_rx) = tokio::sync::watch::channel::<Option<mapterm::sondehub::Area>>(None);
     let (sonde_sel_tx, sonde_sel_rx) = tokio::sync::watch::channel::<Option<String>>(None);
@@ -5890,6 +5914,7 @@ async fn main() -> Result<()> {
                 }
                 map.set_data(BALLOONS, &balloons.points(unix_now() - SONDE_DELAY))?;
                 map.set_data(STATIONS, &balloons.station_points(unix_now()))?;
+                map.set_data(STATION_AREAS, &balloons.station_areas(unix_now()))?;
                 let links = match selected_balloon.as_deref() {
                     Some(sn) => balloons.links(sn, unix_now() - SONDE_DELAY, unix_now()),
                     None => serde_json::json!({"type": "FeatureCollection", "features": []}),
@@ -6149,7 +6174,11 @@ async fn main() -> Result<()> {
                                     let before = under(&map, &[TRAILS, AIRCRAFT, SATS]);
                                     add_balloons(&mut map, before.as_deref())?;
                                     balloons.load_stations(&mapterm::sondehub::stations_file(), unix_now());
+                                    if balloons.stations_changed() {
+                                        let _ = balloons.save_stations(&mapterm::sondehub::stations_file());
+                                    }
                                     map.set_data(STATIONS, &balloons.station_points(unix_now()))?;
+                                    map.set_data(STATION_AREAS, &balloons.station_areas(unix_now()))?;
                                     tokio::spawn(mapterm::sondehub::stream(sonde_area_rx.clone(), sonde_sel_rx.clone(), btx.clone()));
                                     trails_kitty |= mapterm::kitty::supported();
                                 }
@@ -7613,7 +7642,7 @@ async fn main() -> Result<()> {
                                         && let Some(st) = station_rows.iter().find(|r| r.row == cell.1)
                                     {
                                         follow = false;
-                                        ctl.fly_to(Camera::new(st.lon, st.lat, ctl.cam.zoom.max(9.0)));
+                                        ctl.fly_to(beside_panel(Camera::new(st.lon, st.lat, ctl.cam.zoom.max(9.0)), map_area, panel_area));
                                         note = Some((Instant::now(), format!("⌂ {} · receiving station", st.callsign)));
                                         continue;
                                     }
