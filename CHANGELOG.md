@@ -18,7 +18,9 @@ All notable changes to mapterm are listed here. The format follows
   ahead, A/D (←/→) turn onto a photo facing left or right, Q/E older and newer photos of the
   spot, esc leaves; the map follows, the photo takes more of the screen. Where there are
   photos shows as a coverage layer (green: dots zoomed out, the sequences' lines, each photo
-  from zoom 16), from Mapillary's tiles kept in the tile cache; off in `L`.
+  from zoom 16), from Mapillary's tiles kept in the tile cache. "street view" in `L`
+  starts it while running (with your token) and turns it off and on; off, clicks don't
+  look for photos.
   `mapterm::mapillary`.
 
 - Mobile network cells (`--cells`, or from `L`) from OpenCelliD (CC BY-SA 4.0): each cell's

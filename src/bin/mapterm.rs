@@ -3512,6 +3512,7 @@ const STARTABLE: &[(&str, &str)] = &[
     ("nasa", "--nasa-balloons"),
     ("towers", "--towers"),
     ("cells", "--cells"),
+    ("mapillary", "--streetview"),
     ("alerts", "--alerts"),
     ("quakes", "--quakes"),
     ("fires", "--fires"),
@@ -3524,6 +3525,17 @@ const STARTABLE: &[(&str, &str)] = &[
     ("ships", "--ais"),
     ("outages", "--outages"),
 ];
+
+/// Mapillary's coverage (where there are street-level photos) as source and layers [`MLY`],
+/// under what moves.
+fn add_mapillary(map: &mut Map, token: &str) -> Result<()> {
+    let mut src = Source::xyz(&mapterm::mapillary::coverage_tiles(token));
+    src.name = "Mapillary coverage".into();
+    src.attribution = Some(mapterm::mapillary::CREDIT.into());
+    map.add_source(MLY, MapSource::vector(src)).map_err(|e| anyhow::anyhow!("{}", format!("{e:#}").replace(token, "<token>")))?;
+    let before = under(map, MOVING);
+    map.add_layers(mapterm::mapillary::coverage_layers(MLY, MLY), before.as_deref())
+}
 
 /// Where a layer started later goes: under the first layer drawing from one of `sources`
 /// (what's drawn over it), else under the markers.
@@ -4988,7 +5000,7 @@ async fn main() -> Result<()> {
     let mut selected_cells: Vec<serde_json::Value> = Vec::new();
     // --streetview: the token, the photos near the spot clicked and the one shown, its image
     // (photo id, width, height, RGBA), where in the panel it goes and what was last placed.
-    let mapillary_token = if a.streetview {
+    let mut mapillary_token = if a.streetview {
         Some(mapterm::raster::find_key(a.mapillary_key_cmd.as_deref(), &["MAPILLARY_TOKEN"])?.context(
             "--streetview needs your Mapillary client token: register an app at mapillary.com/dashboard/developers, then set MAPILLARY_TOKEN or pass --mapillary-key-cmd",
         )?)
@@ -4997,13 +5009,7 @@ async fn main() -> Result<()> {
     };
     // Where there are photos: Mapillary's coverage tiles, under what moves.
     if let Some(token) = &mapillary_token {
-        let redact = |e: anyhow::Error| anyhow::anyhow!("{}", format!("{e:#}").replace(token.as_str(), "<token>"));
-        let mut src = Source::open(&mapterm::mapillary::coverage_tiles(token)).await.map_err(redact)?;
-        src.name = "Mapillary coverage".into();
-        src.attribution = Some(mapterm::mapillary::CREDIT.into());
-        map.add_source(MLY, MapSource::vector(src))?;
-        let before = under(&map, MOVING);
-        map.add_layers(mapterm::mapillary::coverage_layers(MLY, MLY), before.as_deref())?;
+        add_mapillary(&mut map, token)?;
     }
     let mut photos: Vec<mapterm::mapillary::Photo> = Vec::new();
     let mut photo_at = 0usize;
@@ -5858,7 +5864,7 @@ async fn main() -> Result<()> {
                                 ("○", Some("not started · enter starts it"))
                             } else if !live_on(i) {
                                 ("☐", None)
-                            } else if status.get(key).is_none_or(|s| s.updated.is_none()) && !matches!(key, "satellites" | "gauges") {
+                            } else if status.get(key).is_none_or(|s| s.updated.is_none()) && !matches!(key, "satellites" | "gauges" | "mapillary") {
                                 ("◌", Some("starting…"))
                             } else {
                                 ("☑", None)
@@ -6789,6 +6795,14 @@ async fn main() -> Result<()> {
                                     if cell_files.is_empty() {
                                         bail!("no cells downloaded yet: mapterm --cells-download us (or world)");
                                     }
+                                }
+                                "mapillary" => {
+                                    let token = mapterm::raster::find_key(a.mapillary_key_cmd.as_deref(), &["MAPILLARY_TOKEN"])?.context(
+                                        "street view needs your Mapillary token: set MAPILLARY_TOKEN or pass --mapillary-key-cmd",
+                                    )?;
+                                    add_mapillary(&mut map, &token)?;
+                                    mapillary_token = Some(token);
+                                    a.streetview = true;
                                 }
                                 "towers" => {
                                     a.towers = true;
@@ -8696,7 +8710,7 @@ async fn main() -> Result<()> {
                                             || selected_closure.is_some()
                                             || selected_site.is_some()
                                             || !selected_cells.is_empty();
-                                        if let Some(token) = mapillary_token.clone().filter(|_| !picked && !photos_asking) {
+                                        if let Some(token) = mapillary_token.clone().filter(|_| !picked && !photos_asking && !off("mapillary")) {
                                             photos_asking = true;
                                             (photos, photo_at, photo_img) = (Vec::new(), 0, None);
                                             let tx = photostx.clone();

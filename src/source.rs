@@ -377,6 +377,22 @@ impl Source {
         Self { name: t.into(), kind: Kind::Xyz(t.into()), http: http_client(), cache_dir: None, min_zoom: 0, max_zoom: 14, center: None, attribution: None }
     }
 
+    /// An XYZ template source ({z}/{x}/{y}), opened without asking anything of the network.
+    pub fn xyz(spec: &str) -> Self {
+        let http = if crate::mapbox::is_mapbox_host(spec) { keyed_client().clone() } else { http_client() };
+        let is_http = spec.starts_with("http://") || spec.starts_with("https://");
+        Self {
+            name: spec.to_string(),
+            kind: Kind::Xyz(spec.into()),
+            http,
+            cache_dir: is_http.then(|| cache_root().join(hash(spec))),
+            min_zoom: 0,
+            max_zoom: 14,
+            center: None,
+            attribution: None,
+        }
+    }
+
     /// `spec` is a .pmtiles path or URL, an XYZ template containing {z}/{x}/{y}, or a TileJSON URL.
     pub async fn open(spec: &str) -> Result<Self> {
         Self::open_inner(spec).await.map_err(crate::mapbox::redact)

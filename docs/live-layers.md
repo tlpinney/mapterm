@@ -174,7 +174,12 @@ it was taken (an arrow the way it looks, ◎ for a 360° panorama).
 
 It needs your own Mapillary client token: sign up, register an application at
 mapillary.com/dashboard/developers (read access is enough), and pass
-`--mapillary-key-cmd 'pass mapillary/token'` or set `MAPILLARY_TOKEN`. Photos are kept in
+`--mapillary-key-cmd 'pass mapillary/token'` or set `MAPILLARY_TOKEN`.
+
+Green dots and lines show where there are photos (each photo from zoom 16). It's
+"street view" in `L`: start it there while running (the token still comes from
+`--mapillary-key-cmd` or `MAPILLARY_TOKEN`), and turn it off and on; while it's off,
+clicks don't look for photos. Photos are kept in
 `~/.cache/mapterm/mapillary` for a week; Mapillary's links to them expire and aren't kept.
 
 ## Satellites
