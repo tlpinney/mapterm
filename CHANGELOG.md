@@ -8,6 +8,11 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Virginia in `--closures` with your own VDOT SmarterRoads token (`--vdot-key-cmd` or
+  `VDOT_SMARTERROADS_TOKEN`): VDOT's WZDx work zones and its road closures (VaTraffic
+  events: type, location, direction, jurisdiction, lanes, times, the 511 text). The token goes only
+  to that feed, URL-encoded, and is taken out of any error message.
+
 - Road closures as image tiles where the terminal shows images: smooth lines as wide as a
   road (wider for closed roads), the selected one highlighted; braille elsewhere. The shared
   area renderer (`mapterm::areas::Shape::lines`) now draws open lines too, and

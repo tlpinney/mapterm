@@ -149,6 +149,12 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 radio receivers (no key): ▲ climbing, ▼ falling, colored by altitude, with
                 their flight as a trail; click or Tab for readings, frequency and the
                 predicted landing
+  --vdot-key-cmd CMD
+                print your VDOT SmarterRoads token with a command (else
+                VDOT_SMARTERROADS_TOKEN): --closures adds Virginia's work zones. Free
+                registration at smarterroads.vdot.virginia.gov; subscribe to the WZDx
+                dataset, and its Details page shows your token. Your own: VDOT's
+                agreement doesn't allow sharing it
   --ais-key-cmd CMD
                 print the aisstream.io API key with a command (else AISSTREAM_API_KEY)
   --adsb-key-cmd CMD
@@ -270,6 +276,8 @@ struct Args {
     utc: bool,
     /// --ais-key-cmd: prints the aisstream.io API key.
     ais_key_cmd: Option<String>,
+    /// --vdot-key-cmd: prints the VDOT SmarterRoads token.
+    vdot_key_cmd: Option<String>,
     /// --adsb-key-cmd: prints the adsb.lol API key.
     adsb_key_cmd: Option<String>,
     /// --adsb-radius: the largest circle asked for, nautical miles.
@@ -332,6 +340,7 @@ fn args() -> Result<Args> {
         sats_country: Vec::new(),
         sats_color: SatColor::Orbit,
         ais_key_cmd: None,
+        vdot_key_cmd: None,
         at_here: false,
         location_cmd: None,
         raster_headers: Vec::new(),
@@ -482,6 +491,7 @@ fn args() -> Result<Args> {
             }
             "--proxy" => mapterm::proxy::set(&it.next().context("--proxy URL (socks5h://127.0.0.1:1080)")?)?,
             "--ais-key-cmd" => a.ais_key_cmd = Some(it.next().context("--ais-key-cmd CMD")?),
+            "--vdot-key-cmd" => a.vdot_key_cmd = Some(it.next().context("--vdot-key-cmd CMD")?),
             "--adsb-key-cmd" => a.adsb_key_cmd = Some(it.next().context("--adsb-key-cmd CMD")?),
             "--adsb-radius" => {
                 let nm: f64 = it.next().context("--adsb-radius NM")?.parse().context("--adsb-radius NM")?;
@@ -3474,10 +3484,15 @@ async fn main() -> Result<()> {
     let mut closure_errors: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let (cltx, mut clrx) = mpsc::unbounded_channel::<(usize, std::result::Result<Vec<mapterm::closures::Closure>, String>)>();
     if a.closures {
+        // Your own SmarterRoads token, for Virginia's work zones; only ever sent to VDOT's feed.
+        let vdot_token = mapterm::raster::find_key(a.vdot_key_cmd.as_deref(), &["VDOT_SMARTERROADS_TOKEN"])?;
         tokio::spawn(async move {
             loop {
                 for (i, feed) in mapterm::closures::FEEDS.iter().enumerate() {
-                    let r = mapterm::closures::fetch(feed).await.map_err(|e| format!("{e:#}"));
+                    if feed.vdot && vdot_token.is_none() {
+                        continue;
+                    }
+                    let r = mapterm::closures::fetch(feed, vdot_token.as_deref()).await.map_err(|e| format!("{e:#}"));
                     if cltx.send((i, r)).is_err() {
                         return;
                     }
