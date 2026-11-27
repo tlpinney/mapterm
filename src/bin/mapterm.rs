@@ -238,7 +238,9 @@ pickers, in the middle of the map, fzf-style (typing filters, matched letters li
       first; up/down or ctrl-n/p choose; esc closes):
   b   the base map, one of the map styles or imagery (satellite and aerial photos; keyed
       providers once their key is set): space picks it, enter picks it and closes
-  L   what's over it, each on or off (enter or space): the live layers running, imagery
+  L   what's over it, each on or off (enter or space): the live layers (○ not started yet:
+      enter starts it, as its option would at launch: aircraft from adsb.lol, balloons,
+      alerts, quakes, fires, river levels, TFRs, closures, traffic), imagery
       overlays (hillshade, Esri roads and places, NASA's daily picture), data layers,
       labels, the vector map over imagery, legends
   D   the data sources (live feeds and data files): how many features, when each last
@@ -1034,6 +1036,8 @@ const FIRE_TILES: &str = "fire-tiles";
 const BALLOON_TRAIL_IMAGE: u32 = 4_000_000_004;
 /// --sondes draws balloons this many seconds in the past (they report about once a second).
 const SONDE_DELAY: f64 = 5.0;
+/// The weather balloons' credit.
+const SONDE_CREDIT: &str = "SondeHub (CC BY-SA 2.0)";
 /// Seconds of trail behind each balloon: the flight so far.
 const SONDE_TRAIL: f64 = 4.0 * 3600.0;
 const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
@@ -1703,7 +1707,7 @@ fn draw_switcher(
     labels: bool,
     vector: u8,
     overlays: &[(bool, bool)],
-    live_on: &dyn Fn(usize) -> bool,
+    live_state: &dyn Fn(usize) -> (&'static str, Option<&'static str>),
     data_on: &dyn Fn(usize) -> bool,
     legends: bool,
     source: &dyn Fn(mapterm::basemaps::Row) -> Option<(String, String)>,
@@ -1778,7 +1782,8 @@ fn draw_switcher(
             Row::Legends => (if legends { "☑" } else { "☐" }, "legends".to_string(), "keys to the colors".to_string()),
             Row::Live(i) => {
                 let l = &mapterm::basemaps::LIVE[*i];
-                (if live_on(*i) { "☑" } else { "☐" }, l.label.to_string(), l.detail.to_string())
+                let (mark, note) = live_state(*i);
+                (mark, l.label.to_string(), note.unwrap_or(l.detail).to_string())
             }
         };
         // A data source: its status on the line, and where it's from under it.
@@ -3086,6 +3091,275 @@ fn base_visibility(map: &Map) -> std::collections::HashMap<String, bool> {
     map.layer_ids().into_iter().filter_map(|id| map.layer(id).map(|l| (id.to_string(), l.visible))).collect()
 }
 
+/// The live layers that can be started while the viewer runs (from the `L` picker), by
+/// their mapterm::basemaps::LIVE key, and the option that starts them at launch.
+const STARTABLE: &[(&str, &str)] = &[
+    ("aircraft", "--adsb"),
+    ("balloons", "--sondes"),
+    ("alerts", "--alerts"),
+    ("quakes", "--quakes"),
+    ("fires", "--fires"),
+    ("gauges", "--floods"),
+    ("tfrs", "--tfrs"),
+    ("closures", "--closures"),
+    ("traffic", "--traffic"),
+];
+
+/// Where a layer started later goes: under the first layer drawing from one of `sources`
+/// (what's drawn over it), else under the markers.
+fn under(map: &Map, sources: &[&str]) -> Option<String> {
+    map.layer_ids()
+        .into_iter()
+        .find(|id| *id == OVERLAYS || sources.contains(id) || map.layer(id).and_then(|l| l.source.as_deref()).is_some_and(|s| sources.contains(&s)))
+        .map(str::to_string)
+}
+
+/// What moves (and is drawn over everything else live).
+const MOVING: &[&str] = &[SHIPS, BALLOONS, TRAILS, AIRCRAFT, SATS];
+/// What's drawn over the area layers (outages, restrictions, fire areas, alerts).
+const OVER_AREAS: &[&str] = &[CLOSURES, CLOSURE_TILES, ROUTE, ROUTE_TILES, TRAFFIC, GAUGES, FIRES, QUAKES, SHIPS, BALLOONS, TRAILS, AIRCRAFT, SATS];
+
+/// An empty GeoJSON source.
+fn empty_source() -> Result<MapSource> {
+    MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))
+}
+
+/// A layer of areas (`id`, credited `credit`) and, where the terminal shows images, its tiles
+/// (`tiles`: their id and source, and the braille layers they stand in for, kept hidden for
+/// clicking), all under `before` (None: on top).
+fn add_areas(map: &mut Map, id: &str, credit: &str, layers: Vec<StyleLayer>, tiles: Option<(&str, MapSource, &[&str])>, before: Option<&str>) -> Result<()> {
+    map.add_source(id, empty_source()?)?;
+    map.set_attribution(id, credit)?;
+    map.add_layers(layers, before)?;
+    if let Some((tid, src, hide)) = tiles {
+        map.add_source(tid, src)?;
+        map.add_layers(vec![StyleLayer::raster(tid, tid)], before)?;
+        for h in hide {
+            map.set_visibility(h, false)?;
+        }
+    }
+    Ok(())
+}
+
+/// A layer of points (`id`, credited `credit`) under `before` (None: on top).
+fn add_points(map: &mut Map, id: &str, credit: &str, layer: StyleLayer, before: Option<&str>) -> Result<()> {
+    map.add_source(id, empty_source()?)?;
+    map.set_attribution(id, credit)?;
+    map.add_layers(vec![layer], before)
+}
+
+/// The road closures' layers: the lines under `lines_before` and, where the terminal shows
+/// images, their tiles under `tiles_before` (the braille lines stay, hidden, for clicking).
+fn add_closures(map: &mut Map, tiles: &Arc<mapterm::areas::AreaTiles>, tiles_before: Option<&str>, lines_before: Option<&str>) -> Result<()> {
+    map.add_source(CLOSURES, empty_source()?)?;
+    map.set_attribution(CLOSURES, mapterm::closures::CREDIT)?;
+    if mapterm::kitty::supported() {
+        map.add_source(CLOSURE_TILES, MapSource::raster(mapterm::areas::tile_source_to(tiles.clone(), "closures", mapterm::closures::CREDIT, 18)?))?;
+        map.add_layers(vec![StyleLayer::raster(CLOSURE_TILES, CLOSURE_TILES)], tiles_before)?;
+    }
+    map.add_layers(mapterm::closures::layers(CLOSURES)?, lines_before)?;
+    if mapterm::kitty::supported() {
+        map.set_visibility(&format!("{CLOSURES}-line"), false)?;
+    }
+    Ok(())
+}
+
+/// The aircraft and their trails, from `feed`, under `before` (None: on top).
+fn add_aircraft(map: &mut Map, feed: &mapterm::adsb::Feed, before: Option<&str>) -> Result<()> {
+    map.add_source(AIRCRAFT, empty_source()?)?;
+    map.add_source(TRAILS, empty_source()?)?;
+    map.set_attribution(AIRCRAFT, &feed.attribution)?;
+    map.add_layers(vec![mapterm::adsb::trail_layer(TRAILS, TRAILS), mapterm::adsb::layer(AIRCRAFT, AIRCRAFT)], before)
+}
+
+/// --alerts: the active alerts every 5 minutes (with their ETag), and the zone outlines they
+/// need, one a second (cached ones at once).
+fn spawn_alerts(
+    natx: mpsc::UnboundedSender<Result<Vec<mapterm::nws::Alert>>>,
+    mut nzreq_rx: mpsc::UnboundedReceiver<Vec<String>>,
+    nztx: mpsc::UnboundedSender<(String, serde_json::Value)>,
+) {
+    tokio::spawn(async move {
+        let mut etag: Option<String> = None;
+        loop {
+            let r = mapterm::nws::active(etag.as_deref()).await;
+            let wait = if r.is_ok() { 300 } else { 600 };
+            let send = match r {
+                Ok(Some((list, tag))) => {
+                    etag = tag;
+                    Some(Ok(list))
+                }
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            };
+            if let Some(m) = send
+                && natx.send(m).is_err()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+        }
+    });
+    tokio::spawn(async move {
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        loop {
+            // Take the latest wanted list; cached outlines go straight back.
+            while let Ok(list) = nzreq_rx.try_recv() {
+                queue = list.into();
+            }
+            while let Some(z) = queue.front().cloned() {
+                match mapterm::nws::cached_zone(&z) {
+                    Some(g) => {
+                        queue.pop_front();
+                        if nztx.send((z, g)).is_err() {
+                            return;
+                        }
+                    }
+                    None => break,
+                }
+            }
+            match queue.pop_front() {
+                Some(z) => {
+                    let g = mapterm::nws::zone_outline(&z).await.unwrap_or(serde_json::Value::Null);
+                    if nztx.send((z, g)).is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                None => match nzreq_rx.recv().await {
+                    Some(list) => queue = list.into(),
+                    None => return,
+                },
+            }
+        }
+    });
+}
+
+/// --closures: every feed every 5 minutes (Virginia's with your SmarterRoads token).
+fn spawn_closures(cltx: mpsc::UnboundedSender<(usize, std::result::Result<Vec<mapterm::closures::Closure>, String>)>, vdot_token: Option<String>) {
+    tokio::spawn(async move {
+        loop {
+            for (i, feed) in mapterm::closures::FEEDS.iter().enumerate() {
+                if feed.vdot && vdot_token.is_none() {
+                    continue;
+                }
+                let r = mapterm::closures::fetch(feed, vdot_token.as_deref()).await.map_err(|e| format!("{e:#}"));
+                if cltx.send((i, r)).is_err() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(300)).await;
+        }
+    });
+}
+
+/// --tfrs: the standing airspace once, the TFRs every 5 minutes.
+fn spawn_tfrs(ttx: mpsc::UnboundedSender<TfrMsg>) {
+    let tx = ttx.clone();
+    tokio::spawn(async move {
+        let m = match mapterm::tfrs::standing().await {
+            Ok(s) => TfrMsg::Standing(s),
+            Err(e) => TfrMsg::Error(format!("{e:#}")),
+        };
+        let _ = tx.send(m);
+    });
+    let tx = ttx.clone();
+    tokio::spawn(async move {
+        loop {
+            let (m, wait) = match mapterm::tfrs::tfrs().await {
+                Ok(t) => (TfrMsg::Live(t), 300),
+                Err(e) => (TfrMsg::Error(format!("{e:#}")), 600),
+            };
+            if tx.send(m).is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+        }
+    });
+}
+
+/// --fires: incidents and perimeters every 5 minutes (each with its ETag).
+fn spawn_fires(ftx: mpsc::UnboundedSender<FireMsg>) {
+    tokio::spawn(async move {
+        let (mut inc_tag, mut per_tag) = (None::<String>, None::<String>);
+        loop {
+            let mut failed = false;
+            let m = match mapterm::fires::incidents(inc_tag.as_deref()).await {
+                Ok(Some((f, t))) => {
+                    inc_tag = t;
+                    Some(FireMsg::Incidents(f))
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    failed = true;
+                    Some(FireMsg::Error(format!("{e:#}")))
+                }
+            };
+            if let Some(m) = m
+                && ftx.send(m).is_err()
+            {
+                return;
+            }
+            let m = match mapterm::fires::perimeters(per_tag.as_deref()).await {
+                Ok(Some((p, t))) => {
+                    per_tag = t;
+                    Some(FireMsg::Perimeters(p))
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    failed = true;
+                    Some(FireMsg::Error(format!("{e:#}")))
+                }
+            };
+            if let Some(m) = m
+                && ftx.send(m).is_err()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(if failed { 600 } else { 300 })).await;
+        }
+    });
+}
+
+/// --quakes: the USGS feed for `period` once a minute (with If-Modified-Since).
+fn spawn_quakes(qtx: mpsc::UnboundedSender<Result<Vec<mapterm::quakes::Quake>>>, period: mapterm::quakes::Period) {
+    tokio::spawn(async move {
+        let mut since: Option<String> = None;
+        loop {
+            let r = mapterm::quakes::fetch(period, since.as_deref()).await;
+            let wait = if r.is_ok() { 60 } else { 300 };
+            let send = match r {
+                Ok(Some((q, modified))) => {
+                    since = modified;
+                    Some(Ok(q))
+                }
+                Ok(None) => None,
+                Err(e) => Some(Err(e)),
+            };
+            if let Some(m) = send
+                && qtx.send(m).is_err()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+        }
+    });
+}
+
+/// --traffic: CHART's speed sensors each minute.
+fn spawn_traffic(traffictx: mpsc::UnboundedSender<Result<Vec<mapterm::traffic::Sensor>>>) {
+    tokio::spawn(async move {
+        loop {
+            let r = mapterm::traffic::sensors().await;
+            let wait = if r.is_ok() { mapterm::traffic::REFRESH } else { 300 };
+            if traffictx.send(r).is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+        }
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut a = args()?;
@@ -3387,47 +3661,41 @@ async fn main() -> Result<()> {
     }
     // Flight restrictions (--tfrs): over the outages and fires, under the alerts.
     let tfr_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
+    let add_tfrs = |map: &mut Map, before: Option<&str>| -> Result<()> {
+        let tiles = match mapterm::kitty::supported() {
+            true => Some((TFR_TILES, MapSource::raster(mapterm::areas::tile_source(tfr_tiles.clone(), "tfrs", mapterm::tfrs::CREDIT)?), &TFR_LAYERS[..])),
+            false => None,
+        };
+        add_areas(map, TFRS, mapterm::tfrs::CREDIT, mapterm::tfrs::layers(TFRS)?, tiles, before)
+    };
     if a.tfrs {
-        map.add_source(TFRS, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
-        map.set_attribution(TFRS, mapterm::tfrs::CREDIT)?;
-        map.add_layers(mapterm::tfrs::layers(TFRS)?, None)?;
-        if mapterm::kitty::supported() {
-            map.add_source(TFR_TILES, MapSource::raster(mapterm::areas::tile_source(tfr_tiles.clone(), "tfrs", mapterm::tfrs::CREDIT)?))?;
-            map.add_layer(mapterm::StyleLayer::raster(TFR_TILES, TFR_TILES))?;
-            for id in TFR_LAYERS {
-                map.set_visibility(id, false)?;
-            }
-        }
+        add_tfrs(&mut map, None)?;
     }
     // Wildfire perimeters (--fires): over the outages, under the alerts.
     let fire_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
+    let add_fire_areas = |map: &mut Map, before: Option<&str>| -> Result<()> {
+        let tiles = match mapterm::kitty::supported() {
+            true => Some((FIRE_TILES, MapSource::raster(mapterm::areas::tile_source(fire_tiles.clone(), "fires", mapterm::fires::CREDIT)?), &FIRE_LAYERS[..])),
+            false => None,
+        };
+        add_areas(map, FIRE_AREAS, mapterm::fires::CREDIT, mapterm::fires::perimeter_layers(FIRE_AREAS)?, tiles, before)
+    };
     if a.fires {
-        map.add_source(FIRE_AREAS, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
-        map.set_attribution(FIRE_AREAS, mapterm::fires::CREDIT)?;
-        map.add_layers(mapterm::fires::perimeter_layers(FIRE_AREAS)?, None)?;
-        if mapterm::kitty::supported() {
-            map.add_source(FIRE_TILES, MapSource::raster(mapterm::areas::tile_source(fire_tiles.clone(), "fires", mapterm::fires::CREDIT)?))?;
-            map.add_layer(mapterm::StyleLayer::raster(FIRE_TILES, FIRE_TILES))?;
-            for id in FIRE_LAYERS {
-                map.set_visibility(id, false)?;
-            }
-        }
+        add_fire_areas(&mut map, None)?;
     }
     // Weather alerts (--alerts): under everything that moves.
     let alert_tiles = std::sync::Arc::new(mapterm::nws::AlertTiles::default());
+    // Where the terminal shows images, the areas are tiles drawn here, moved like imagery;
+    // the braille layers stay for clicking (the lookup covers hidden layers).
+    let add_alerts = |map: &mut Map, before: Option<&str>| -> Result<()> {
+        let tiles = match mapterm::kitty::supported() {
+            true => Some((ALERT_TILES, MapSource::raster(mapterm::nws::tile_source(alert_tiles.clone())?), &ALERT_LAYERS[..])),
+            false => None,
+        };
+        add_areas(map, ALERTS, mapterm::nws::CREDIT, mapterm::nws::layers(ALERTS)?, tiles, before)
+    };
     if a.alerts {
-        map.add_source(ALERTS, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
-        map.set_attribution(ALERTS, mapterm::nws::CREDIT)?;
-        map.add_layers(mapterm::nws::layers(ALERTS)?, None)?;
-        // Where the terminal shows images, the areas are tiles drawn here, moved like imagery;
-        // the braille layers stay for clicking (the lookup covers hidden layers).
-        if mapterm::kitty::supported() {
-            map.add_source(ALERT_TILES, MapSource::raster(mapterm::nws::tile_source(alert_tiles.clone())?))?;
-            map.add_layer(mapterm::StyleLayer::raster(ALERT_TILES, ALERT_TILES))?;
-            for id in ALERT_LAYERS {
-                map.set_visibility(id, false)?;
-            }
-        }
+        add_alerts(&mut map, None)?;
     }
     // Live aircraft (--adsb): a GeoJSON source the loop refills, over your layers.
     let mut adsb_feed = a.adsb.as_deref().map(mapterm::adsb::Feed::named).transpose()?;
@@ -3437,14 +3705,10 @@ async fn main() -> Result<()> {
     }
     // How often to ask (slowed further by the feed's quota), and how far in the past to draw:
     // a poll interval and a second, so frames fall between two real fixes.
-    let adsb_every = adsb_feed.as_ref().map_or(Duration::from_secs(10), mapterm::adsb::Feed::every);
-    let adsb_delay = adsb_every.as_secs_f64() + 1.0;
+    let mut adsb_every = adsb_feed.as_ref().map_or(Duration::from_secs(10), mapterm::adsb::Feed::every);
+    let mut adsb_delay = adsb_every.as_secs_f64() + 1.0;
     if let Some(feed) = &adsb_feed {
-        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
-        map.add_source(AIRCRAFT, MapSource::geojson(&empty)?)?;
-        map.add_source(TRAILS, MapSource::geojson(&empty)?)?;
-        map.set_attribution(AIRCRAFT, &feed.attribution)?;
-        map.add_layers(vec![mapterm::adsb::trail_layer(TRAILS, TRAILS), mapterm::adsb::layer(AIRCRAFT, AIRCRAFT)], None)?;
+        add_aircraft(&mut map, feed, None)?;
     }
     // Live ships (--ais), under the aircraft.
     let ais_key = if a.ais {
@@ -3462,19 +3726,13 @@ async fn main() -> Result<()> {
     }
     // Live weather balloons (--sondes), between the ships and the aircraft.
     if a.sondes {
-        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
-        map.add_source(BALLOONS, MapSource::geojson(&empty)?)?;
-        map.set_attribution(BALLOONS, "SondeHub (CC BY-SA 2.0)")?;
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS || *id == AIRCRAFT).map(str::to_string);
-        map.add_layers(vec![mapterm::sondehub::layer(BALLOONS, BALLOONS)], above.as_deref())?;
+        add_points(&mut map, BALLOONS, SONDE_CREDIT, mapterm::sondehub::layer(BALLOONS, BALLOONS), above.as_deref())?;
     }
     // Earthquakes (--quakes): under everything that moves.
     if a.quakes.is_some() {
-        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
-        map.add_source(QUAKES, MapSource::geojson(&empty)?)?;
-        map.set_attribution(QUAKES, mapterm::quakes::CREDIT)?;
         let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
-        map.add_layers(vec![mapterm::quakes::layer(QUAKES, QUAKES)], above.as_deref())?;
+        add_points(&mut map, QUAKES, mapterm::quakes::CREDIT, mapterm::quakes::layer(QUAKES, QUAKES), above.as_deref())?;
     }
     // Traffic speeds (--traffic): over the closures and the route, under what moves.
     let add_traffic = |map: &mut Map| -> Result<()> {
@@ -3487,24 +3745,11 @@ async fn main() -> Result<()> {
     };
     // Road closures (--closures): under the live layers.
     let closure_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
+    // Where the terminal shows images, the lines are tiles drawn here, smooth and as wide as a
+    // road; the braille lines stay for clicking (the lookup covers hidden layers).
     if a.closures {
-        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
-        map.add_source(CLOSURES, MapSource::geojson(&empty)?)?;
-        map.set_attribution(CLOSURES, mapterm::closures::CREDIT)?;
-        // Where the terminal shows images, the lines are tiles drawn here, smooth and as wide
-        // as a road; the braille lines stay for clicking (the lookup covers hidden layers).
-        if mapterm::kitty::supported() {
-            map.add_source(
-                CLOSURE_TILES,
-                MapSource::raster(mapterm::areas::tile_source_to(closure_tiles.clone(), "closures", mapterm::closures::CREDIT, 18)?),
-            )?;
-            map.add_layer(mapterm::StyleLayer::raster(CLOSURE_TILES, CLOSURE_TILES))?;
-        }
         let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
-        map.add_layers(mapterm::closures::layers(CLOSURES)?, above.as_deref())?;
-        if mapterm::kitty::supported() {
-            map.set_visibility(&format!("{CLOSURES}-line"), false)?;
-        }
+        add_closures(&mut map, &closure_tiles, None, above.as_deref())?;
     }
     // A route (--route, or d after a search): over the closures, under the live layers.
     let route_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
@@ -3528,19 +3773,13 @@ async fn main() -> Result<()> {
     }
     // River gauges (--floods), with the quakes.
     if a.floods {
-        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
-        map.add_source(GAUGES, MapSource::geojson(&empty)?)?;
-        map.set_attribution(GAUGES, mapterm::floods::CREDIT)?;
         let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
-        map.add_layers(vec![mapterm::floods::layer(GAUGES, GAUGES)], above.as_deref())?;
+        add_points(&mut map, GAUGES, mapterm::floods::CREDIT, mapterm::floods::layer(GAUGES, GAUGES), above.as_deref())?;
     }
     // Wildfire incidents (--fires), with the quakes.
     if a.fires {
-        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
-        map.add_source(FIRES, MapSource::geojson(&empty)?)?;
-        map.set_attribution(FIRES, mapterm::fires::CREDIT)?;
         let above = map.layer_ids().into_iter().find(|id| [TRAILS, AIRCRAFT, SHIPS, BALLOONS].contains(id)).map(str::to_string);
-        map.add_layers(vec![mapterm::fires::layer(FIRES, FIRES)], above.as_deref())?;
+        add_points(&mut map, FIRES, mapterm::fires::CREDIT, mapterm::fires::layer(FIRES, FIRES), above.as_deref())?;
     }
     // Satellites (--sats), over everything else that moves.
     if a.sats.is_some() {
@@ -3725,7 +3964,7 @@ async fn main() -> Result<()> {
     // inline. It asks the terminal, so it runs in raw mode, before the input thread starts.
     // --adsb trails as an image under the text where the terminal shows images: braille lines
     // re-snap to their dot grid as they grow, which shimmers.
-    let trails_kitty = (adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.sondes) && mapterm::kitty::supported();
+    let mut trails_kitty = (adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.sondes) && mapterm::kitty::supported();
     if trails_kitty {
         let _ = map.set_visibility(TRAILS, false);
     }
@@ -3844,16 +4083,7 @@ async fn main() -> Result<()> {
     let mut route_traffic: Vec<Option<mapterm::traffic::Estimate>> = Vec::new();
     let (traffictx, mut trafficrx) = mpsc::unbounded_channel::<Result<Vec<mapterm::traffic::Sensor>>>();
     if a.traffic {
-        tokio::spawn(async move {
-            loop {
-                let r = mapterm::traffic::sensors().await;
-                let wait = if r.is_ok() { mapterm::traffic::REFRESH } else { 300 };
-                if traffictx.send(r).is_err() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-            }
-        });
+        spawn_traffic(traffictx.clone());
     }
     // Search results from the map's own data, waiting for the geocoder's.
     let mut search_local: Vec<mapterm::geocode::Place> = Vec::new();
@@ -4138,63 +4368,13 @@ async fn main() -> Result<()> {
 
     let mut selected_alert: Option<String> = None;
     let (natx, mut narx) = mpsc::unbounded_channel::<Result<Vec<mapterm::nws::Alert>>>();
-    let (nzreq, mut nzreq_rx) = mpsc::unbounded_channel::<Vec<String>>();
+    let (nzreq, nzreq_rx) = mpsc::unbounded_channel::<Vec<String>>();
     let (nztx, mut nzrx) = mpsc::unbounded_channel::<(String, serde_json::Value)>();
-    if a.alerts {
-        tokio::spawn(async move {
-            let mut etag: Option<String> = None;
-            loop {
-                let r = mapterm::nws::active(etag.as_deref()).await;
-                let wait = if r.is_ok() { 300 } else { 600 };
-                let send = match r {
-                    Ok(Some((list, tag))) => {
-                        etag = tag;
-                        Some(Ok(list))
-                    }
-                    Ok(None) => None,
-                    Err(e) => Some(Err(e)),
-                };
-                if let Some(m) = send
-                    && natx.send(m).is_err()
-                {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-            }
-        });
-        tokio::spawn(async move {
-            let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-            loop {
-                // Take the latest wanted list; cached outlines go straight back.
-                while let Ok(list) = nzreq_rx.try_recv() {
-                    queue = list.into();
-                }
-                while let Some(z) = queue.front().cloned() {
-                    match mapterm::nws::cached_zone(&z) {
-                        Some(g) => {
-                            queue.pop_front();
-                            if nztx.send((z, g)).is_err() {
-                                return;
-                            }
-                        }
-                        None => break,
-                    }
-                }
-                match queue.pop_front() {
-                    Some(z) => {
-                        let g = mapterm::nws::zone_outline(&z).await.unwrap_or(serde_json::Value::Null);
-                        if nztx.send((z, g)).is_err() {
-                            return;
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    None => match nzreq_rx.recv().await {
-                        Some(list) => queue = list.into(),
-                        None => return,
-                    },
-                }
-            }
-        });
+    let mut nzreq_rx = Some(nzreq_rx);
+    if a.alerts
+        && let Some(rx) = nzreq_rx.take()
+    {
+        spawn_alerts(natx.clone(), rx, nztx.clone());
     }
     let mut sats_drawn = Instant::now();
     let mut selected_sat: Option<u64> = None;
@@ -4240,9 +4420,7 @@ async fn main() -> Result<()> {
     let (sonde_sel_tx, sonde_sel_rx) = tokio::sync::watch::channel::<Option<String>>(None);
     let (btx, mut brx) = mpsc::unbounded_channel::<mapterm::sondehub::Event>();
     if a.sondes {
-        tokio::spawn(mapterm::sondehub::stream(sonde_area_rx, sonde_sel_rx, btx));
-    } else {
-        drop((sonde_area_rx, sonde_sel_rx, btx));
+        tokio::spawn(mapterm::sondehub::stream(sonde_area_rx.clone(), sonde_sel_rx.clone(), btx.clone()));
     }
     let mut sonde_area: Option<(Instant, mapterm::sondehub::Area)> = None;
     let mut sonde_state = String::new();
@@ -4262,21 +4440,7 @@ async fn main() -> Result<()> {
     let (cltx, mut clrx) = mpsc::unbounded_channel::<(usize, std::result::Result<Vec<mapterm::closures::Closure>, String>)>();
     if a.closures {
         // Your own SmarterRoads token, for Virginia's work zones; only ever sent to VDOT's feed.
-        let vdot_token = mapterm::raster::find_key(a.vdot_key_cmd.as_deref(), &["VDOT_SMARTERROADS_TOKEN"])?;
-        tokio::spawn(async move {
-            loop {
-                for (i, feed) in mapterm::closures::FEEDS.iter().enumerate() {
-                    if feed.vdot && vdot_token.is_none() {
-                        continue;
-                    }
-                    let r = mapterm::closures::fetch(feed, vdot_token.as_deref()).await.map_err(|e| format!("{e:#}"));
-                    if cltx.send((i, r)).is_err() {
-                        return;
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(300)).await;
-            }
-        });
+        spawn_closures(cltx.clone(), mapterm::raster::find_key(a.vdot_key_cmd.as_deref(), &["VDOT_SMARTERROADS_TOKEN"])?);
     }
     // --floods: the gauges around the view (asked for when the view leaves the area, or every
     // 10 minutes), and the selected one's details.
@@ -4298,27 +4462,7 @@ async fn main() -> Result<()> {
     let mut tfr_notams: std::collections::HashMap<String, Option<mapterm::tfrs::Notam>> = std::collections::HashMap::new();
     let (ttx, mut trx) = mpsc::unbounded_channel::<TfrMsg>();
     if a.tfrs {
-        let tx = ttx.clone();
-        tokio::spawn(async move {
-            let m = match mapterm::tfrs::standing().await {
-                Ok(s) => TfrMsg::Standing(s),
-                Err(e) => TfrMsg::Error(format!("{e:#}")),
-            };
-            let _ = tx.send(m);
-        });
-        let tx = ttx.clone();
-        tokio::spawn(async move {
-            loop {
-                let (m, wait) = match mapterm::tfrs::tfrs().await {
-                    Ok(t) => (TfrMsg::Live(t), 300),
-                    Err(e) => (TfrMsg::Error(format!("{e:#}")), 600),
-                };
-                if tx.send(m).is_err() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-            }
-        });
+        spawn_tfrs(ttx.clone());
     }
     // --fires: incidents and perimeters every 5 minutes (each with its ETag).
     let mut fires: Vec<mapterm::fires::Fire> = Vec::new();
@@ -4328,72 +4472,14 @@ async fn main() -> Result<()> {
     let mut fires_shown_selected: Option<String> = None;
     let (ftx, mut frx) = mpsc::unbounded_channel::<FireMsg>();
     if a.fires {
-        tokio::spawn(async move {
-            let (mut inc_tag, mut per_tag) = (None::<String>, None::<String>);
-            loop {
-                let mut failed = false;
-                let m = match mapterm::fires::incidents(inc_tag.as_deref()).await {
-                    Ok(Some((f, t))) => {
-                        inc_tag = t;
-                        Some(FireMsg::Incidents(f))
-                    }
-                    Ok(None) => None,
-                    Err(e) => {
-                        failed = true;
-                        Some(FireMsg::Error(format!("{e:#}")))
-                    }
-                };
-                if let Some(m) = m
-                    && ftx.send(m).is_err()
-                {
-                    return;
-                }
-                let m = match mapterm::fires::perimeters(per_tag.as_deref()).await {
-                    Ok(Some((p, t))) => {
-                        per_tag = t;
-                        Some(FireMsg::Perimeters(p))
-                    }
-                    Ok(None) => None,
-                    Err(e) => {
-                        failed = true;
-                        Some(FireMsg::Error(format!("{e:#}")))
-                    }
-                };
-                if let Some(m) = m
-                    && ftx.send(m).is_err()
-                {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(if failed { 600 } else { 300 })).await;
-            }
-        });
+        spawn_fires(ftx.clone());
     }
     let mut quakes_new = false;
     let mut quakes_drawn = Instant::now();
     let mut quakes_shown_selected: Option<String> = None;
     let (qtx, mut qrx) = mpsc::unbounded_channel::<Result<Vec<mapterm::quakes::Quake>>>();
     if let Some(period) = a.quakes {
-        tokio::spawn(async move {
-            let mut since: Option<String> = None;
-            loop {
-                let r = mapterm::quakes::fetch(period, since.as_deref()).await;
-                let wait = if r.is_ok() { 60 } else { 300 };
-                let send = match r {
-                    Ok(Some((q, modified))) => {
-                        since = modified;
-                        Some(Ok(q))
-                    }
-                    Ok(None) => None,
-                    Err(e) => Some(Err(e)),
-                };
-                if let Some(m) = send
-                    && qtx.send(m).is_err()
-                {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-            }
-        });
+        spawn_quakes(qtx.clone(), period);
     }
     // `g`: the location helper runs on a blocking task; its answer flies the map there.
     let (ltx, mut lrx) = mpsc::unbounded_channel::<Result<mapterm::locate::Fix>>();
@@ -4402,7 +4488,7 @@ async fn main() -> Result<()> {
     let mut credit_seen: Option<((i32, i64, i64), Instant)> = None;
     let mut credit_pending = false;
     // The live layers running: each can be turned off and on.
-    let live_running: Vec<usize> = mapterm::basemaps::LIVE
+    let mut live_running: Vec<usize> = mapterm::basemaps::LIVE
         .iter()
         .enumerate()
         .filter(|(_, l)| match l.key {
@@ -5029,6 +5115,19 @@ async fn main() -> Result<()> {
                             let key = mapterm::basemaps::LIVE[i].key;
                             if key == "radar" { radar_on } else { !live_off.contains_key(key) }
                         };
+                        // Not started (enter starts it), waiting for its first data, on, off.
+                        let live_state = |i: usize| -> (&'static str, Option<&'static str>) {
+                            let key = mapterm::basemaps::LIVE[i].key;
+                            if !live_running.contains(&i) {
+                                ("○", Some("not started · enter starts it"))
+                            } else if !live_on(i) {
+                                ("☐", None)
+                            } else if status.get(key).is_none_or(|s| s.updated.is_none()) && !matches!(key, "satellites" | "gauges") {
+                                ("◌", Some("starting…"))
+                            } else {
+                                ("☑", None)
+                            }
+                        };
                         let data_on = |i: usize| legend.get(i).is_none_or(|(id, _)| !data_off.contains_key(id));
                         let now = unix_now();
                         let source = |row: mapterm::basemaps::Row| -> Option<(String, String)> {
@@ -5065,7 +5164,7 @@ async fn main() -> Result<()> {
                                 _ => None,
                             }
                         };
-                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, &live_on, &data_on, show_legend, &source)
+                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, &live_state, &data_on, show_legend, &source)
                     }
                     None => (Rect::default(), Vec::new()),
                 };
@@ -5810,6 +5909,101 @@ async fn main() -> Result<()> {
                     }
                     Row::Labels => labels = !labels,
                     Row::Vector => vector = (vector + 1) % 3,
+                    // A live layer not running: start it, as its option would have at launch.
+                    Row::Live(i) if !live_running.contains(&i) => {
+                        let key = mapterm::basemaps::LIVE[i].key;
+                        let started = (|| -> Result<()> {
+                            match key {
+                                "aircraft" => {
+                                    let mut feed = mapterm::adsb::Feed::named("lol")?;
+                                    feed.key = mapterm::raster::find_key(a.adsb_key_cmd.as_deref(), &["ADSB_LOL_KEY"])?;
+                                    adsb_every = feed.every();
+                                    adsb_delay = adsb_every.as_secs_f64() + 1.0;
+                                    let before = under(&map, &[SATS]);
+                                    add_aircraft(&mut map, &feed, before.as_deref())?;
+                                    if mapterm::kitty::supported() {
+                                        trails_kitty = true;
+                                        let _ = map.set_visibility(TRAILS, false);
+                                    }
+                                    adsb_feed = Some(feed);
+                                }
+                                "balloons" => {
+                                    a.sondes = true;
+                                    let before = under(&map, &[TRAILS, AIRCRAFT, SATS]);
+                                    add_points(&mut map, BALLOONS, SONDE_CREDIT, mapterm::sondehub::layer(BALLOONS, BALLOONS), before.as_deref())?;
+                                    tokio::spawn(mapterm::sondehub::stream(sonde_area_rx.clone(), sonde_sel_rx.clone(), btx.clone()));
+                                    trails_kitty |= mapterm::kitty::supported();
+                                }
+                                "alerts" => {
+                                    a.alerts = true;
+                                    let before = under(&map, OVER_AREAS);
+                                    add_alerts(&mut map, before.as_deref())?;
+                                    if let Some(rx) = nzreq_rx.take() {
+                                        spawn_alerts(natx.clone(), rx, nztx.clone());
+                                    }
+                                }
+                                "quakes" => {
+                                    let period = mapterm::quakes::Period::default();
+                                    a.quakes = Some(period);
+                                    let before = under(&map, MOVING);
+                                    add_points(&mut map, QUAKES, mapterm::quakes::CREDIT, mapterm::quakes::layer(QUAKES, QUAKES), before.as_deref())?;
+                                    spawn_quakes(qtx.clone(), period);
+                                }
+                                "fires" => {
+                                    a.fires = true;
+                                    let below = under(&map, OVER_AREAS);
+                                    add_fire_areas(&mut map, below.as_deref())?;
+                                    let before = under(&map, MOVING);
+                                    add_points(&mut map, FIRES, mapterm::fires::CREDIT, mapterm::fires::layer(FIRES, FIRES), before.as_deref())?;
+                                    spawn_fires(ftx.clone());
+                                }
+                                "gauges" => {
+                                    a.floods = true;
+                                    let before = under(&map, MOVING);
+                                    add_points(&mut map, GAUGES, mapterm::floods::CREDIT, mapterm::floods::layer(GAUGES, GAUGES), before.as_deref())?;
+                                }
+                                "tfrs" => {
+                                    a.tfrs = true;
+                                    let before = under(&map, OVER_AREAS);
+                                    add_tfrs(&mut map, before.as_deref())?;
+                                    spawn_tfrs(ttx.clone());
+                                }
+                                "closures" => {
+                                    let token = mapterm::raster::find_key(a.vdot_key_cmd.as_deref(), &["VDOT_SMARTERROADS_TOKEN"])?;
+                                    a.closures = true;
+                                    let before = under(&map, MOVING);
+                                    add_closures(&mut map, &closure_tiles, before.as_deref(), before.as_deref())?;
+                                    spawn_closures(cltx.clone(), token);
+                                }
+                                "traffic" => {
+                                    a.traffic = true;
+                                    add_traffic(&mut map)?;
+                                    spawn_traffic(traffictx.clone());
+                                }
+                                _ => bail!("{key} can't be started yet: start mapterm with it"),
+                            }
+                            Ok(())
+                        })();
+                        match started {
+                            Ok(()) => {
+                                live_running.push(i);
+                                // Sessions saved from here start it too.
+                                if let Some((_, flag)) = STARTABLE.iter().find(|(k, _)| *k == key)
+                                    && !a.kept.iter().any(|x| x == flag)
+                                {
+                                    a.kept.push(flag.to_string());
+                                }
+                                // Area tiles and trails show as images where the terminal can.
+                                if !kitty && mapterm::kitty::supported() {
+                                    kitty = true;
+                                    map.raster_mode = RasterMode::Kitty { cell_px: cpx };
+                                    kstate.shm = shm;
+                                }
+                                note = Some((Instant::now(), format!("started {}", mapterm::basemaps::LIVE[i].label)));
+                            }
+                            Err(e) => note = Some((Instant::now(), format!("{}: {e:#}", mapterm::basemaps::LIVE[i].label))),
+                        }
+                    }
                     Row::Live(i) if mapterm::basemaps::LIVE[i].key == "radar" => {
                         if let Some(r) = radar.as_mut() {
                             let off = !r.is_off();
@@ -6819,7 +7013,11 @@ async fn main() -> Result<()> {
                                     KeyCode::Char('L') => {
                                         finder = None;
                                         let data: Vec<String> = legend.iter().map(|(id, _)| id.clone()).collect();
-                                        switcher = Some(mapterm::basemaps::Switcher::layers(&live_running, data));
+                                        // The live layers running, and those that can be started.
+                                        let listed: Vec<usize> = (0..mapterm::basemaps::LIVE.len())
+                                            .filter(|i| live_running.contains(i) || STARTABLE.iter().any(|(k, _)| *k == mapterm::basemaps::LIVE[*i].key))
+                                            .collect();
+                                        switcher = Some(mapterm::basemaps::Switcher::layers(&listed, data));
                                     }
                                     KeyCode::Char('p') if !sats.is_empty() || !aircraft.is_empty() || !fleet.is_empty() => {
                                         finder = Some(Finder { query: String::new(), sel: 0, hits: find("", &sats, &sats_hidden, &sat_filter, &aircraft, &fleet) });
