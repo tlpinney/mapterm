@@ -109,10 +109,24 @@ status line.
   altitude, climb or fall rate, drift, temperature, humidity, battery, the frequency it
   transmits on (to hear it yourself), the station that heard it, and SondeHub's landing
   prediction: the predicted path and a ✕ where it should land, with the time.
+- The receiving stations that hear them show as ⌂, green while hearing a balloon, and a
+  selected balloon has lines to the stations hearing it now, listed in its panel by
+  signal; click one there to fly to it. Operators report where their radio is, often their
+  home, so mapterm shows, measures from and keeps each station only as an area (the middle
+  of a ~5 km grid cell, drawn from zoom 9), like a phone's approximate location. Stations
+  are kept on disk for 30 days, so they show before any balloon is heard.
 - SondeHub asks clients not to poll its API, so mapterm asks it once for the balloons
   around the view (again only when the view moves far away, at most once a minute) and
   then follows each one's live MQTT topic over a WebSocket, plus the slow feed of newly
   heard balloons, kept when they're near. It never takes the global feed.
+
+mapterm is for the balloons around where you're looking. For the whole picture (every
+balloon worldwide, recovered sondes, chase cars) use the
+[SondeHub Tracker](https://sondehub.org); amateur balloons (APRS, Horus, WSPR and others)
+are on the [SondeHub Amateur tracker](https://amateur.sondehub.org). If you head out to
+recover one, read SondeHub's
+[Radiosonde Hunting Etiquette](https://github.com/projecthorus/sondehub-tracker/wiki/Radiosonde-Hunting-Etiquette)
+first.
 
 ## Satellites
 
