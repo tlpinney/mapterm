@@ -231,7 +231,7 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
 keys (MapLibre conventions): wheel zooms at cursor · drag pans (with inertia) ·
       double-click zooms in, shift+double-click out · shift+drag box zoom · arrows/hjkl pan ·
       +/- zoom · sideways swipe pans · / search · i inspect · b base map · L layers ·
-      S sessions · m/M next or previous base map · ' the one before · t theme · c copy
+      D data sources · S sessions · m/M next or previous base map · ' the one before · t theme · c copy
       coordinates · v vector overlay · n labels · q quit
 
 pickers, in the middle of the map, fzf-style (typing filters, matched letters lit, best
@@ -241,6 +241,9 @@ pickers, in the middle of the map, fzf-style (typing filters, matched letters li
   L   what's over it, each on or off (enter or space): the live layers running, imagery
       overlays (hillshade, Esri roads and places, NASA's daily picture), data layers,
       labels, the vector map over imagery, legends
+  D   the data sources (live feeds and data files): how many features, when each last
+      updated and how often, errors, how it relates to time (events, tracks drawn a little
+      behind, frames...), where it's from and its credit
   S   sessions saved and recent runs, with when each was made and opened: enter opens one;
       the first row saves this view under what's typed
       Imagery goes under the style's roads and names (v: all, names only, none).
@@ -1240,6 +1243,7 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
             vec![
                 ("b", "base map: one style or imagery"),
                 ("L", "layers: live, imagery overlays, data, legends"),
+                ("D", "data sources: updated when, errors, time"),
                 ("m M", "next or previous base map"),
                 ("'", "back to the base map before"),
                 ("t", "light or dark"),
@@ -1644,6 +1648,7 @@ fn draw_switcher(
     live_on: &dyn Fn(usize) -> bool,
     data_on: &dyn Fn(usize) -> bool,
     legends: bool,
+    source: &dyn Fn(mapterm::basemaps::Row) -> Option<(String, String)>,
 ) -> (Rect, Vec<(u16, mapterm::basemaps::Row)>) {
     use mapterm::basemaps::{Picker, Row};
     use ratatui::style::Modifier;
@@ -1653,7 +1658,7 @@ fn draw_switcher(
     // Lines: section headings (while nothing is typed) and rows.
     let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
     // Sessions say more (what, when made, when opened): wider.
-    let width = if sw.kind == Picker::Sessions { 84u16 } else { 58 }.min(area.width.saturating_sub(4));
+    let width = if matches!(sw.kind, Picker::Sessions | Picker::Sources) { 84u16 } else { 58 }.min(area.width.saturating_sub(4));
     let w = width.saturating_sub(4) as usize;
     let mut section = "";
     for (n, row) in sw.rows.iter().enumerate() {
@@ -1718,6 +1723,11 @@ fn draw_switcher(
                 (if live_on(*i) { "☑" } else { "☐" }, l.label.to_string(), l.detail.to_string())
             }
         };
+        // A data source: its status on the line, and where it's from under it.
+        let (detail, origin) = match (sw.kind, source(*row)) {
+            (Picker::Sources, Some((status, origin))) => (status, Some(origin)),
+            _ => (detail, None),
+        };
         let chosen = n == sw.sel;
         let st = if chosen { TStyle::new().add_modifier(Modifier::REVERSED) } else { TStyle::new() };
         let dst = if chosen { st } else { dim };
@@ -1735,6 +1745,11 @@ fn draw_switcher(
         let pad = " ".repeat(w.saturating_sub(left + detail.chars().count()));
         spans.push(Span::styled(format!("{pad}{detail} "), dst));
         lines.push((Some(n), Line::from(spans)));
+        if let Some(o) = origin {
+            let room = w.saturating_sub(5);
+            let o: String = if o.chars().count() > room { format!("{}…", o.chars().take(room.saturating_sub(1)).collect::<String>()) } else { o };
+            lines.push((None, Line::styled(format!("     {o}"), dim)));
+        }
     }
     if sw.rows.is_empty() {
         lines.push((None, Line::styled(" nothing matches", dim)));
@@ -1755,6 +1770,7 @@ fn draw_switcher(
                     Picker::Base => " ↑↓ choose · space pick · enter pick and close · esc close ",
                     Picker::Layers => " ↑↓ choose · enter or space on/off · esc close ",
                     Picker::Sessions => " ↑↓ choose · enter open or save · esc close ",
+                    Picker::Sources => " ↑↓ choose · enter or space on/off · esc close ",
                 },
                 dim,
             )
@@ -3795,6 +3811,8 @@ async fn main() -> Result<()> {
     // command line to start again with (one that needs other layers), and S's name prompt.
     let mut restart_with: Option<mapterm::sessions::Session> = None;
     let mut naming: Option<String> = None;
+    // How each data source is doing (by live layer key): updated when, errors, how often.
+    let mut status: std::collections::HashMap<&'static str, mapterm::sources::Status> = std::collections::HashMap::new();
     // Data layers (--geojson and the like) turned off in L: their style layers, to put back.
     let mut data_off: std::collections::HashMap<String, (Vec<StyleLayer>, Option<String>)> = std::collections::HashMap::new();
     // When this run started (a run in the history is created then).
@@ -4949,7 +4967,39 @@ async fn main() -> Result<()> {
                             if key == "radar" { radar_on } else { !live_off.contains_key(key) }
                         };
                         let data_on = |i: usize| legend.get(i).is_none_or(|(id, _)| !data_off.contains_key(id));
-                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, &live_on, &data_on, show_legend)
+                        let now = unix_now();
+                        let source = |row: mapterm::basemaps::Row| -> Option<(String, String)> {
+                            use mapterm::basemaps::Row;
+                            match row {
+                                Row::Live(i) => {
+                                    let key = mapterm::basemaps::LIVE[i].key;
+                                    let d = mapterm::sources::live_desc(key)?;
+                                    let st = status.get(key).cloned().unwrap_or_default();
+                                    let n = st.features.map(|n| format!("{} · ", thousands(n))).unwrap_or_default();
+                                    let off = if live_on(i) { "" } else { "off · " };
+                                    // Tracks are drawn a little in the past, to move smoothly between reports.
+                                    let latency = match key {
+                                        "aircraft" => Some(adsb_delay),
+                                        "ships" => Some(AIS_DELAY),
+                                        "balloons" => Some(SONDE_DELAY),
+                                        _ => None,
+                                    };
+                                    let behind = latency.map(|l| format!(" · drawn {} behind", mapterm::sources::span(l))).unwrap_or_default();
+                                    Some((
+                                        format!("{off}{n}{}", st.describe(now)),
+                                        format!("{} {} · {}{behind} · {}", d.time.mark(), d.time.label(), d.origin, d.credit),
+                                    ))
+                                }
+                                Row::Data(i) => {
+                                    let (id, _) = legend.get(i)?;
+                                    let off = if data_on(i) { "" } else { "off · " };
+                                    let credit = map.source(id).and_then(MapSource::attribution).unwrap_or("");
+                                    Some((format!("{off}loaded at start"), format!("· timeless · data file (--geojson) {credit}")))
+                                }
+                                _ => None,
+                            }
+                        };
+                        draw_switcher(f, map_area, sw, &bases, base_at, loading, labels, vector, &ov, &live_on, &data_on, show_legend, &source)
                     }
                     None => (Rect::default(), Vec::new()),
                 };
@@ -5865,6 +5915,7 @@ async fn main() -> Result<()> {
                 Some(r) = narx.recv() => {
                     match r {
                         Ok(list) => {
+                            status.entry("alerts").or_default().ok(unix_now(), Some(list.len()));
                             dlog(|| format!("alerts: {} active", list.len()));
                             alerts = list;
                             let _ = nzreq.send(mapterm::nws::zones_needed(&alerts, &alert_zones));
@@ -5874,6 +5925,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         Err(e) => {
+                            status.entry("alerts").or_default().fail(unix_now(), format!("{e:#}"));
                             dlog(|| format!("alerts: {e:#}"));
                             note = Some((Instant::now(), format!("alerts: {e:#}")));
                         }
@@ -5882,12 +5934,14 @@ async fn main() -> Result<()> {
                 Some(m) = garx.recv() => {
                     match m {
                         GaugeMsg::Gauges(Ok(g)) => {
+                            status.entry("gauges").or_default().ok(unix_now(), Some(g.len()));
                             dlog(|| format!("floods: {} gauges", g.len()));
                             gauges = g;
                             gauges_new = true;
                             gauges_asking = false;
                         }
                         GaugeMsg::Gauges(Err(e)) => {
+                            status.entry("gauges").or_default().fail(unix_now(), e.to_string());
                             dlog(|| format!("floods: {e}"));
                             note = Some((Instant::now(), format!("gauges: {e}")));
                             gauges_asking = false;
@@ -5905,11 +5959,13 @@ async fn main() -> Result<()> {
                 Some(r) = trafficrx.recv() => {
                     match r {
                         Ok(s) => {
+                            status.entry("traffic").or_default().ok(unix_now(), Some(s.len()));
                             dlog(|| format!("traffic: {} sensors", s.len()));
                             sensors = s;
                             sensors_new = true;
                         }
                         Err(e) => {
+                            status.entry("traffic").or_default().fail(unix_now(), format!("{e:#}"));
                             dlog(|| format!("traffic: {e:#}"));
                             note = Some((Instant::now(), format!("traffic: {e:#}")));
                         }
@@ -5958,10 +6014,12 @@ async fn main() -> Result<()> {
                             dlog(|| format!("closures: {}: {}", feed.id, c.len()));
                             closures.insert(i, c);
                             closure_errors.remove(&i);
+                            status.entry("closures").or_default().ok(unix_now(), Some(closures.values().map(Vec::len).sum()));
                             closures_new = true;
                         }
                         Err(e) => {
                             dlog(|| format!("closures: {}: {e}", feed.id));
+                            status.entry("closures").or_default().fail(unix_now(), format!("{}: {e}", feed.source));
                             // Once per feed until it works again, not every 5 minutes.
                             if closure_errors.insert(i) {
                                 note = Some((Instant::now(), format!("closures: {}: {e}", feed.source)));
@@ -5975,6 +6033,7 @@ async fn main() -> Result<()> {
                             dlog(|| format!("tfrs: {}", t.len()));
                             tfr_live = t;
                             tfrs_new = true;
+                            status.entry("tfrs").or_default().ok(unix_now(), Some(tfr_live.len() + tfr_standing.len()));
                         }
                         TfrMsg::Standing(s) => {
                             dlog(|| format!("tfrs: {} standing", s.len()));
@@ -5989,6 +6048,7 @@ async fn main() -> Result<()> {
                             note = Some((Instant::now(), format!("NOTAM {n}: {e}")));
                         }
                         TfrMsg::Error(e) => {
+                            status.entry("tfrs").or_default().fail(unix_now(), e.to_string());
                             dlog(|| format!("tfrs: {e}"));
                             note = Some((Instant::now(), format!("flight restrictions: {e}")));
                         }
@@ -5999,6 +6059,7 @@ async fn main() -> Result<()> {
                         FireMsg::Incidents(f) => {
                             dlog(|| format!("fires: {} incidents", f.len()));
                             fires = f;
+                            status.entry("fires").or_default().ok(unix_now(), Some(fires.len()));
                             if selected_fire.as_ref().is_some_and(|id| !fires.iter().any(|f| &f.id == id)) {
                                 selected_fire = None;
                             }
@@ -6008,6 +6069,7 @@ async fn main() -> Result<()> {
                             fire_perimeters = p;
                         }
                         FireMsg::Error(e) => {
+                            status.entry("fires").or_default().fail(unix_now(), e.to_string());
                             dlog(|| format!("fires: {e}"));
                             note = Some((Instant::now(), format!("fires: {e}")));
                         }
@@ -6017,6 +6079,7 @@ async fn main() -> Result<()> {
                 Some(r) = qrx.recv() => {
                     match r {
                         Ok(q) => {
+                            status.entry("quakes").or_default().ok(unix_now(), Some(q.len()));
                             dlog(|| format!("quakes: {}", q.len()));
                             quakes = q;
                             quakes_new = true;
@@ -6025,6 +6088,7 @@ async fn main() -> Result<()> {
                             }
                         }
                         Err(e) => {
+                            status.entry("quakes").or_default().fail(unix_now(), format!("{e:#}"));
                             dlog(|| format!("quakes: {e:#}"));
                             note = Some((Instant::now(), format!("quakes: {e:#}")));
                         }
@@ -6034,6 +6098,7 @@ async fn main() -> Result<()> {
                     match m {
                         OutageMsg::Outlines(f, level, o) => outages.set_outlines(f, level, o),
                         OutageMsg::Counts(f, level, v) => {
+                            status.entry("outages").or_default().ok(unix_now(), None);
                             dlog(|| format!("outages: {} {:?}: {} areas, {} out", mapterm::outages::FEEDS[f].state, level, v.len(), v.iter().map(|c| c.out).sum::<u64>()));
                             outages.set_counts(f, level, v);
                         }
@@ -6043,6 +6108,7 @@ async fn main() -> Result<()> {
                         }
                         OutageMsg::OdinOutlines(o) => outages.add_odin_outlines(o),
                         OutageMsg::Error(e) => {
+                            status.entry("outages").or_default().fail(unix_now(), e.to_string());
                             dlog(|| format!("outages: {e}"));
                             note = Some((Instant::now(), format!("outages: {e}")));
                         }
@@ -6063,6 +6129,7 @@ async fn main() -> Result<()> {
                                 .iter()
                                 .filter_map(|s| Some((s.time as f64, mapterm::rainviewer::frame_source(s).ok()?)))
                                 .collect();
+                            status.entry("radar").or_default().ok(unix_now(), Some(frames.len()));
                             dlog(|| format!("radar: {} scans, the latest {}", frames.len(), scans.past.last().map_or(0, |s| s.time)));
                             if let Some(r) = radar.as_mut() {
                                 // Under the alert areas, where they're tiles.
@@ -6070,8 +6137,9 @@ async fn main() -> Result<()> {
                                 r.set_frames(&mut map, frames, mapterm::rainviewer::SCAN_SECS, before)?;
                             }
                         }
-                        Ok(_) => {}
+                        Ok(_) => status.entry("radar").or_default().heard(unix_now(), None),
                         Err(e) => {
+                            status.entry("radar").or_default().fail(unix_now(), format!("{e:#}"));
                             dlog(|| format!("radar: {e:#}"));
                             note = Some((Instant::now(), format!("radar: {e:#}")));
                         }
@@ -6110,6 +6178,7 @@ async fn main() -> Result<()> {
                         note = Some((Instant::now(), notes.join("; ")));
                     }
                     if !loaded.is_empty() {
+                        status.entry("satellites").or_default().ok(unix_now(), Some(loaded.len()));
                         let known: std::collections::HashMap<u64, mapterm::satellites::Mission> =
                             sats.iter().chain(sats_hidden.iter()).filter_map(|s| s.group_mission.map(|m| (s.norad, m))).collect();
                         sats = loaded;
@@ -6131,8 +6200,12 @@ async fn main() -> Result<()> {
                             for t in list {
                                 balloons.apply(t, now);
                             }
+                            status.entry("balloons").or_default().heard(now, Some(balloons.len()));
                         }
-                        mapterm::sondehub::Event::Update(t) => balloons.apply(t, unix_now()),
+                        mapterm::sondehub::Event::Update(t) => {
+                            balloons.apply(t, unix_now());
+                            status.entry("balloons").or_default().heard(unix_now(), Some(balloons.len()));
+                        }
                         mapterm::sondehub::Event::Prediction(p) => balloons.set_prediction(p),
                         mapterm::sondehub::Event::Following(n) => {
                             dlog(|| format!("sondes: following {n}"));
@@ -6141,13 +6214,17 @@ async fn main() -> Result<()> {
                         mapterm::sondehub::Event::Retrying(e, wait) => {
                             dlog(|| format!("sondes: {e}; again in {} s", wait.as_secs()));
                             sonde_state = format!(" · reconnecting in {} s", wait.as_secs());
+                            status.entry("balloons").or_default().fail(unix_now(), e.to_string());
                             note = Some((Instant::now(), format!("SondeHub: {e}")));
                         }
                     }
                 }
                 Some(ev) = srx_ais.recv() => {
                     match ev {
-                        mapterm::ais::Event::Update(u) => fleet.apply(u, unix_now()),
+                        mapterm::ais::Event::Update(u) => {
+                            fleet.apply(u, unix_now());
+                            status.entry("ships").or_default().heard(unix_now(), Some(fleet.len()));
+                        }
                         mapterm::ais::Event::Connected(b) => {
                             ais_state.clear();
                             fleet.prune(unix_now(), Some(b));
@@ -6156,11 +6233,13 @@ async fn main() -> Result<()> {
                         mapterm::ais::Event::Retrying(e, wait) => {
                             dlog(|| format!("ais: {e}; again in {} s", wait.as_secs()));
                             ais_state = format!(" · reconnecting in {} s", wait.as_secs());
+                            status.entry("ships").or_default().fail(unix_now(), e.to_string());
                             note = Some((Instant::now(), format!("aisstream.io: {e}")));
                         }
                         mapterm::ais::Event::Stopped(e) => {
                             dlog(|| format!("ais: stopped: {e}"));
                             ais_state = " · stopped".into();
+                            status.entry("ships").or_default().fail(unix_now(), e.clone());
                             note = Some((Instant::now(), e));
                         }
                     }
@@ -6171,6 +6250,7 @@ async fn main() -> Result<()> {
                         Ok(answer) => {
                             aircraft_quota = answer.quota.or(aircraft_quota);
                             aircraft.update(answer.aircraft, unix_now());
+                            status.entry("aircraft").or_default().ok(unix_now(), Some(aircraft.len()));
                             aircraft_failures = 0;
                             aircraft_retry = None;
                             if let Some(h) = selected.as_deref().filter(|h| aircraft.get(h, unix_now()).is_none()) {
@@ -6184,6 +6264,7 @@ async fn main() -> Result<()> {
                             aircraft_failures += 1;
                             let wait = mapterm::adsb::backoff(&e, aircraft_failures);
                             aircraft_retry = Some(Instant::now() + wait);
+                            status.entry("aircraft").or_default().fail(unix_now(), format!("{e:#} (again in {} s)", wait.as_secs()));
                             dlog(|| format!("adsb: {e:#}; next try in {} s", wait.as_secs()));
                             note = Some((Instant::now(), format!("{e:#} · trying again in {} s", wait.as_secs())));
                         }
@@ -6662,6 +6743,12 @@ async fn main() -> Result<()> {
                                         note = Some((Instant::now(), if off { "radar off · R shows it" } else { "radar on" }.into()));
                                     }
                                     KeyCode::Char('?') => show_help = true,
+                                    // D: the data sources, how each is doing.
+                                    KeyCode::Char('D') => {
+                                        finder = None;
+                                        let data: Vec<String> = legend.iter().map(|(id, _)| id.clone()).collect();
+                                        switcher = Some(mapterm::basemaps::Switcher::sources(&live_running, data));
+                                    }
                                     // L: what's over the base map, on and off.
                                     KeyCode::Char('L') => {
                                         finder = None;

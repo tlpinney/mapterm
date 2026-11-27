@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Data sources (`D`): each live feed and data file with how many features it has, when it
+  last updated and how often it does (learned as it runs), its last error, and how it
+  relates to time: events, spans in effect, tracks (drawn a little behind to move
+  smoothly), computed (satellites) or frames (radar); where it's from and its credit.
+  Enter turns one on or off. `mapterm::sources`.
+
 - Pickers in the middle of the map, filtered fzf-style as you type (matched letters lit,
   best first, a count of matches):
   - `b`, the base map: one of the map styles or imagery (satellite and aerial photos; keyed

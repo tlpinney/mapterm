@@ -123,6 +123,7 @@ pub mod shp;
 pub mod smooth;
 pub mod sondehub;
 pub mod source;
+pub mod sources;
 pub mod spec;
 pub mod store;
 pub mod stylejson;
