@@ -22,7 +22,11 @@ pub struct Shape {
     pub line: u8,
     /// Highlighted: a stronger fill and a wide outline under a white one.
     pub selected: bool,
-    /// The rings, in world coordinates (0 to 1, Web Mercator).
+    /// Lines (roads), not areas: not closed, never filled.
+    pub open: bool,
+    /// The line width, pixels.
+    pub width: f32,
+    /// The rings (or lines), in world coordinates (0 to 1, Web Mercator).
     rings: Vec<Vec<(f64, f64)>>,
 }
 
@@ -30,7 +34,12 @@ impl Shape {
     /// An area in color `rgb`, with a faint fill and a solid outline; add its outlines with
     /// [`Shape::add`].
     pub fn new(rgb: (u8, u8, u8), selected: bool) -> Shape {
-        Shape { rgb, fill: 38, line: 230, selected, rings: Vec::new() }
+        Shape { rgb, fill: 38, line: 230, selected, open: false, width: 2.0, rings: Vec::new() }
+    }
+
+    /// Lines in color `rgb` (a road closure), `width` pixels wide; add them with [`Shape::add`].
+    pub fn lines(rgb: (u8, u8, u8), width: f32, selected: bool) -> Shape {
+        Shape { rgb, fill: 0, line: 255, selected, open: true, width, rings: Vec::new() }
     }
 
     /// Add a GeoJSON Polygon or MultiPolygon geometry (lon/lat) to the area; anything else is
@@ -46,6 +55,8 @@ impl Shape {
                     self.rings.extend(p.as_array().into_iter().flatten().map(ring));
                 }
             }
+            Some("LineString") if self.open => self.rings.push(ring(&g["coordinates"])),
+            Some("MultiLineString") if self.open => self.rings.extend(g["coordinates"].as_array().into_iter().flatten().map(ring)),
             _ => {}
         }
     }
@@ -77,7 +88,8 @@ impl AreaTiles {
         let areas = shapes
             .into_iter()
             .filter_map(|mut shape| {
-                shape.rings.retain(|r| r.len() >= 3);
+                let min = if shape.open { 2 } else { 3 };
+                shape.rings.retain(|r| r.len() >= min);
                 let mut b = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
                 for &(x, y) in shape.rings.iter().flatten() {
                     b = (b.0.min(x), b.1.min(y), b.2.max(x), b.3.max(y));
@@ -99,7 +111,7 @@ impl AreaTiles {
         let (x0, y0, x1, y1) = (x as f64 / n - pad, y as f64 / n - pad, (x + 1) as f64 / n + far, (y + 1) as f64 / n + far);
         let areas = self.areas.read().unwrap_or_else(|e| e.into_inner());
         let mut pm: Option<Pixmap> = None;
-        let stroke = Stroke { width: 2.0, line_join: LineJoin::Round, ..Stroke::default() };
+        let stroke = Stroke { width: 2.0, line_join: LineJoin::Round, line_cap: tiny_skia::LineCap::Round, ..Stroke::default() };
         let px = |(wx, wy): (f64, f64)| (((wx * n - x as f64) * size as f64) as f32, ((wy * n - y as f64) * size as f64) as f32);
         for a in areas.iter().filter(|a| a.bounds.0 <= x1 && a.bounds.2 >= x0 && a.bounds.1 <= y1 && a.bounds.3 >= y0) {
             let mut pb = PathBuilder::new();
@@ -110,23 +122,28 @@ impl AreaTiles {
                     let (qx, qy) = px(p);
                     pb.line_to(qx, qy);
                 }
-                pb.close();
+                if !a.shape.open {
+                    pb.close();
+                }
             }
             let Some(path) = pb.finish() else { continue };
             let pm = pm.get_or_insert_with(|| Pixmap::new(size + BLEED, size + BLEED).expect("tile size"));
             let (r, g, b) = a.shape.rgb;
             let mut paint = Paint { anti_alias: true, ..Paint::default() };
+            let stroke = Stroke { width: a.shape.width, ..stroke.clone() };
             if a.shape.selected {
                 // Highlighted: a stronger fill, its color's outline wide under a white one.
-                paint.set_color_rgba8(r, g, b, a.shape.fill.saturating_add(52).max(90));
-                pm.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+                if !a.shape.open {
+                    paint.set_color_rgba8(r, g, b, a.shape.fill.saturating_add(52).max(90));
+                    pm.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+                }
                 paint.set_color_rgba8(r, g, b, 255);
-                pm.stroke_path(&path, &paint, &Stroke { width: 6.0, ..stroke.clone() }, Transform::identity(), None);
+                pm.stroke_path(&path, &paint, &Stroke { width: a.shape.width + 4.0, ..stroke.clone() }, Transform::identity(), None);
                 paint.set_color_rgba8(255, 255, 255, 255);
-                pm.stroke_path(&path, &paint, &Stroke { width: 2.5, ..stroke.clone() }, Transform::identity(), None);
+                pm.stroke_path(&path, &paint, &Stroke { width: (a.shape.width * 0.8).max(1.5), ..stroke.clone() }, Transform::identity(), None);
                 continue;
             }
-            if a.shape.fill > 0 {
+            if a.shape.fill > 0 && !a.shape.open {
                 paint.set_color_rgba8(r, g, b, a.shape.fill);
                 pm.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
             }
@@ -150,8 +167,13 @@ impl crate::raster::TileRender for AreaTiles {
 /// Area tiles as an overlay image source named `name`: 512-pixel tiles, drawn to zoom 14
 /// (enlarged past it), kept in memory, credited `credit`.
 pub fn tile_source(tiles: Arc<AreaTiles>, name: &str, credit: &str) -> Result<Arc<crate::raster::RasterSource>> {
+    tile_source_to(tiles, name, credit, 14)
+}
+
+/// [`tile_source`], drawn to zoom `max_zoom`: higher for lines, which would thicken enlarged.
+pub fn tile_source_to(tiles: Arc<AreaTiles>, name: &str, credit: &str, max_zoom: u8) -> Result<Arc<crate::raster::RasterSource>> {
     // Never fetched (the renderer comes first); .invalid never resolves, should anything try.
-    let mut s = crate::raster::RasterSource::new(&format!("https://{name}.mapterm.invalid/{{z}}/{{x}}/{{y}}.png"), false, 14)?;
+    let mut s = crate::raster::RasterSource::new(&format!("https://{name}.mapterm.invalid/{{z}}/{{x}}/{{y}}.png"), false, max_zoom)?;
     s.tile_px = 512;
     s.overlay = true;
     s.cache = false;
