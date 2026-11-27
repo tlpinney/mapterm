@@ -3103,6 +3103,10 @@ const STARTABLE: &[(&str, &str)] = &[
     ("tfrs", "--tfrs"),
     ("closures", "--closures"),
     ("traffic", "--traffic"),
+    ("radar", "--radar"),
+    ("satellites", "--sats"),
+    ("ships", "--ais"),
+    ("outages", "--outages"),
 ];
 
 /// Where a layer started later goes: under the first layer drawing from one of `sources`
@@ -3356,6 +3360,176 @@ fn spawn_traffic(traffictx: mpsc::UnboundedSender<Result<Vec<mapterm::traffic::S
                 return;
             }
             tokio::time::sleep(Duration::from_secs(wait)).await;
+        }
+    });
+}
+
+/// Satellites' radios by NORAD number, from the SatNOGS DB.
+type Radio = std::collections::HashMap<u64, Vec<mapterm::satnogs::Transmitter>>;
+/// The radios loaded: them, their age in seconds and why some are missing; or what failed.
+type RadioMsg = std::result::Result<(Radio, f64, Option<String>), String>;
+
+/// --sats: the `groups`' satellites and their owners, then what they're for, then their radios;
+/// again every 2 hours.
+fn spawn_sats(
+    groups: Vec<String>,
+    otx: mpsc::UnboundedSender<(Vec<mapterm::satellites::Sat>, f64, Vec<String>)>,
+    mtx: mpsc::UnboundedSender<(std::collections::HashMap<u64, mapterm::satellites::Mission>, Vec<String>)>,
+    rtx: mpsc::UnboundedSender<RadioMsg>,
+) {
+    tokio::spawn(async move {
+        loop {
+            let (mut all, mut oldest, mut notes) = (Vec::new(), 0.0f64, Vec::new());
+            let mut seen = std::collections::HashSet::new();
+            for g in &groups {
+                match mapterm::satellites::load(g).await {
+                    Ok(l) => {
+                        oldest = oldest.max(l.age);
+                        notes.extend(l.note.map(|n| format!("{g}: {n}")));
+                        all.extend(l.sats.into_iter().filter(|s| seen.insert(s.norad)));
+                    }
+                    Err(e) => notes.push(format!("{g}: {e:#}")),
+                }
+            }
+            // Who owns each (the satellite catalog), kept for a day.
+            for g in &groups {
+                match mapterm::satellites::load_catalog(g).await {
+                    Ok(cat) => {
+                        for s in all.iter_mut().filter(|s: &&mut mapterm::satellites::Sat| s.catalog.is_none()) {
+                            s.catalog = cat.get(&s.norad).cloned();
+                        }
+                    }
+                    Err(e) => notes.push(format!("{g} catalog: {e:#}")),
+                }
+            }
+            if otx.send((all, oldest, notes)).is_err() {
+                return;
+            }
+            if mtx.send(mapterm::satellites::load_missions().await).is_err() {
+                return;
+            }
+            if rtx.send(mapterm::satnogs::load().await.map_err(|e| format!("{e:#}"))).is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(2 * 3600 + 60)).await;
+        }
+    });
+}
+
+/// --radar: RainViewer's scan list every 5 minutes (10 after a failure).
+fn spawn_radar(rvtx: mpsc::UnboundedSender<Result<mapterm::rainviewer::Scans>>) {
+    tokio::spawn(async move {
+        loop {
+            let r = mapterm::rainviewer::frames().await;
+            let wait = if r.is_ok() { 300 } else { 600 };
+            if rvtx.send(r).is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+        }
+    });
+}
+
+/// --outages: each state's outlines once and counts every 5 minutes, and ODIN's counties
+/// outside those states.
+fn spawn_outages(outx: mpsc::UnboundedSender<OutageMsg>) {
+    let odin_tx = outx.clone();
+    tokio::spawn(async move {
+        use mapterm::outages::{FEEDS, Level, counts, outlines};
+        let mut tags: std::collections::HashMap<(usize, Level), Option<String>> = std::collections::HashMap::new();
+        let mut have: std::collections::HashSet<(usize, Level)> = std::collections::HashSet::new();
+        loop {
+            let mut failed = false;
+            // Every state's counties first, as they're shown first, then the finer areas.
+            for level in [Level::County, Level::Local] {
+                for (i, feed) in FEEDS.iter().enumerate().filter(|(_, f)| f.layer(level).is_some()) {
+                    if !have.contains(&(i, level)) {
+                        let m = match outlines(feed, level).await {
+                            Ok(o) => {
+                                have.insert((i, level));
+                                OutageMsg::Outlines(i, level, o)
+                            }
+                            Err(e) => {
+                                failed = true;
+                                OutageMsg::Error(format!("{e:#}"))
+                            }
+                        };
+                        if outx.send(m).is_err() {
+                            return;
+                        }
+                    }
+                    let tag = tags.get(&(i, level)).cloned().flatten();
+                    let m = match counts(feed, level, tag.as_deref()).await {
+                        Ok(Some((areas, t))) => {
+                            tags.insert((i, level), t);
+                            Some(OutageMsg::Counts(i, level, areas))
+                        }
+                        Ok(None) => None,
+                        Err(e) => {
+                            failed = true;
+                            Some(OutageMsg::Error(format!("{e:#}")))
+                        }
+                    };
+                    if let Some(m) = m
+                        && outx.send(m).is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(if failed { 900 } else { 300 })).await;
+        }
+    });
+    // ODIN, for the counties outside the states above: the reporting utilities and the
+    // outages every 5 minutes (the outages with their ETag), and outlines for counties
+    // not seen before.
+    let outx = odin_tx;
+    tokio::spawn(async move {
+        let skip: Vec<&str> = mapterm::outages::FEEDS.iter().map(|f| f.fips).collect();
+        let mut outlines = mapterm::odin::cached_outlines();
+        let geoms = |o: &std::collections::HashMap<String, mapterm::odin::Outline>| {
+            o.iter().map(|(k, v)| (format!("odin:{k}"), v.geometry.clone())).collect::<std::collections::HashMap<_, _>>()
+        };
+        if !outlines.is_empty() && outx.send(OutageMsg::OdinOutlines(geoms(&outlines))).is_err() {
+            return;
+        }
+        let (mut etag, mut reports, mut status) = (None::<String>, Vec::new(), std::collections::HashMap::new());
+        loop {
+            let mut errors = Vec::new();
+            match mapterm::odin::status().await {
+                Ok(s) => status = s,
+                Err(e) => errors.push(format!("{e:#}")),
+            }
+            match mapterm::odin::reports(etag.as_deref()).await {
+                Ok(Some((r, t))) => (reports, etag) = (r, t),
+                Ok(None) => {}
+                Err(e) => errors.push(format!("{e:#}")),
+            }
+            let (areas, _) = mapterm::odin::counties(&reports, &status, &outlines, unix_now(), &skip);
+            let missing: Vec<String> =
+                areas.iter().filter_map(|a| a.key.strip_prefix("odin:")).filter(|f| !outlines.contains_key(*f)).map(str::to_string).collect();
+            if !missing.is_empty() {
+                match mapterm::odin::fetch_outlines(&missing, &outlines).await {
+                    Ok(got) => {
+                        if outx.send(OutageMsg::OdinOutlines(geoms(&got))).is_err() {
+                            return;
+                        }
+                        outlines.extend(got);
+                    }
+                    Err(e) => errors.push(format!("{e:#}")),
+                }
+            }
+            // Again, with the names of the counties whose outlines just came.
+            let (areas, stale) = mapterm::odin::counties(&reports, &status, &outlines, unix_now(), &skip);
+            if outx.send(OutageMsg::Odin(areas, stale)).is_err() {
+                return;
+            }
+            for e in errors {
+                if outx.send(OutageMsg::Error(e)).is_err() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(300)).await;
         }
     });
 }
@@ -3647,17 +3821,16 @@ async fn main() -> Result<()> {
     }
     // Power outages (--outages): under the alerts.
     let outage_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
+    let add_outages = |map: &mut Map, before: Option<&str>| -> Result<()> {
+        let credit = mapterm::outages::credit();
+        let tiles = match mapterm::kitty::supported() {
+            true => Some((OUTAGE_TILES, MapSource::raster(mapterm::areas::tile_source(outage_tiles.clone(), "outages", &credit)?), &OUTAGE_LAYERS[..])),
+            false => None,
+        };
+        add_areas(map, OUTAGES, &credit, mapterm::outages::layers(OUTAGES)?, tiles, before)
+    };
     if a.outages {
-        map.add_source(OUTAGES, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
-        map.set_attribution(OUTAGES, &mapterm::outages::credit())?;
-        map.add_layers(mapterm::outages::layers(OUTAGES)?, None)?;
-        if mapterm::kitty::supported() {
-            map.add_source(OUTAGE_TILES, MapSource::raster(mapterm::areas::tile_source(outage_tiles.clone(), "outages", &mapterm::outages::credit())?))?;
-            map.add_layer(mapterm::StyleLayer::raster(OUTAGE_TILES, OUTAGE_TILES))?;
-            for id in OUTAGE_LAYERS {
-                map.set_visibility(id, false)?;
-            }
-        }
+        add_outages(&mut map, None)?;
     }
     // Flight restrictions (--tfrs): over the outages and fires, under the alerts.
     let tfr_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
@@ -3711,18 +3884,15 @@ async fn main() -> Result<()> {
         add_aircraft(&mut map, feed, None)?;
     }
     // Live ships (--ais), under the aircraft.
-    let ais_key = if a.ais {
+    let mut ais_key = if a.ais {
         let key = mapterm::raster::find_key(a.ais_key_cmd.as_deref(), &["AISSTREAM_API_KEY"])?;
         Some(key.context("--ais needs a free aisstream.io API key: sign up at https://aisstream.io, then set AISSTREAM_API_KEY or --ais-key-cmd")?)
     } else {
         None
     };
     if ais_key.is_some() {
-        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
-        map.add_source(SHIPS, MapSource::geojson(&empty)?)?;
-        map.set_attribution(SHIPS, "aisstream.io")?;
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS).map(str::to_string);
-        map.add_layers(vec![mapterm::ais::layer(SHIPS, SHIPS)], above.as_deref())?;
+        add_points(&mut map, SHIPS, "aisstream.io", mapterm::ais::layer(SHIPS, SHIPS), above.as_deref())?;
     }
     // Live weather balloons (--sondes), between the ships and the aircraft.
     if a.sondes {
@@ -3783,10 +3953,7 @@ async fn main() -> Result<()> {
     }
     // Satellites (--sats), over everything else that moves.
     if a.sats.is_some() {
-        let empty = serde_json::json!({"type": "FeatureCollection", "features": []});
-        map.add_source(SATS, MapSource::geojson(&empty)?)?;
-        map.set_attribution(SATS, "CelesTrak")?;
-        map.add_layers(vec![mapterm::satellites::layer(SATS, SATS)], None)?;
+        add_points(&mut map, SATS, "CelesTrak", mapterm::satellites::layer(SATS, SATS), None)?;
     }
     // Highlights, the crosshair and the clicked spot, on top of everything.
     map.add_custom_layer(OVERLAYS, Markers::default(), None)?;
@@ -4158,9 +4325,7 @@ async fn main() -> Result<()> {
     let (area_tx, area_rx) = tokio::sync::watch::channel::<Option<mapterm::ais::BBox>>(None);
     let (stx_ais, mut srx_ais) = mpsc::unbounded_channel::<mapterm::ais::Event>();
     if let Some(key) = ais_key.clone() {
-        tokio::spawn(mapterm::ais::stream(key, area_rx, stx_ais));
-    } else {
-        drop((area_rx, stx_ais));
+        tokio::spawn(mapterm::ais::stream(key, area_rx.clone(), stx_ais.clone()));
     }
     let mut ais_area: Option<(Instant, mapterm::ais::BBox)> = None;
     let mut ais_state = String::new();
@@ -4175,49 +4340,10 @@ async fn main() -> Result<()> {
     // first time a day it's some twenty small requests).
     let (mtx, mut mrx) = mpsc::unbounded_channel::<(std::collections::HashMap<u64, mapterm::satellites::Mission>, Vec<String>)>();
     // Their radios, from the SatNOGS DB, after that.
-    type Radio = std::collections::HashMap<u64, Vec<mapterm::satnogs::Transmitter>>;
-    let (rtx, mut rrx) = mpsc::unbounded_channel::<std::result::Result<(Radio, f64, Option<String>), String>>();
+    let (rtx, mut rrx) = mpsc::unbounded_channel::<RadioMsg>();
     if let Some(groups) = a.sats.clone() {
-        let (otx, mtx, rtx) = (otx.clone(), mtx.clone(), rtx.clone());
-        tokio::spawn(async move {
-            loop {
-                let (mut all, mut oldest, mut notes) = (Vec::new(), 0.0f64, Vec::new());
-                let mut seen = std::collections::HashSet::new();
-                for g in &groups {
-                    match mapterm::satellites::load(g).await {
-                        Ok(l) => {
-                            oldest = oldest.max(l.age);
-                            notes.extend(l.note.map(|n| format!("{g}: {n}")));
-                            all.extend(l.sats.into_iter().filter(|s| seen.insert(s.norad)));
-                        }
-                        Err(e) => notes.push(format!("{g}: {e:#}")),
-                    }
-                }
-                // Who owns each (the satellite catalog), kept for a day.
-                for g in &groups {
-                    match mapterm::satellites::load_catalog(g).await {
-                        Ok(cat) => {
-                            for s in all.iter_mut().filter(|s: &&mut mapterm::satellites::Sat| s.catalog.is_none()) {
-                                s.catalog = cat.get(&s.norad).cloned();
-                            }
-                        }
-                        Err(e) => notes.push(format!("{g} catalog: {e:#}")),
-                    }
-                }
-                if otx.send((all, oldest, notes)).is_err() {
-                    return;
-                }
-                if mtx.send(mapterm::satellites::load_missions().await).is_err() {
-                    return;
-                }
-                if rtx.send(mapterm::satnogs::load().await.map_err(|e| format!("{e:#}"))).is_err() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(2 * 3600 + 60)).await;
-            }
-        });
+        spawn_sats(groups, otx.clone(), mtx.clone(), rtx.clone());
     }
-    drop(otx);
     // --radar: the map's clock, the radar frames that follow it, and RainViewer's scan list
     // (asked for every 5 minutes; a new scan comes every 10). Its tiles stay under 60
     // requests a minute (RainViewer allows 100 per address).
@@ -4228,16 +4354,7 @@ async fn main() -> Result<()> {
     let mut radar_generated = 0i64;
     let (rvtx, mut rvrx) = mpsc::unbounded_channel::<Result<mapterm::rainviewer::Scans>>();
     if a.radar {
-        tokio::spawn(async move {
-            loop {
-                let r = mapterm::rainviewer::frames().await;
-                let wait = if r.is_ok() { 300 } else { 600 };
-                if rvtx.send(r).is_err() {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_secs(wait)).await;
-            }
-        });
+        spawn_radar(rvtx.clone());
     }
     // --outages: each level's outlines once (kept on disk for 30 days), then its counts every
     // 5 minutes (the state updates them every 15) with their ETag; counties first, as
@@ -4250,105 +4367,7 @@ async fn main() -> Result<()> {
     let mut selected_outage: Option<String> = None;
     let (outx, mut outrx) = mpsc::unbounded_channel::<OutageMsg>();
     if a.outages {
-        let odin_tx = outx.clone();
-        tokio::spawn(async move {
-            use mapterm::outages::{FEEDS, Level, counts, outlines};
-            let mut tags: std::collections::HashMap<(usize, Level), Option<String>> = std::collections::HashMap::new();
-            let mut have: std::collections::HashSet<(usize, Level)> = std::collections::HashSet::new();
-            loop {
-                let mut failed = false;
-                // Every state's counties first, as they're shown first, then the finer areas.
-                for level in [Level::County, Level::Local] {
-                    for (i, feed) in FEEDS.iter().enumerate().filter(|(_, f)| f.layer(level).is_some()) {
-                        if !have.contains(&(i, level)) {
-                            let m = match outlines(feed, level).await {
-                                Ok(o) => {
-                                    have.insert((i, level));
-                                    OutageMsg::Outlines(i, level, o)
-                                }
-                                Err(e) => {
-                                    failed = true;
-                                    OutageMsg::Error(format!("{e:#}"))
-                                }
-                            };
-                            if outx.send(m).is_err() {
-                                return;
-                            }
-                        }
-                        let tag = tags.get(&(i, level)).cloned().flatten();
-                        let m = match counts(feed, level, tag.as_deref()).await {
-                            Ok(Some((areas, t))) => {
-                                tags.insert((i, level), t);
-                                Some(OutageMsg::Counts(i, level, areas))
-                            }
-                            Ok(None) => None,
-                            Err(e) => {
-                                failed = true;
-                                Some(OutageMsg::Error(format!("{e:#}")))
-                            }
-                        };
-                        if let Some(m) = m
-                            && outx.send(m).is_err()
-                        {
-                            return;
-                        }
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(if failed { 900 } else { 300 })).await;
-            }
-        });
-        // ODIN, for the counties outside the states above: the reporting utilities and the
-        // outages every 5 minutes (the outages with their ETag), and outlines for counties
-        // not seen before.
-        let outx = odin_tx;
-        tokio::spawn(async move {
-            let skip: Vec<&str> = mapterm::outages::FEEDS.iter().map(|f| f.fips).collect();
-            let mut outlines = mapterm::odin::cached_outlines();
-            let geoms = |o: &std::collections::HashMap<String, mapterm::odin::Outline>| {
-                o.iter().map(|(k, v)| (format!("odin:{k}"), v.geometry.clone())).collect::<std::collections::HashMap<_, _>>()
-            };
-            if !outlines.is_empty() && outx.send(OutageMsg::OdinOutlines(geoms(&outlines))).is_err() {
-                return;
-            }
-            let (mut etag, mut reports, mut status) = (None::<String>, Vec::new(), std::collections::HashMap::new());
-            loop {
-                let mut errors = Vec::new();
-                match mapterm::odin::status().await {
-                    Ok(s) => status = s,
-                    Err(e) => errors.push(format!("{e:#}")),
-                }
-                match mapterm::odin::reports(etag.as_deref()).await {
-                    Ok(Some((r, t))) => (reports, etag) = (r, t),
-                    Ok(None) => {}
-                    Err(e) => errors.push(format!("{e:#}")),
-                }
-                let (areas, _) = mapterm::odin::counties(&reports, &status, &outlines, unix_now(), &skip);
-                let missing: Vec<String> =
-                    areas.iter().filter_map(|a| a.key.strip_prefix("odin:")).filter(|f| !outlines.contains_key(*f)).map(str::to_string).collect();
-                if !missing.is_empty() {
-                    match mapterm::odin::fetch_outlines(&missing, &outlines).await {
-                        Ok(got) => {
-                            if outx.send(OutageMsg::OdinOutlines(geoms(&got))).is_err() {
-                                return;
-                            }
-                            outlines.extend(got);
-                        }
-                        Err(e) => errors.push(format!("{e:#}")),
-                    }
-                }
-                // Again, with the names of the counties whose outlines just came.
-                let (areas, stale) = mapterm::odin::counties(&reports, &status, &outlines, unix_now(), &skip);
-                if outx.send(OutageMsg::Odin(areas, stale)).is_err() {
-                    return;
-                }
-                for e in errors {
-                    if outx.send(OutageMsg::Error(e)).is_err() {
-                        return;
-                    }
-                }
-                tokio::time::sleep(Duration::from_secs(300)).await;
-            }
-        });
+        spawn_outages(outx.clone());
     }
     // --alerts: the NWS list every 5 minutes (with its ETag), and zone outlines one a second
     // (from the disk cache at once), the most severe alerts' first.
@@ -5980,6 +5999,36 @@ async fn main() -> Result<()> {
                                     add_traffic(&mut map)?;
                                     spawn_traffic(traffictx.clone());
                                 }
+                                "radar" => {
+                                    a.radar = true;
+                                    radar = Some(mapterm::timelayer::TimeRaster::new("radar", 0.8));
+                                    spawn_radar(rvtx.clone());
+                                }
+                                "satellites" => {
+                                    let groups = vec!["active".to_string()];
+                                    a.sats = Some(groups.clone());
+                                    let before = under(&map, &[]);
+                                    add_points(&mut map, SATS, "CelesTrak", mapterm::satellites::layer(SATS, SATS), before.as_deref())?;
+                                    spawn_sats(groups, otx.clone(), mtx.clone(), rtx.clone());
+                                    trails_kitty |= mapterm::kitty::supported();
+                                }
+                                "ships" => {
+                                    let key = mapterm::raster::find_key(a.ais_key_cmd.as_deref(), &["AISSTREAM_API_KEY"])?.context(
+                                        "ships need a free aisstream.io API key: sign up at aisstream.io, then set AISSTREAM_API_KEY or start with --ais-key-cmd",
+                                    )?;
+                                    a.ais = true;
+                                    let before = under(&map, &[BALLOONS, TRAILS, AIRCRAFT, SATS]);
+                                    add_points(&mut map, SHIPS, "aisstream.io", mapterm::ais::layer(SHIPS, SHIPS), before.as_deref())?;
+                                    tokio::spawn(mapterm::ais::stream(key.clone(), area_rx.clone(), stx_ais.clone()));
+                                    ais_key = Some(key);
+                                    trails_kitty |= mapterm::kitty::supported();
+                                }
+                                "outages" => {
+                                    a.outages = true;
+                                    let before = under(&map, OVER_AREAS);
+                                    add_outages(&mut map, before.as_deref())?;
+                                    spawn_outages(outx.clone());
+                                }
                                 _ => bail!("{key} can't be started yet: start mapterm with it"),
                             }
                             Ok(())
@@ -6738,7 +6787,9 @@ async fn main() -> Result<()> {
                                             }
                                             switcher_picks.extend(row);
                                         }
-                                        KeyCode::Char(' ') => switcher_picks.extend(sw.row()),
+                                        // Space picks or toggles; once something is typed it's part of
+                                        // the query (as in fzf), so "power out" finds power outages.
+                                        KeyCode::Char(' ') if sw.query.is_empty() => switcher_picks.extend(sw.row()),
                                         KeyCode::Down | KeyCode::Tab => sw.step(true),
                                         KeyCode::Up | KeyCode::BackTab => sw.step(false),
                                         KeyCode::Char(c) if !ctrl => {

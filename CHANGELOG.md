@@ -9,10 +9,11 @@ All notable changes to mapterm are listed here. The format follows
 ### Added
 
 - Live layers start from `L` while the viewer runs: aircraft (adsb.lol), weather balloons,
-  weather alerts, earthquakes, wildfires, river levels, flight restrictions, road closures
-  and traffic speeds are listed even when not started (○), and enter starts one as its
-  option would have at launch, in its usual place among the layers. Sessions saved
-  afterwards start it too.
+  weather alerts, earthquakes, wildfires, river levels, flight restrictions, road closures,
+  and traffic speeds, radar, satellites, ships (with an aisstream.io key) and power
+  outages are listed even when not started (○), and enter starts one as its option would
+  have at launch, in its usual place among the layers. Sessions saved afterwards start it
+  too. In the pickers, space types a space once something is typed (as in fzf).
 
 - Data sources (`D`): each live feed and data file with how many features it has, when it
   last updated and how often it does (learned as it runs), its last error, and how it
