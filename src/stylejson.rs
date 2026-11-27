@@ -97,7 +97,7 @@ pub fn style_layers(doc: &Json) -> Result<(Vec<StyleLayer>, Vec<String>)> {
 }
 
 impl Map {
-    /// A map from a style: `mapterm-dark`, `mapterm-light`, `mapterm-aviation` or `mapterm-weather` (the built-in
+    /// A map from a style: `mapterm-dark`, `mapterm-light`, `mapterm-aviation`, `mapterm-weather` or `mapterm-roads` (the built-in
     /// terminal styles over OpenFreeMap), an OpenFreeMap name ([`OPENFREEMAP_STYLES`]), a URL
     /// or a file.
     pub async fn from_style(spec: &str) -> Result<Map> {
@@ -107,7 +107,8 @@ impl Map {
                 "light" => false,
                 "aviation" => return Map::aviation(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles),
                 "weather" => return Map::weather(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles),
-                _ => bail!("built-in styles are mapterm-dark, mapterm-light, mapterm-aviation and mapterm-weather"),
+                "roads" => return Map::roads(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles),
+                _ => bail!("built-in styles are mapterm-dark, mapterm-light, mapterm-aviation, mapterm-weather and mapterm-roads"),
             };
             return Map::terminal(Source::open(crate::source::OPENFREEMAP).await?, Schema::OpenMapTiles, dark);
         }
@@ -143,6 +144,14 @@ impl Map {
         let mut map = Map::new();
         map.add_source(BASEMAP, MapSource::vector(src))?;
         map.add_style_layers(&weather_style(schema))?;
+        Ok(map)
+    }
+
+    /// A map drawing `src` with the built-in roads style ([`roads_style`]).
+    pub fn roads(src: Source, schema: Schema) -> Result<Map> {
+        let mut map = Map::new();
+        map.add_source(BASEMAP, MapSource::vector(src))?;
+        map.add_style_layers(&roads_style(schema))?;
         Ok(map)
     }
 
@@ -429,6 +438,74 @@ pub fn weather_style(schema: Schema) -> Json {
     json!({"version": 8, "sources": {}, "layers": layers})
 }
 
+/// A style for looking at roads (`mapterm-roads`, the default with `--closures`): every road
+/// drawn and named, in greys and cool whites by class (motorways brightest), over dim land and
+/// water, with county, state and country lines; no reds, oranges or yellows, which are
+/// closures' colors. Protomaps tiles get the built-in dark style.
+pub fn roads_style(schema: Schema) -> Json {
+    use serde_json::json;
+    if schema == Schema::Protomaps {
+        return terminal_style(schema, true);
+    }
+    let poly = json!(["==", ["geometry-type"], "Polygon"]);
+    let lines = json!(["==", ["geometry-type"], "LineString"]);
+    // (class, color, first zoom drawn, first zoom named, label sort key)
+    let roads = [
+        ("path", "#3a3e45", 15, 16, 0),
+        ("minor", "#5c616a", 12, 15, -5),
+        ("tertiary", "#7f8690", 10, 13, -10),
+        ("secondary", "#9ea6b1", 8, 12, -15),
+        ("primary", "#bcc4ce", 6, 10, -20),
+        ("trunk", "#d6dde6", 4, 8, -25),
+        ("motorway", "#f0f4f8", 0, 7, -30),
+    ];
+    let classes = |name: &str| match name {
+        "minor" => json!(["minor", "service", "busway"]),
+        "path" => json!(["path", "track"]),
+        n => json!([n]),
+    };
+    let mut layers = vec![
+        json!({"id": "water", "type": "fill", "source": BASEMAP, "source-layer": "water", "filter": poly.clone(), "paint": {"fill-color": "#141a22"}}),
+        json!({"id": "park", "type": "fill", "source": BASEMAP, "source-layer": "park", "filter": poly.clone(), "paint": {"fill-color": "#161b18"}}),
+        json!({"id": "building", "type": "fill", "source": BASEMAP, "source-layer": "building", "minzoom": 15, "filter": poly.clone(), "paint": {"fill-color": "#24272c"}}),
+        json!({"id": "rail", "type": "line", "source": BASEMAP, "source-layer": "transportation", "minzoom": 12,
+               "filter": ["in", ["get", "class"], ["literal", ["rail", "transit"]]], "paint": {"line-color": "#4a4458"}}),
+        // Counties (admin level 6), then states and countries brighter.
+        json!({"id": "boundary-county", "type": "line", "source": BASEMAP, "source-layer": "boundary", "minzoom": 8,
+               "filter": ["all", ["in", ["get", "admin_level"], ["literal", [5, 6]]], ["!=", ["get", "maritime"], 1]], "paint": {"line-color": "#3f4652"}}),
+        json!({"id": "boundary-state", "type": "line", "source": BASEMAP, "source-layer": "boundary",
+               "filter": ["all", ["in", ["get", "admin_level"], ["literal", [3, 4]]], ["!=", ["get", "maritime"], 1]], "paint": {"line-color": "#6a7280"}}),
+        json!({"id": "boundary-country", "type": "line", "source": BASEMAP, "source-layer": "boundary",
+               "filter": ["all", ["<=", ["get", "admin_level"], 2], ["!=", ["get", "maritime"], 1]], "paint": {"line-color": "#8a919c"}}),
+    ];
+    // Smallest first, so major roads stay on top.
+    for (name, color, min, _, _) in &roads {
+        layers.push(json!({"id": format!("road-{name}"), "type": "line", "source": BASEMAP, "source-layer": "transportation", "minzoom": min,
+                           "filter": ["in", ["get", "class"], ["literal", classes(name)]], "paint": {"line-color": color}}));
+    }
+    // Names along the roads: motorways and trunks bold and by their ref (I 66).
+    for (name, color, _, min_label, sort) in &roads {
+        let class = if *name == "minor" {
+            json!(["!", ["in", ["get", "class"], ["literal", ["motorway", "trunk", "primary", "secondary", "tertiary"]]]])
+        } else {
+            json!(["==", ["get", "class"], name])
+        };
+        layers.push(
+            json!({"id": format!("road-{name}-label"), "type": "symbol", "source": BASEMAP, "source-layer": "transportation_name", "minzoom": min_label,
+                           "filter": ["all", lines.clone(), class],
+                           "layout": {"text-field": road_text(*sort <= -20), "symbol-placement": "line", "symbol-sort-key": sort,
+                                      "text-font": if *sort <= -25 { json!(["literal", ["Bold"]]) } else { json!(["literal", ["Regular"]]) }},
+                           "paint": {"text-color": color}}),
+        );
+    }
+    layers.push(json!({"id": "place", "type": "symbol", "source": BASEMAP, "source-layer": "place",
+        "filter": ["any", ["in", ["get", "class"], ["literal", ["country", "state", "city", "town"]]], ["all", [">=", ["zoom"], 11], ["in", ["get", "class"], ["literal", ["village", "suburb"]]]]],
+        "layout": {"text-field": ["get", "name"],
+                   "symbol-sort-key": ["-", ["coalesce", ["get", "rank"], 10], ["match", ["get", "class"], "country", 95, "state", 80, "city", 70, "town", 55, 40]]},
+        "paint": {"text-color": ["match", ["get", "class"], "city", "#9aa3b0", "town", "#7f8896", "#646c78"]}}));
+    json!({"version": 8, "name": "mapterm roads", "sources": {}, "layers": layers})
+}
+
 /// mapterm's own styles, tuned for terminal cells: few layers, roads drawn smallest first so
 /// major roads stay on top, labels ranked by importance. `dark` picks colors for a dark
 /// terminal background (the background itself is left to the terminal). Pair with a source
@@ -598,6 +675,21 @@ pub fn terminal_style(schema: Schema, dark: bool) -> Json {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_roads_style_has_no_closure_colors() {
+        // Closures are red, orange, amber and yellow: no color in the style leans warm.
+        let style = super::roads_style(super::Schema::OpenMapTiles);
+        let text = style.to_string();
+        let colors: Vec<&str> = text.split('"').filter(|t| t.starts_with('#') && t.len() == 7).collect();
+        assert!(colors.len() > 10);
+        for c in colors {
+            let v = |i: usize| u8::from_str_radix(&c[i..i + 2], 16).unwrap() as i32;
+            let (r, g, b) = (v(1), v(3), v(5));
+            assert!(r <= g + 12 && r <= b + 12, "{c} is warm");
+        }
+        assert!(text.contains("boundary-county") && text.contains("road-minor-label"));
+    }
+
     #[test]
     fn the_weather_style_is_grey() {
         // Radar and alerts are the only color: every color in the style is a grey (no blue

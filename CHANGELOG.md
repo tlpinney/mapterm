@@ -8,6 +8,11 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- `mapterm-roads`, a basemap for looking at roads and the default with `--closures`: every
+  road drawn and named in greys and cool whites by class over dim land and water, with
+  county lines, and no warm colors (those are the closures'). `--style mapterm-roads` and
+  the `m` cycle pick it too.
+
 - Road closures: `--closures` draws closures and work zones from Maryland's road closure
   system (counties and cities: construction, accidents, parades, special events; planned
   ones a week ahead), Montgomery County, Prince William County, Fairfax County, and the
