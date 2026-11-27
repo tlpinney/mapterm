@@ -919,6 +919,14 @@ fn human_bytes(n: u64) -> String {
     }
 }
 
+/// A receiving station's line in the balloon panel: its screen row, where it is, its callsign.
+struct StationRow {
+    row: u16,
+    lon: f64,
+    lat: f64,
+    callsign: String,
+}
+
 /// GeoJSON layers with more single points than this cluster them.
 const CLUSTER_ABOVE: usize = 1000;
 
@@ -2704,7 +2712,7 @@ fn draw_balloon(
     now: f64,
     follow: bool,
     me: Option<&mapterm::locate::Fix>,
-) {
+) -> Vec<StationRow> {
     use ratatui::style::Modifier;
     use ratatui::widgets::{Borders, Wrap};
     let dim = TStyle::new().fg(Color::DarkGray);
@@ -2755,17 +2763,19 @@ fn draw_balloon(
     {
         l.push(Line::from(vec![key("heard by"), Span::raw(u.clone())]));
     }
+    // Each on one line (cut to fit), so a click's row is its station: a click flies there.
+    let mut rows: Vec<(usize, StationRow)> = Vec::new();
     for (i, (s, when, snr)) in heard.iter().take(6).enumerate() {
         let km = mapterm::adsb::distance_nm((at.lon, at.lat), (s.lon, s.lat)) * 1.852;
         let snr = snr.map(|x| format!(" · {x:.0} dB")).unwrap_or_default();
         let now_ = now - when <= mapterm::sondehub::HEARING;
         let st = if now_ { TStyle::new().fg(Color::Rgb(0x7e, 0xe7, 0x87)) } else { TStyle::new() };
         let ago = if now_ { String::new() } else { format!(" · {}", mapterm::sessions::ago(*when, now)) };
-        l.push(Line::from(vec![
-            key(if i == 0 { "heard by" } else { "" }),
-            Span::styled(format!("⌂ {}", s.callsign), st),
-            Span::styled(format!("  {km:.0} km{snr}{ago}"), dim),
-        ]));
+        let name = format!("⌂ {}", s.callsign);
+        let room = (inner.width as usize).saturating_sub(15 + name.chars().count());
+        let rest: String = format!("  {km:.0} km{snr}{ago}").chars().take(room).collect();
+        rows.push((l.len(), StationRow { row: 0, lon: s.lon, lat: s.lat, callsign: s.callsign.clone() }));
+        l.push(Line::from(vec![key(if i == 0 { "heard by" } else { "" }), Span::styled(name, st), Span::styled(rest, dim)]));
     }
     if heard.len() > 6 {
         l.push(Line::from(vec![key(""), Span::styled(format!("and {} more", heard.len() - 6), dim)]));
@@ -2791,7 +2801,23 @@ fn draw_balloon(
     }
     l.push(Line::default());
     l.push(Line::from(Span::styled(format!(" f {} · esc close", if follow { "stop following" } else { "follow" }), dim)));
+    // Where each station's line lands: lines before it wrap by their width.
+    let w = inner.width.max(1) as usize;
+    let mut y = inner.y as usize;
+    let mut at_line = 0;
+    let mut out = Vec::new();
+    for (n, mut r) in rows {
+        while at_line < n {
+            y += l[at_line].width().div_ceil(w).max(1);
+            at_line += 1;
+        }
+        if y < inner.bottom() as usize {
+            r.row = y as u16;
+            out.push(r);
+        }
+    }
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+    out
 }
 
 fn draw_ship(
@@ -3100,7 +3126,8 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
             || id == ROUTE_TILES
             || id == ROUTE
             || id == format!("{ROUTE}-line")
-            || [CLOSURES, GAUGES, FIRES, QUAKES, TRAFFIC].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')));
+            || [CLOSURES, GAUGES, FIRES, QUAKES, TRAFFIC].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')))
+            || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS].contains(&id.as_str());
         if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
         }
@@ -4303,6 +4330,8 @@ async fn main() -> Result<()> {
     // 4 per row), for the crosshair. Exact when the terminal reports pixels.
     let mut hover_dot: Option<(f64, f64)> = None;
     let mut list_rows: Vec<(u16, usize)> = Vec::new();
+    // The balloon panel's station lines (a click flies to the station).
+    let mut station_rows: Vec<StationRow> = Vec::new();
     let mut panel_area = Rect::default();
     let mut last_panel = Rect::default();
     let mut last_switcher = Rect::default();
@@ -4988,6 +5017,7 @@ async fn main() -> Result<()> {
                         room.height = room.height.saturating_sub(r.height);
                     }
                 }
+                station_rows.clear();
                 list_rows = match &search {
                     _ if let Some(fd) = finder.as_ref() => {
                         draw_finder(f, panel, fd);
@@ -5006,7 +5036,7 @@ async fn main() -> Result<()> {
                     }
                     _ if let Some(b) = balloon => {
                         let heard = balloons.heard_by(&b.0.latest.serial, unix_now());
-                        draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), &heard, unix_now(), follow, me.as_ref());
+                        station_rows = draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), &heard, unix_now(), follow, me.as_ref());
                         Vec::new()
                     }
                     _ if let Some(s) = ship => {
@@ -7578,6 +7608,15 @@ async fn main() -> Result<()> {
                                 }
                                 // Clicks in the inspector select a feature; the map never sees them.
                                 if panel_area.width > 0 && panel_area.contains(pos) {
+                                    // A receiving station in the balloon panel: fly to it.
+                                    if m.kind == event::MouseEventKind::Down(event::MouseButton::Left)
+                                        && let Some(st) = station_rows.iter().find(|r| r.row == cell.1)
+                                    {
+                                        follow = false;
+                                        ctl.fly_to(Camera::new(st.lon, st.lat, ctl.cam.zoom.max(9.0)));
+                                        note = Some((Instant::now(), format!("⌂ {} · receiving station", st.callsign)));
+                                        continue;
+                                    }
                                     if m.kind == event::MouseEventKind::Down(event::MouseButton::Left)
                                         && let Some(&(_, i)) = list_rows.iter().find(|(r, _)| *r == cell.1)
                                     {

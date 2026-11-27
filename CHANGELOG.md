@@ -8,6 +8,8 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Clicking a receiving station in a weather balloon's panel flies the map to it.
+
 - NASA's scientific balloons (`--nasa-balloons`, or from `L`): the flights of NASA's
   balloon facility (CSBF) from its campaign and flight pages (no key): ◓ with the payload's
   name and its track so far, for flights heard in the last 3 days; `--nasa-balloons all`
@@ -95,6 +97,9 @@ All notable changes to mapterm are listed here. The format follows
   `areas::tile_source_to` takes a max zoom.
 
 ### Fixed
+
+- Weather balloon receiving stations and NASA balloons no longer disappear with the map's
+  names (`n`) or the overlay over imagery (`v`); like the other live layers, they stay.
 
 - A flaky tile-cache test: its scratch folder is named by process id, and a folder left by
   an earlier run with the same id could hold stale data; it's cleared first now.
