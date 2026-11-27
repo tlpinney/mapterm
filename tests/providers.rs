@@ -61,6 +61,25 @@ fn nwps_river_gauges() {
 
 #[test]
 #[ignore = "nightly provider check"]
+fn faa_flight_restrictions() {
+    block_on(async {
+        use mapterm::tfrs::Kind;
+        let t = mapterm::tfrs::tfrs().await.expect("TFR list and outlines");
+        // Security TFRs are always in force somewhere.
+        assert!(t.len() >= 5, "only {} TFRs", t.len());
+        assert!(t.iter().any(|r| r.kind == Kind::Security), "no security TFRs (list types)");
+        let n = mapterm::tfrs::notam_detail(t[0].notam.as_deref().expect("a NOTAM number")).await.expect("a NOTAM's detail XML");
+        assert!(!n.areas.is_empty(), "no areas in NOTAM {:?}", t[0].notam);
+        let s = mapterm::tfrs::standing().await.expect("FAA standing airspace");
+        for k in [Kind::Rules, Kind::Prohibited, Kind::Stadium] {
+            assert!(s.iter().any(|r| r.kind == k), "no {k:?} in the FAA's layers");
+        }
+        assert!(s.iter().any(|r| r.title.starts_with("P-56")), "no P-56");
+    });
+}
+
+#[test]
+#[ignore = "nightly provider check"]
 fn nws_weather_alerts() {
     block_on(async {
         let (a, etag) = mapterm::nws::active(None).await.expect("NWS alerts").expect("an answer");
