@@ -194,6 +194,139 @@ impl Place {
     }
 }
 
+/// Words of an address or name for matching: lower case, split on anything but letters and
+/// digits, with the usual street abbreviations made the same ("Avenue" and "Ave" are `ave`,
+/// "Northwest" and "NW" are `nw`).
+pub fn address_words(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            match w {
+                "avenue" | "av" => "ave",
+                "street" | "str" => "st",
+                "road" => "rd",
+                "drive" => "dr",
+                "boulevard" => "blvd",
+                "place" => "pl",
+                "court" => "ct",
+                "lane" => "ln",
+                "terrace" => "ter",
+                "parkway" => "pkwy",
+                "highway" => "hwy",
+                "circle" => "cir",
+                "square" => "sq",
+                "pike" => "pk",
+                "northwest" => "nw",
+                "northeast" => "ne",
+                "southwest" => "sw",
+                "southeast" => "se",
+                "north" => "n",
+                "south" => "s",
+                "east" => "e",
+                "west" => "w",
+                other => other,
+            }
+            .to_string()
+        })
+        .collect()
+}
+
+/// Whether every query word starts some word of `words`.
+fn all_match(query: &[String], words: &[String]) -> bool {
+    query.iter().all(|q| words.iter().any(|w| w.starts_with(q.as_str())))
+}
+
+/// A text property of a feature, the first of `keys` it has.
+fn prop<'a>(f: &'a crate::geojson::Feature, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|k| {
+        f.props.iter().find(|(name, _)| name == k).and_then(|(_, v)| match v {
+            crate::mvt::Value::Str(s) if !s.trim().is_empty() => Some(s.trim()),
+            _ => None,
+        })
+    })
+}
+
+/// A feature's center, lon/lat.
+fn center(f: &crate::geojson::Feature) -> (f64, f64) {
+    crate::render::to_lonlat((f.bbox[0] + f.bbox[2]) / 2.0, (f.bbox[1] + f.bbox[3]) / 2.0)
+}
+
+/// Search features already on the map (data layers: GeoJSON, GeoParquet, Overture addresses)
+/// for `query`, each word matching the start of a word, street abbreviations aside:
+///
+/// - "1600 penn": the addresses with that house number on a street matching the rest;
+/// - "vermont ave": the streets matching, one result each, framing their addresses;
+/// - anything else: features whose name matches.
+///
+/// Up to `limit` results, addresses first, then streets, then names.
+pub fn search_features<'a>(features: impl IntoIterator<Item = &'a crate::geojson::Feature>, query: &str, limit: usize) -> Vec<Place> {
+    let words = address_words(query);
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let number = words.first().filter(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit())).cloned();
+    let rest: Vec<String> = if number.is_some() { words[1..].to_vec() } else { words.clone() };
+    let (mut addresses, mut names) = (Vec::new(), Vec::new());
+    // Streets: their name, the extent and count of their addresses, and their city.
+    type Street = (String, (f64, f64, f64, f64), usize, String);
+    let mut streets: Vec<Street> = Vec::new();
+    for f in features {
+        let street = prop(f, &["street", "addr:street"]);
+        let house = prop(f, &["number", "housenumber", "addr:housenumber"]);
+        let place = || {
+            let city = prop(f, &["postal_city", "city", "addr:city"]).unwrap_or("");
+            let post = prop(f, &["postcode", "addr:postcode"]).unwrap_or("");
+            [city, post].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ")
+        };
+        if let Some(street) = street {
+            let sw = address_words(street);
+            if all_match(&rest, &sw) {
+                match (&number, house) {
+                    (Some(n), Some(h)) if address_words(h).first() == Some(n) && addresses.len() < limit => {
+                        let (lon, lat) = center(f);
+                        let unit = prop(f, &["unit", "addr:unit"]).map(|u| format!(" #{u}")).unwrap_or_default();
+                        addresses.push(Place { name: format!("{h} {street}{unit}"), context: place(), kind: "address".into(), lon, lat, bounds: None });
+                    }
+                    (None, _) => {
+                        let (lon, lat) = center(f);
+                        match streets.iter_mut().find(|s| s.0.eq_ignore_ascii_case(street)) {
+                            Some(s) => {
+                                s.1 = (s.1.0.min(lon), s.1.1.min(lat), s.1.2.max(lon), s.1.3.max(lat));
+                                s.2 += 1;
+                            }
+                            None => streets.push((street.to_string(), (lon, lat, lon, lat), 1, place())),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if number.is_none()
+            && names.len() < limit
+            && let Some(name) = prop(f, &["name", "title", "label", "NAME", "Name"])
+            && all_match(&words, &address_words(name))
+        {
+            let (lon, lat) = center(f);
+            names.push(Place { name: name.to_string(), context: String::new(), kind: "on the map".into(), lon, lat, bounds: None });
+        }
+    }
+    // The streets with the most addresses first.
+    streets.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
+    let streets = streets.into_iter().map(|(name, b, n, place)| {
+        let pad = 0.0005;
+        Place {
+            name,
+            context: [place, format!("{n} address{}", if n == 1 { "" } else { "es" })].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(", "),
+            kind: "street".into(),
+            lon: (b.0 + b.2) / 2.0,
+            lat: (b.1 + b.3) / 2.0,
+            bounds: Some((b.0 - pad, b.1 - pad, b.2 + pad, b.3 + pad)),
+        }
+    });
+    addresses.into_iter().chain(streets).chain(names).take(limit).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +386,35 @@ mod tests {
         assert_eq!(g.api, Api::Photon);
         let url = reqwest::Url::parse_with_params(PHOTON, &[("q", "Ben's Chili Bowl & more")]).unwrap();
         assert!(url.as_str().contains("q=Ben%27s+Chili+Bowl+%26+more"), "{url}");
+    }
+
+    #[test]
+    fn searches_addresses_streets_and_names_on_the_map() {
+        let doc = serde_json::json!({"type": "FeatureCollection", "features": [
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-77.0365, 38.8977]},
+             "properties": {"number": "1600", "street": "Pennsylvania Avenue NW", "postcode": "20500", "postal_city": "Washington"}},
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-77.0340, 38.9004]},
+             "properties": {"number": "800", "street": "Vermont Ave NW", "unit": "2"}},
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-77.0338, 38.9010]},
+             "properties": {"number": "810", "street": "Vermont Ave NW"}},
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [-77.03, 38.89]},
+             "properties": {"name": "Freedom Plaza"}}
+        ]});
+        let (features, _) = crate::geojson::features(&doc).unwrap();
+        let r = search_features(&features, "1600 penn", 10);
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].name.as_str(), r[0].context.as_str(), r[0].kind.as_str()), ("1600 Pennsylvania Avenue NW", "Washington 20500", "address"));
+        assert!((r[0].lon + 77.0365).abs() < 1e-6 && (r[0].lat - 38.8977).abs() < 1e-6);
+        // "Avenue" finds "Ave", "Northwest" finds "NW".
+        let r = search_features(&features, "vermont avenue northwest", 10);
+        assert_eq!((r.len(), r[0].kind.as_str(), r[0].context.as_str()), (1, "street", "2 addresses"), "{r:?}");
+        assert!(r[0].bounds.is_some());
+        assert_eq!(search_features(&features, "800 vermont", 10)[0].name, "800 Vermont Ave NW #2");
+        assert_eq!(search_features(&features, "freedom", 10)[0].name, "Freedom Plaza");
+        assert!(search_features(&features, "1700 penn", 10).is_empty());
+        assert!(search_features(&features, "  ", 10).is_empty());
+        // Labels: a name, else the number and street.
+        assert_eq!(features[0].label.as_deref(), Some("1600 Pennsylvania Avenue NW"));
+        assert_eq!(features[3].label.as_deref(), Some("Freedom Plaza"));
     }
 }

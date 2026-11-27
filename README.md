@@ -116,7 +116,9 @@ with the keys for whatever layers are on (radar, alerts, live aircraft and satel
   (MapLibre's flyTo curve). Several matches open a list (↑/↓, Enter or click);
   Esc clears the marker. Searches go to [Photon](https://photon.komoot.io), an
   OpenStreetMap geocoder, only when you press Enter; `MAPTERM_GEOCODER=nominatim`
-  or the URL of your own Photon or Nominatim server switches.
+  or the URL of your own Photon or Nominatim server switches. Your data layers are
+  searched first: addresses (`1600 penn`), streets (`vermont ave`) and names among
+  the features loaded, such as `overture-addresses`.
 - **`m`** switches the map style: the built-in one, then OpenFreeMap's liberty,
   positron, bright, dark and fiord (a `--style` you started with comes first).
   Imagery stays underneath and your GeoJSON layers on top.

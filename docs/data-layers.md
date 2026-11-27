@@ -11,6 +11,8 @@ mapterm --geojson parcels.shp
 # Overture's buildings, worldwide (512 files, 257 GB), loading only what's on screen:
 mapterm --geojson https://stac.overturemaps.org/2026-10-21.0/buildings/building/collection.json \
   --at 13.70,-89.20 -z 17
+# Overture's addresses, by name for the latest release, labeled with house numbers:
+mapterm --geojson overture-addresses --at 38.9005,-77.035 -z 17
 # Microsoft's current footprints (with heights) and Overture's, side by side:
 mapterm --geojson microsoft-buildings \
   --geojson https://stac.overturemaps.org/2026-10-21.0/buildings/building/collection.json \
@@ -50,6 +52,16 @@ Over San Salvador that's one footer and one 4 MB chunk, about 3 s, out of
 Overture's 257 GB. With `--bbox W,S,E,N` a layer is instead read once for that area
 (local files are read once, in place).
 
+`overture-addresses`, `overture-buildings` and `overture-places` are those Overture Maps
+themes in its latest release, found from its STAC catalog when the layer opens, so a
+command keeps working as Overture publishes a new release each month. They load as the
+map moves like any collection. Overture's addresses come largely from OpenAddresses and
+national address files (each feature carries its source and license; `i` shows them).
+From zoom 17, address points are labeled with their house numbers (further out they're
+plain dots), and `/` searches what's loaded: a
+number and street (`1600 penn`) finds the address, a street (`vermont ave`) frames all of
+its addresses, with `Avenue`/`Ave` and `Northwest`/`NW` taken as the same.
+
 `microsoft-buildings` is Microsoft's Global ML Building Footprints as Microsoft keeps
 them current (refreshed every few weeks, with height estimates; the Planetary
 Computer's copy stopped in 2023). It always uses the newest release: the one Microsoft's
@@ -68,7 +80,8 @@ URLs up to 512 MB. The readers are checked against GDAL on a corpus of real file
 - Points, lines and polygons (including Multi* and GeometryCollection), each
   layer in its own color with a legend in the status bar; polygon interiors are
   tinted (left clear over a raster layer).
-- Features with a `name` (or `title`/`label`) property are labeled.
+- Features with a `name` (or `title`/`label`) property are labeled; address points
+  without one show their house number (`number` or `housenumber`) from zoom 17.
 - Without `--at`, the map starts zoomed to fit all layers.
 - Inspect mode (`i`) lists your features first, with all their properties, and
   `--snapshot ... --pick COL,ROW` prints them as JSON lines.

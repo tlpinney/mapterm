@@ -86,7 +86,11 @@ pub fn overlay_layers(source: &str, color: Color, fill: bool) -> Vec<crate::spec
     let hex = format!("#{r:02x}{g:02x}{b:02x}");
     let t = |v: u8| (v as f32 * 0.32) as u8;
     let tint = format!("#{:02x}{:02x}{:02x}", t(r), t(g), t(b));
-    let name = json!(["coalesce", ["get", "name"], ["get", "title"], ["get", "label"], ["get", "NAME"], ["get", "Name"]]);
+    // A name; from zoom 17, else a house number (address points, as OpenStreetMap maps label
+    // them only close in, where they don't crowd).
+    let names = json!(["coalesce", ["get", "name"], ["get", "title"], ["get", "label"], ["get", "NAME"], ["get", "Name"]]);
+    let with_numbers = json!(["coalesce", names.clone(), ["get", "number"], ["get", "housenumber"]]);
+    let name = json!(["step", ["zoom"], names, HOUSE_NUMBER_ZOOM, with_numbers]);
     let bold = json!(["Bold"]);
     let mut out = Vec::new();
     if fill {
@@ -118,6 +122,9 @@ pub fn overlay_layers(source: &str, color: Color, fill: bool) -> Vec<crate::spec
     );
     out
 }
+
+/// From this zoom, address points without a name are labeled with their house number.
+pub const HOUSE_NUMBER_ZOOM: f64 = 17.0;
 
 /// A whole file from a path or http(s) URL, up to [`MAX_BYTES`]; `None` if it isn't there.
 pub(crate) async fn fetch(spec: &str) -> Result<Option<Vec<u8>>> {
@@ -244,7 +251,15 @@ fn add_feature(f: &Json, out: &mut Vec<Feature>) {
     if let Some(id) = f.get("id").and_then(to_value) {
         props.insert(0, ("id".into(), id));
     }
-    let label = ["name", "title", "label", "NAME", "Name"].iter().find_map(|k| f["properties"][*k].as_str().filter(|s| !s.is_empty()).map(str::to_string));
+    let text = |k: &str| f["properties"][k].as_str().filter(|s| !s.is_empty()).map(str::to_string);
+    // A name, else an address's number and street.
+    let label = ["name", "title", "label", "NAME", "Name"].iter().find_map(|k| text(k)).or_else(|| {
+        let number = text("number").or_else(|| text("housenumber"))?;
+        Some(match text("street") {
+            Some(street) => format!("{number} {street}"),
+            None => number,
+        })
+    });
     let id = f.get("id").and_then(to_value);
     add_geometry(&f["geometry"], id, props, label, out);
 }

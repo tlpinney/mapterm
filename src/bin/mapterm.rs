@@ -47,7 +47,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 collection.json, e.g. Overture's at stac.overturemaps.org), loads as the map
                 moves: only the chunks under the view, from zoom 14. `microsoft-buildings`
                 (or a dataset-links.csv URL) is Microsoft's current building footprints, each
-                ~78 km tile downloaded once and kept split in ~/.cache/mapterm
+                ~78 km tile downloaded once and kept split in ~/.cache/mapterm.
+                `overture-addresses`, `overture-buildings` and `overture-places` are
+                Overture Maps' latest release of each (addresses show house numbers; / finds
+                addresses and streets among those loaded)
   --cache       show mapterm's disk caches (tiles, imagery, geoparquet, docs, buildings,
                 stac, orbits, radio, zones, radar, outages, and old files from earlier
                 versions): how big, and their limits; then exit
@@ -2214,7 +2217,8 @@ async fn main() -> Result<()> {
         let path = g.split(['?', '#']).next().unwrap_or(g).to_ascii_lowercase();
         let remote = g.starts_with("https://") || g.starts_with("http://");
         let parquet = path.ends_with(".parquet") || path.ends_with(".geoparquet");
-        if mapterm::msbuildings::is_spec(g) || (remote && (path.ends_with("collection.json") || (parquet && a.bbox.is_none()))) {
+        if mapterm::msbuildings::is_spec(g) || mapterm::overture::is_spec(g) || (remote && (path.ends_with("collection.json") || (parquet && a.bbox.is_none())))
+        {
             let ds = mapterm::geoparquet::Dataset::open(g).await.with_context(|| format!("--geojson {g}"))?;
             let empty = mapterm::geojson::parse(br#"{"type": "FeatureCollection", "features": []}"#, ds.name.clone(), color)?;
             opened.push((geo.len(), g.clone(), ds));
@@ -2781,6 +2785,8 @@ async fn main() -> Result<()> {
     let geocoder = mapterm::geocode::Geocoder::from_env()?;
     let mut search = Search::Off;
     let mut found: Option<mapterm::geocode::Place> = None;
+    // Search results from the map's own data, waiting for the geocoder's.
+    let mut search_local: Vec<mapterm::geocode::Place> = Vec::new();
     let (gtx, mut grx) = mpsc::unbounded_channel::<(String, Result<Vec<mapterm::geocode::Place>>)>();
     // Style switching (m) loads on a task; the pointer (dots in the map) is for c.
     let (stx, mut srx) = mpsc::unbounded_channel::<StyleDone>();
@@ -4583,6 +4589,14 @@ async fn main() -> Result<()> {
                     // Only the answer to the search still waiting counts.
                     if matches!(&search, Search::Waiting(q) if *q == query) {
                         search = Search::Off;
+                        // What's on the map first, then the geocoder's; the map's alone if the
+                        // geocoder failed.
+                        let local = std::mem::take(&mut search_local);
+                        let r = match r {
+                            Ok(places) => Ok(local.into_iter().chain(places).collect::<Vec<_>>()),
+                            Err(_) if !local.is_empty() => Ok(local),
+                            Err(e) => Err(e),
+                        };
                         match r {
                             Ok(places) if places.is_empty() => note = Some((Instant::now(), format!("no places found for {query}"))),
                             Ok(mut places) if places.len() == 1 => {
@@ -4733,6 +4747,9 @@ async fn main() -> Result<()> {
                                         KeyCode::Esc => search = Search::Off,
                                         KeyCode::Enter if !q.trim().is_empty() => {
                                             let query = q.trim().to_string();
+                                            // Addresses, streets and names already on the map, with the geocoder's.
+                                            let feats: Vec<&mapterm::geojson::Feature> = legend.iter().flat_map(|(id, _)| map.data_features(id)).collect();
+                                            search_local = mapterm::geocode::search_features(feats, &query, 8);
                                             let (geo, gtx) = (geocoder.clone(), gtx.clone());
                                             let near = (ctl.cam.lon, ctl.cam.lat, ctl.cam.zoom);
                                             let qq = query.clone();
