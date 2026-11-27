@@ -665,7 +665,10 @@ mod tests {
         let c = parse_vdot(va).unwrap();
         assert_eq!(c.len(), 2, "a closed event is left out");
         let a = c.iter().find(|c| c.key == "va:WZNO4295656-10052023-2").unwrap();
-        assert_eq!((a.impact, a.road.as_str(), a.jurisdiction.as_str(), a.event.as_str()), (Impact::Closed, "On I-66W on the ramp to VA-286S", "Fairfax (County)", "Road Widening Project Activities · WZ - Construction"));
+        assert_eq!(
+            (a.impact, a.road.as_str(), a.jurisdiction.as_str(), a.event.as_str()),
+            (Impact::Closed, "On I-66W on the ramp to VA-286S", "Fairfax (County)", "Road Widening Project Activities · WZ - Construction")
+        );
         assert_eq!(a.geometry["coordinates"][0][0].as_f64(), Some(-77.389861), "lon first");
         assert_eq!(a.start, crate::nws::unix_time("2023-10-06T04:00:00Z"), "the segment's time first");
         let b = c.iter().find(|c| c.key == "va:LANES-1").unwrap();
