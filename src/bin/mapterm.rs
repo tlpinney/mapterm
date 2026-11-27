@@ -29,7 +29,7 @@ use tokio::sync::{Semaphore, mpsc};
 
 const USAGE: &str = "mapterm -- a map in your terminal
 
-usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--fires] [--floods] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
+usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|URL] [--at LAT,LON|here] [-z ZOOM] [--adsb [FEED]] [--ais] [--sats [GROUPS]] [--sondes] [--quakes [PERIOD]] [--fires] [--floods] [--tfrs] [--radar] [--alerts] [--outages] [--proxy URL] [--light] [--no-labels] [--snapshot COLSxROWS [--format F | --pick COL,ROW]]
 
   SOURCE        .pmtiles file or URL, .mbtiles file, XYZ template with {z}/{x}/{y}, or
                 TileJSON URL, drawn with mapterm's terminal style (default: OpenFreeMap planet)
@@ -132,6 +132,10 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 (green none, yellow action, orange minor, red moderate, purple major), ↑
                 when the forecast is worse. Click one for its stage, flood stages, record
                 crests and the stage over the last days with the forecast. Every 10 minutes
+  --tfrs        flight restrictions from the FAA (no key): temporary flight restrictions
+                (VIP, security, hazards, space launches, air shows and sports) colored by
+                kind, the DC SFRA and FRZ, prohibited areas, and stadiums' 3 NM event
+                circles; click one for its areas, floors and ceilings, times and NOTAM
   --utc         show times (radar, timeline, satellite passes, alerts) in UTC instead of
                 this computer's time zone
   --sondes      live weather balloons (radiosondes) from SondeHub, tracked by amateur
@@ -245,6 +249,8 @@ struct Args {
     alerts: bool,
     /// --floods: river and creek gauges from NOAA NWPS.
     floods: bool,
+    /// --tfrs: FAA flight restrictions.
+    tfrs: bool,
     /// --fires: US wildfires from NIFC.
     fires: bool,
     /// --quakes: earthquakes from USGS, for this period.
@@ -310,6 +316,7 @@ fn args() -> Result<Args> {
         quakes: None,
         fires: false,
         floods: false,
+        tfrs: false,
         utc: false,
         sats: None,
         sats_country: Vec::new(),
@@ -425,6 +432,7 @@ fn args() -> Result<Args> {
             "--outages" => a.outages = true,
             "--fires" | "--wildfires" => a.fires = true,
             "--floods" | "--rivers" | "--gauges" => a.floods = true,
+            "--tfrs" | "--tfr" | "--restrictions" => a.tfrs = true,
             "--quakes" | "--earthquakes" => {
                 // The period is optional: take the next argument only if it's one.
                 let p = it.next_if(|n| mapterm::quakes::Period::parse(n).is_some());
@@ -668,6 +676,11 @@ const QUAKES: &str = "quakes";
 const FIRES: &str = "fires";
 const GAUGES: &str = "gauges";
 const FIRE_AREAS: &str = "fire-areas";
+const TFRS: &str = "tfrs";
+/// The flight restrictions' style layers (braille, where the terminal doesn't show images).
+const TFR_LAYERS: [&str; 2] = ["tfrs-line", "tfrs-selected"];
+/// The flight restrictions as image tiles drawn here (where it does).
+const TFR_TILES: &str = "tfr-tiles";
 /// The fire perimeters' style layers (braille, where the terminal doesn't show images).
 const FIRE_LAYERS: [&str; 3] = ["fire-areas-fill", "fire-areas-line", "fire-areas-selected"];
 /// The fire perimeters as image tiles drawn here (where it does).
@@ -1657,6 +1670,85 @@ fn draw_gauge(f: &mut ratatui::Frame, area: Rect, g: &mapterm::floods::Gauge, d:
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
 }
 
+/// What the --tfrs tasks send.
+enum TfrMsg {
+    /// The current TFRs.
+    Live(Vec<mapterm::tfrs::Restriction>),
+    /// The standing airspace.
+    Standing(Vec<mapterm::tfrs::Restriction>),
+    /// A TFR's NOTAM.
+    Notam(String, std::result::Result<mapterm::tfrs::Notam, String>),
+    /// Why a request failed.
+    Error(String),
+}
+
+/// The --tfrs panel for the selected restriction.
+fn draw_tfr(f: &mut ratatui::Frame, area: Rect, r: &mapterm::tfrs::Restriction, n: Option<&mapterm::tfrs::Notam>) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block =
+        Block::new().borders(Borders::LEFT).border_style(dim).title(if r.kind.is_tfr() { " flight restriction (TFR) " } else { " restricted airspace " });
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let (red, g, b) = r.kind.rgb();
+    let key = |k: &str| Span::styled(format!(" {k:<9}"), dim);
+    let mut l = vec![Line::from(Span::styled(format!(" {}", r.title), TStyle::new().fg(Color::Rgb(red, g, b)).add_modifier(Modifier::BOLD)))];
+    l.push(Line::from(vec![key("kind"), Span::styled(r.kind.label(), TStyle::new().fg(Color::Rgb(red, g, b)))]));
+    if let Some(id) = &r.notam {
+        l.push(Line::from(vec![key("NOTAM"), Span::raw(format!("FDC {id}"))]));
+    }
+    if let Some(v) = &r.vertical {
+        l.push(Line::from(vec![key("altitude"), Span::raw(v.clone())]));
+    }
+    if r.kind.is_tfr() {
+        match n {
+            None => l.push(Line::from(Span::styled(" loading the NOTAM…", dim))),
+            Some(n) => {
+                if !n.name.is_empty() {
+                    l.push(Line::from(vec![key("name"), Span::raw(n.name.clone())]));
+                }
+                if !n.place.is_empty() {
+                    l.push(Line::from(vec![key("where"), Span::raw(n.place.clone())]));
+                }
+                for a in &n.areas {
+                    l.push(Line::default());
+                    let rule = if a.rule.is_empty() { String::new() } else { format!(" · 14 CFR {}", a.rule) };
+                    l.push(Line::from(Span::styled(
+                        format!(" {}{rule}", if a.name.is_empty() { "area" } else { &a.name }),
+                        TStyle::new().add_modifier(Modifier::BOLD),
+                    )));
+                    l.push(Line::from(vec![key("altitude"), Span::raw(a.vertical.clone())]));
+                    let now = unix_now();
+                    let when = match (a.from, a.to) {
+                        (Some(s), Some(e)) => {
+                            let state = if now < s {
+                                "coming"
+                            } else if now <= e {
+                                "in force"
+                            } else {
+                                "ended"
+                            };
+                            format!("{} to {} · {state}", day_hhmm(s), day_hhmm(e))
+                        }
+                        (Some(s), None) => format!("from {}", day_hhmm(s)),
+                        _ => "until further notice".into(),
+                    };
+                    l.push(Line::from(vec![key("when"), Span::raw(when)]));
+                }
+                if !n.text.is_empty() {
+                    l.push(Line::default());
+                    l.push(Line::from(Span::styled(format!(" {}", n.text), dim)));
+                }
+            }
+        }
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(" Not for navigation: check NOTAMs before flying. esc close", dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
 /// What the --fires task sends.
 enum FireMsg {
     /// The current incidents.
@@ -2375,7 +2467,7 @@ async fn main() -> Result<()> {
         // satellites alone, the aviation style; unless --light.
         if (a.radar || a.alerts || a.outages || a.fires || a.floods) && a.source.is_none() && !a.light {
             map = Map::weather(src, schema)?;
-        } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some()) && a.source.is_none() && !a.light {
+        } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some() || a.tfrs) && a.source.is_none() && !a.light {
             map = Map::aviation(src, schema)?;
         } else {
             map = Map::terminal(src, schema, !a.light)?;
@@ -2395,7 +2487,7 @@ async fn main() -> Result<()> {
     let default_dark = a.style.is_none() && a.source.is_none() && !a.light;
     if (a.radar || a.alerts || a.outages || a.fires || a.floods) && default_dark {
         styles.push(WEATHER.to_string());
-    } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some()) && default_dark {
+    } else if (a.adsb.is_some() || a.ais || a.sats.is_some() || a.sondes || a.quakes.is_some() || a.tfrs) && default_dark {
         styles.push(AVIATION.to_string());
     }
     for s in [BUILTIN, AVIATION, WEATHER].into_iter().chain(stylejson::OPENFREEMAP_STYLES) {
@@ -2539,6 +2631,20 @@ async fn main() -> Result<()> {
             map.add_source(OUTAGE_TILES, MapSource::raster(mapterm::areas::tile_source(outage_tiles.clone(), "outages", &mapterm::outages::credit())?))?;
             map.add_layer(mapterm::StyleLayer::raster(OUTAGE_TILES, OUTAGE_TILES))?;
             for id in OUTAGE_LAYERS {
+                map.set_visibility(id, false)?;
+            }
+        }
+    }
+    // Flight restrictions (--tfrs): over the outages and fires, under the alerts.
+    let tfr_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
+    if a.tfrs {
+        map.add_source(TFRS, MapSource::geojson(&serde_json::json!({"type": "FeatureCollection", "features": []}))?)?;
+        map.set_attribution(TFRS, mapterm::tfrs::CREDIT)?;
+        map.add_layers(mapterm::tfrs::layers(TFRS)?, None)?;
+        if mapterm::kitty::supported() {
+            map.add_source(TFR_TILES, MapSource::raster(mapterm::areas::tile_source(tfr_tiles.clone(), "tfrs", mapterm::tfrs::CREDIT)?))?;
+            map.add_layer(mapterm::StyleLayer::raster(TFR_TILES, TFR_TILES))?;
+            for id in TFR_LAYERS {
                 map.set_visibility(id, false)?;
             }
         }
@@ -3272,6 +3378,38 @@ async fn main() -> Result<()> {
     let mut selected_gauge: Option<String> = None;
     let mut gauge_details: std::collections::HashMap<String, Option<mapterm::floods::Detail>> = std::collections::HashMap::new();
     let (gatx, mut garx) = mpsc::unbounded_channel::<GaugeMsg>();
+    // --tfrs: the TFRs every 5 minutes, the standing airspace once (kept a week), and the
+    // selected TFR's NOTAM.
+    let mut tfr_live: Vec<mapterm::tfrs::Restriction> = Vec::new();
+    let mut tfr_standing: Vec<mapterm::tfrs::Restriction> = Vec::new();
+    let mut tfrs_new = false;
+    let mut tfrs_shown_selected: Option<String> = None;
+    let mut selected_tfr: Option<String> = None;
+    let mut tfr_notams: std::collections::HashMap<String, Option<mapterm::tfrs::Notam>> = std::collections::HashMap::new();
+    let (ttx, mut trx) = mpsc::unbounded_channel::<TfrMsg>();
+    if a.tfrs {
+        let tx = ttx.clone();
+        tokio::spawn(async move {
+            let m = match mapterm::tfrs::standing().await {
+                Ok(s) => TfrMsg::Standing(s),
+                Err(e) => TfrMsg::Error(format!("{e:#}")),
+            };
+            let _ = tx.send(m);
+        });
+        let tx = ttx.clone();
+        tokio::spawn(async move {
+            loop {
+                let (m, wait) = match mapterm::tfrs::tfrs().await {
+                    Ok(t) => (TfrMsg::Live(t), 300),
+                    Err(e) => (TfrMsg::Error(format!("{e:#}")), 600),
+                };
+                if tx.send(m).is_err() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_secs(wait)).await;
+            }
+        });
+    }
     // --fires: incidents and perimeters every 5 minutes (each with its ETag).
     let mut fires: Vec<mapterm::fires::Fire> = Vec::new();
     let mut fire_perimeters: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
@@ -3606,9 +3744,10 @@ async fn main() -> Result<()> {
                 let outage = selected_outage.as_deref().and_then(|k| outages.find(k));
                 let quake = selected_quake.as_deref().and_then(|id| quakes.iter().find(|q| q.id == id));
                 let fire = selected_fire.as_deref().and_then(|id| fires.iter().find(|f| f.id == id));
+                let tfr = selected_tfr.as_deref().and_then(|k| tfr_live.iter().chain(&tfr_standing).find(|r| r.key == k));
                 let gauge = selected_gauge.as_deref().and_then(|id| gauges.iter().find(|g| g.lid == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || balloon.is_some() {
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || balloon.is_some() {
                         52.min(main.width / 2)
                     } else {
                         0
@@ -3636,6 +3775,10 @@ async fn main() -> Result<()> {
                     }
                     if a.floods && !gauges.is_empty() {
                         legends.push(mapterm::floods::legend(&gauges));
+                    }
+                    if a.tfrs && !(tfr_live.is_empty() && tfr_standing.is_empty()) {
+                        let all: Vec<mapterm::tfrs::Restriction> = tfr_standing.iter().chain(&tfr_live).cloned().collect();
+                        legends.push(mapterm::tfrs::legend(&all));
                     }
                     if a.fires && !fires.is_empty() {
                         legends.push(mapterm::fires::legend(&fires));
@@ -3680,6 +3823,10 @@ async fn main() -> Result<()> {
                     }
                     _ if let Some(g) = gauge => {
                         draw_gauge(f, panel, g, gauge_details.get(&g.lid).and_then(Option::as_ref));
+                        Vec::new()
+                    }
+                    _ if let Some(r) = tfr => {
+                        draw_tfr(f, panel, r, r.notam.as_ref().and_then(|n| tfr_notams.get(n)).and_then(Option::as_ref));
                         Vec::new()
                     }
                     _ if let Some(fi) = fire => {
@@ -3828,6 +3975,11 @@ async fn main() -> Result<()> {
                     } else {
                         format!("◆ {} gauges{} ", gauges.len(), if flooding > 0 { format!(" · {flooding} flooding") } else { String::new() })
                     };
+                    spans.push(Span::styled(text, st));
+                }
+                if a.tfrs {
+                    let st = TStyle::new().fg(Color::Rgb(0xc8, 0x4d, 0xe8));
+                    let text = if tfr_live.is_empty() { "⛔ … ".to_string() } else { format!("⛔ {} TFRs ", tfr_live.len()) };
                     spans.push(Span::styled(text, st));
                 }
                 if a.fires {
@@ -4283,6 +4435,24 @@ async fn main() -> Result<()> {
                     });
                 }
             }
+            // Flight restrictions: again when new ones come or another is selected; the
+            // selected TFR's NOTAM once.
+            if a.tfrs && (tfrs_new || selected_tfr != tfrs_shown_selected) {
+                let all: Vec<mapterm::tfrs::Restriction> = tfr_standing.iter().chain(&tfr_live).cloned().collect();
+                map.set_data(TFRS, &mapterm::tfrs::features(&all, selected_tfr.as_deref()))?;
+                tfr_tiles.set(mapterm::tfrs::shapes(&all, selected_tfr.as_deref()));
+                map.put_raster_tile(TFR_TILES, None, true);
+                (tfrs_new, tfrs_shown_selected) = (false, selected_tfr.clone());
+                let notam = selected_tfr.as_deref().and_then(|k| all.iter().find(|r| r.key == k)).filter(|r| r.kind.is_tfr()).and_then(|r| r.notam.clone());
+                if let Some(n) = notam.filter(|n| !tfr_notams.contains_key(n)) {
+                    tfr_notams.insert(n.clone(), None);
+                    let tx = ttx.clone();
+                    tokio::spawn(async move {
+                        let r = mapterm::tfrs::notam_detail(&n).await.map_err(|e| format!("{e:#}"));
+                        let _ = tx.send(TfrMsg::Notam(n, r));
+                    });
+                }
+            }
             // Fires: again when new data comes or another is selected.
             if a.fires && (fires_new || selected_fire != fires_shown_selected) {
                 map.set_data(FIRES, &mapterm::fires::points(&fires, selected_fire.as_deref()))?;
@@ -4537,6 +4707,31 @@ async fn main() -> Result<()> {
                             dlog(|| format!("floods: {lid}: {e}"));
                             gauge_details.remove(&lid);
                             note = Some((Instant::now(), format!("gauge {lid}: {e}")));
+                        }
+                    }
+                }
+                Some(m) = trx.recv() => {
+                    match m {
+                        TfrMsg::Live(t) => {
+                            dlog(|| format!("tfrs: {}", t.len()));
+                            tfr_live = t;
+                            tfrs_new = true;
+                        }
+                        TfrMsg::Standing(s) => {
+                            dlog(|| format!("tfrs: {} standing", s.len()));
+                            tfr_standing = s;
+                            tfrs_new = true;
+                        }
+                        TfrMsg::Notam(n, Ok(d)) => {
+                            tfr_notams.insert(n, Some(d));
+                        }
+                        TfrMsg::Notam(n, Err(e)) => {
+                            tfr_notams.remove(&n);
+                            note = Some((Instant::now(), format!("NOTAM {n}: {e}")));
+                        }
+                        TfrMsg::Error(e) => {
+                            dlog(|| format!("tfrs: {e}"));
+                            note = Some((Instant::now(), format!("flight restrictions: {e}")));
                         }
                     }
                 }
@@ -5082,8 +5277,9 @@ async fn main() -> Result<()> {
                                             let _ = tx.send(mapterm::locate::locate(cmd.as_deref()));
                                         });
                                     }
-                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some() || selected_outage.is_some() || selected_quake.is_some() || selected_fire.is_some() || selected_gauge.is_some() || selected_balloon.is_some()) && !inspect => {
+                                    KeyCode::Esc if (selected.is_some() || selected_ship.is_some() || selected_sat.is_some() || selected_alert.is_some() || selected_outage.is_some() || selected_quake.is_some() || selected_fire.is_some() || selected_gauge.is_some() || selected_tfr.is_some() || selected_balloon.is_some()) && !inspect => {
                                         selected_gauge = None;
+                                        selected_tfr = None;
                                         selected_fire = None;
                                         selected_quake = None;
                                         selected_alert = None;
@@ -5369,7 +5565,7 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires || a.floods {
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires || a.floods || a.tfrs {
                                         // A click on (or next to) an aircraft, else a balloon, else a
                                         // ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
@@ -5428,10 +5624,29 @@ async fn main() -> Result<()> {
                                             selected_quake = Some(id);
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage) = (None, None, None, None, None, None);
                                             follow = false;
-                                        } else if a.alerts || a.outages {
+                                        } else if a.alerts || a.outages || a.tfrs {
                                             selected_quake = None;
                                             selected_fire = None;
                                             let hits = map.query_features(&last_cam, map_area, dot);
+                                            // A flight restriction under the click (TFRs over standing airspace;
+                                            // its outline, braille or not, is what's picked).
+                                            selected_tfr = hits
+                                                .iter()
+                                                .filter(|p| p.source.as_deref() == Some(TFRS))
+                                                .filter_map(|p| p.prop("key").and_then(|v| v.as_str()))
+                                                .max_by_key(|k| !k.starts_with("stadium:") && !k.starts_with("rules:"))
+                                                .map(str::to_string)
+                                                .or_else(|| {
+                                                    // Inside an area (its outline isn't under the click): the
+                                                    // smallest restriction containing the spot.
+                                                    let (lon, lat) = (k.lon, k.lat);
+                                                    tfr_live
+                                                        .iter()
+                                                        .chain(&tfr_standing)
+                                                        .filter(|r| mapterm::tfrs::contains(&r.geometry, lon, lat))
+                                                        .min_by(|a, b| mapterm::tfrs::extent(&a.geometry).total_cmp(&mapterm::tfrs::extent(&b.geometry)))
+                                                        .map(|r| r.key.clone())
+                                                });
                                             // An alert area under the click: the most severe.
                                             selected_alert = hits
                                                 .iter()
