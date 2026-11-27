@@ -8,6 +8,12 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- NASA's scientific balloons (`--nasa-balloons`, or from `L`): the flights of NASA's
+  balloon facility (CSBF) from its campaign and flight pages (no key): ◓ with the payload's
+  name and its track so far, for flights heard in the last 3 days; `--nasa-balloons all`
+  adds past flights where they came down, dimmed, with their tracks. Pages of recent flights
+  are read every 2 minutes, tracks every 10, the campaigns hourly. `mapterm::csbf`.
+
 - Weather balloon receiving stations (`--sondes`): the amateur stations that hear the
   balloons, from the reports themselves (each says which station heard it, where the station
   is, its antenna and the signal strength). ⌂ on the map, green while hearing a balloon,
