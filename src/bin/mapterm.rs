@@ -171,6 +171,26 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 radio receivers (no key): ▲ climbing, ▼ falling, colored by altitude, with
                 their flight as a trail; click or Tab for readings, frequency and the
                 predicted landing
+  --towers      antenna structures registered with the FCC (US; no key): Ψ with their height,
+                from zoom 8; inspect (i) for the structure type, owner and registration.
+                The FCC's weekly file (~38 MB) is kept for a week
+  --cells       mobile network cells from OpenCelliD (CC BY-SA 4.0): ▴ at each cell's
+                estimated position, colored by radio (5G magenta, LTE blue, 3G green, 2G
+                grey), from zoom 11; inspect for the carrier, ids and range. Reads the files
+                --cells-download fetched
+  --cells-download [us|world|MCC,...]
+                download OpenCelliD's files (the US by default, the world's 5.5 million
+                cells, or mobile country codes) and keep them as GeoParquet
+                with your free key (--opencellid-key-cmd, else OPENCELLID_KEY), each at most
+                once in 12 hours (OpenCelliD allows two a day), then exit
+  --opencellid-key-cmd CMD
+                print your OpenCelliD key with a command (e.g. pass opencellid/token)
+  --streetview  street-level photos from Mapillary (CC BY-SA 4.0): click the map where
+                nothing else is and the panel shows the nearest photo (an image where the
+                terminal shows them), when and which way it was taken, who took it and its
+                page; tab steps through the others nearby. Needs your Mapillary client token
+                (register an app at mapillary.com/dashboard/developers):
+                --mapillary-key-cmd 'pass mapillary/token', else MAPILLARY_TOKEN
   --nasa-balloons [all]
                 NASA's scientific balloons from its balloon facility (CSBF, no key): ◓ with
                 the payload's name and its track so far, for flights heard in the last 3
@@ -311,6 +331,18 @@ struct Args {
     sondes: bool,
     /// --nasa-balloons: NASA's scientific balloons; `all`: past flights too.
     nasa: Option<bool>,
+    /// --towers: the FCC's registered antenna structures.
+    towers: bool,
+    /// --cells: OpenCelliD's cells, from the files downloaded.
+    cells: bool,
+    /// --streetview: Mapillary's street-level photos where the map is clicked.
+    streetview: bool,
+    /// --mapillary-key-cmd: prints the Mapillary token.
+    mapillary_key_cmd: Option<String>,
+    /// --cells-download: the areas to download (and turn into GeoParquet), then exit.
+    cells_download: Option<Vec<mapterm::opencellid::Area>>,
+    /// --opencellid-key-cmd: prints the OpenCelliD key.
+    opencellid_key_cmd: Option<String>,
     /// --alerts: US weather alerts from the NWS.
     alerts: bool,
     /// --floods: river and creek gauges from NOAA NWPS.
@@ -397,6 +429,12 @@ fn args() -> Result<Args> {
         radar: false,
         sondes: false,
         nasa: None,
+        towers: false,
+        cells: false,
+        streetview: false,
+        mapillary_key_cmd: None,
+        cells_download: None,
+        opencellid_key_cmd: None,
         alerts: false,
         outages: false,
         quakes: None,
@@ -569,6 +607,29 @@ fn args() -> Result<Args> {
             "--ais" => a.ais = true,
             "--sondes" | "--balloons" => a.sondes = true,
             "--nasa-balloons" => a.nasa = Some(it.next_if(|n| n == "all").is_some()),
+            "--towers" => a.towers = true,
+            "--cells" => a.cells = true,
+            "--streetview" | "--mapillary" => a.streetview = true,
+            "--mapillary-key-cmd" => a.mapillary_key_cmd = Some(it.next().context("--mapillary-key-cmd CMD")?),
+            "--cells-download" => {
+                use mapterm::opencellid::Area;
+                let v = it.next_if(|n| !n.starts_with('-')).unwrap_or_else(|| "us".into());
+                let areas: Vec<Area> = match v.to_ascii_lowercase().as_str() {
+                    "us" => mapterm::opencellid::US.iter().map(|&m| Area::Mcc(m)).collect(),
+                    "world" => vec![Area::World],
+                    _ => v
+                        .split(',')
+                        .map(|m| {
+                            m.trim()
+                                .parse::<u16>()
+                                .map(Area::Mcc)
+                                .with_context(|| format!("--cells-download {v}: `us`, `world`, or mobile country codes (310,311)"))
+                        })
+                        .collect::<Result<_>>()?,
+                };
+                a.cells_download = Some(areas);
+            }
+            "--opencellid-key-cmd" => a.opencellid_key_cmd = Some(it.next().context("--opencellid-key-cmd CMD")?),
             "--radar" => a.radar = true,
             "--alerts" => a.alerts = true,
             "--outages" => a.outages = true,
@@ -735,6 +796,9 @@ fn live_sources(key: &str) -> &'static [&'static str] {
         "satellites" => &[SATS],
         "balloons" => &[BALLOONS, STATIONS, STATION_LINKS, STATION_AREAS, STATION_LINK_TILES, LAUNCH_SITES],
         "nasa" => &[NASA, NASA_TRACKS],
+        "towers" => &[TOWERS],
+        "cells" => &[CELLS],
+        "mapillary" => &[MLY, MLY_TILES],
         "alerts" => &[ALERTS, ALERT_TILES],
         "quakes" => &[QUAKES],
         "fires" => &[FIRES, FIRE_AREAS, FIRE_TILES],
@@ -944,6 +1008,161 @@ fn beside_panel(target: Camera, map: Rect, panel: Rect) -> Camera {
     Camera::new(target.lon + (lon1 - lon0), target.lat, target.zoom)
 }
 
+/// The cells (GeoJSON features, as read for the view) drawn within `within` dots of `dot`.
+fn cells_near(cells: &[serde_json::Value], vp: &Viewport, dot: (f64, f64), within: f64) -> Vec<serde_json::Value> {
+    cells
+        .iter()
+        .filter(|f| {
+            let c = &f["geometry"]["coordinates"];
+            let (Some(lon), Some(lat)) = (c[0].as_f64(), c[1].as_f64()) else { return false };
+            let (x, y) = vp.dot_ll(lon, lat);
+            ((x - dot.0).powi(2) + ((y - dot.1) / 2.0).powi(2)).sqrt() <= within
+        })
+        .cloned()
+        .collect()
+}
+
+/// The panel for cells clicked: how many, then each carrier's, newest radio first, with ids,
+/// estimated range, how many measurements and when last seen.
+fn draw_cells(f: &mut ratatui::Frame, area: Rect, cells: &[serde_json::Value], now: f64) {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" mobile cells ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let prop = |c: &serde_json::Value, k: &str| c["properties"][k].clone();
+    let text = |c: &serde_json::Value, k: &str| prop(c, k).as_str().unwrap_or("").to_string();
+    let num = |c: &serde_json::Value, k: &str| prop(c, k).as_i64().unwrap_or(0);
+    // Newest radio first: 5G, LTE, 3G, 2G.
+    let rank = |r: &str| match r {
+        "NR" => 0,
+        "LTE" => 1,
+        "UMTS" | "CDMA" => 2,
+        _ => 3,
+    };
+    let mut by_net: std::collections::BTreeMap<String, Vec<&serde_json::Value>> = std::collections::BTreeMap::new();
+    for c in cells {
+        by_net.entry(text(c, "network")).or_default().push(c);
+    }
+    let mut l = vec![
+        Line::from(Span::styled(
+            format!(" ▴ {} cell{} here", cells.len(), if cells.len() == 1 { "" } else { "s" }),
+            TStyle::new().fg(Color::Rgb(0x60, 0xa5, 0xfa)).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(" positions are estimates from phones' measurements, not the mast", dim)),
+    ];
+    for (net, mut list) in by_net {
+        list.sort_by_key(|c| (rank(&text(c, "radio")), std::cmp::Reverse(num(c, "samples"))));
+        l.push(Line::default());
+        l.push(Line::from(Span::styled(format!(" {net}"), TStyle::new().add_modifier(Modifier::BOLD))));
+        for c in list.iter().take(12) {
+            let radio = text(c, "radio");
+            let color = match radio.as_str() {
+                "NR" => Color::Rgb(0xe8, 0x79, 0xf9),
+                "LTE" => Color::Rgb(0x60, 0xa5, 0xfa),
+                "UMTS" | "CDMA" => Color::Rgb(0x4a, 0xde, 0x80),
+                _ => Color::Rgb(0x9c, 0xa3, 0xaf),
+            };
+            let name = if radio == "NR" { "5G".to_string() } else { radio.clone() };
+            let range = num(c, "range_m");
+            let range = if range >= 1000 { format!("~{:.1} km", range as f64 / 1000.0) } else { format!("~{range} m") };
+            let seen = num(c, "updated");
+            let seen = if seen > 0 { format!(" · seen {}", mapterm::sessions::ago(seen as f64, now)) } else { String::new() };
+            l.push(Line::from(vec![
+                Span::styled(format!("   {name:<4}"), TStyle::new().fg(color)),
+                Span::raw(format!(" cell {} · area {}", num(c, "cell"), num(c, "area"))),
+            ]));
+            l.push(Line::from(Span::styled(format!("        range {range} · {} samples{seen}", num(c, "samples")), dim)));
+        }
+        if list.len() > 12 {
+            l.push(Line::from(Span::styled(format!("   and {} more", list.len() - 12), dim)));
+        }
+    }
+    l.push(Line::default());
+    l.push(Line::from(Span::styled(" OpenCelliD, CC BY-SA 4.0 · esc close", dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+}
+
+/// The street-level photo panel: the photo (where the terminal shows images, placed later in
+/// the rect returned), then when and which way it was taken, by whom, its page and the
+/// credit. `dims`: the image's size once it's in. Returns where the image goes (empty when it
+/// can't be shown).
+#[allow(clippy::too_many_arguments)]
+fn draw_photo(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    photos: &[mapterm::mapillary::Photo],
+    at: usize,
+    dims: Option<(u32, u32)>,
+    loading: bool,
+    images: bool,
+    cell_px: (f64, f64),
+    now: f64,
+) -> Rect {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" street view ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let Some(p) = photos.get(at) else { return Rect::default() };
+    // The image box: the panel's width and the height a 4:3 photo needs there (at most half
+    // the panel), the same whatever the photo, so the text under it never moves; the photo
+    // fits inside it, its shape kept, centered.
+    let width = inner.width.saturating_sub(1);
+    let rows = if images { ((width as f64 * cell_px.0 * 0.75) / cell_px.1).round().clamp(3.0, (inner.height / 2).max(3) as f64) as u16 } else { 0 };
+    let boxed = Rect { x: inner.x, y: inner.y, width, height: rows.min(inner.height) };
+    let image = match dims {
+        Some((w, h)) if w > 0 && h > 0 && boxed.width > 0 && boxed.height > 0 => {
+            let (bw, bh) = (boxed.width as f64 * cell_px.0, boxed.height as f64 * cell_px.1);
+            let scale = (bw / w as f64).min(bh / h as f64);
+            let cols = ((w as f64 * scale / cell_px.0).round() as u16).clamp(1, boxed.width);
+            let rws = ((h as f64 * scale / cell_px.1).round() as u16).clamp(1, boxed.height);
+            Rect { x: boxed.x + (boxed.width - cols) / 2, y: boxed.y + (boxed.height - rws) / 2, width: cols, height: rws }
+        }
+        _ => boxed,
+    };
+    let mut l: Vec<Line> = vec![Line::default(); boxed.height as usize];
+    if images
+        && dims.is_none()
+        && let Some(first) = l.first_mut()
+    {
+        *first = Line::from(Span::styled(" loading the photo…", dim));
+    }
+    let key = |k: &str| Span::styled(format!(" {k:<10}"), dim);
+    let what = if p.pano { "360° panorama".to_string() } else { "photo".to_string() };
+    l.push(Line::from(vec![
+        Span::styled(format!(" {what}"), TStyle::new().fg(Color::Rgb(0x05, 0xcb, 0x63)).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  {} of {} within {} m", at + 1, photos.len(), mapterm::mapillary::RADIUS), dim),
+        Span::styled(if loading { "  ⟳ loading" } else { "" }, TStyle::new().fg(Color::Yellow)),
+    ]));
+    if p.taken > 0.0 {
+        let date = mapterm::clock::Zone::Local.hhmm_zone(p.taken);
+        l.push(Line::from(vec![key("taken"), Span::raw(mapterm::sessions::ago(p.taken, now)), Span::styled(format!("  {date}"), dim)]));
+    }
+    if let (Some(h), false) = (p.heading, p.pano) {
+        l.push(Line::from(vec![key("looking"), Span::raw(format!("{} ({h:.0}°)", mapterm::mapillary::compass8(h)))]));
+    }
+    if let Some(c) = &p.creator {
+        l.push(Line::from(vec![key("by"), Span::raw(c.clone())]));
+    }
+    l.push(Line::from(vec![key("open"), Span::styled(p.page(), TStyle::new().fg(Color::Rgb(127, 178, 255)))]));
+    if !images {
+        l.push(Line::from(Span::styled(" (this terminal doesn't show images: open the page)", dim)));
+    }
+    l.push(Line::default());
+    let credit =
+        p.creator.as_deref().map(|c| format!(" {} · by {c}", mapterm::mapillary::CREDIT)).unwrap_or_else(|| format!(" {}", mapterm::mapillary::CREDIT));
+    l.push(Line::from(Span::styled(credit, dim)));
+    let more = if photos.len() > 1 { "tab next · " } else { "" };
+    l.push(Line::from(Span::styled(format!(" {more}esc close"), dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+    if images && dims.is_some() { image } else { Rect::default() }
+}
+
 /// The launch site balloon `b` went up from: the nearest to where it was first heard, if that
 /// was low and near one.
 fn launch_site<'a>(sites: &'a [mapterm::upperair::Site], b: &mapterm::sondehub::Balloon) -> Option<&'a mapterm::upperair::Site> {
@@ -1130,6 +1349,18 @@ const BALLOONS: &str = "balloons";
 const STATIONS: &str = "balloon-stations";
 /// NASA's scientific balloons (--nasa-balloons) and their tracks.
 const NASA: &str = "nasa-balloons";
+/// The FCC's registered antenna structures (--towers).
+const TOWERS: &str = "fcc-towers";
+/// Towers are drawn from this zoom (142,000 of them).
+const TOWERS_MIN_ZOOM: f64 = 8.0;
+/// Where Mapillary has street-level photos (with --streetview).
+const MLY: &str = "mapillary-coverage";
+/// Its sequence lines as image tiles, where the terminal shows images.
+const MLY_TILES: &str = "mapillary-coverage-tiles";
+/// OpenCelliD's cells (--cells), drawn from this zoom, at most this many.
+const CELLS: &str = "opencellid-cells";
+const CELLS_MIN_ZOOM: f64 = 11.0;
+const CELLS_MAX: usize = 4000;
 const NASA_TRACKS: &str = "nasa-tracks";
 const STATION_LINKS: &str = "balloon-links";
 /// The stations' areas (where each is, somewhere inside).
@@ -1172,6 +1403,14 @@ const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
 const PATH_IMAGE: u32 = 4_000_000_005;
 /// The kitty image of satellite dots and their names.
 const SAT_IMAGE: u32 = 4_000_000_006;
+/// A walk-mode step done: what the walk knows now, and the photo it led to (with the way
+/// you then face), or None for nowhere that way.
+type WalkDone = (mapterm::mapillary::Walk, Result<Option<(mapterm::mapillary::Photo, f64)>>);
+
+/// A street-level photo's image as it comes: its id, and its size and RGBA pixels.
+type PhotoImage = (String, Result<(u32, u32, Vec<u8>)>);
+/// The kitty image of the street-level photo shown in the panel.
+const PHOTO_IMAGE: u32 = 4_000_000_007;
 /// The alert areas' style layers (braille, where the terminal doesn't show images).
 const ALERT_LAYERS: [&str; 3] = ["alerts-fill", "alerts-line", "alerts-selected"];
 /// The alert areas as image tiles drawn here (where it does).
@@ -1426,6 +1665,7 @@ fn help_sections(on: HelpOn) -> Vec<(&'static str, Vec<(&'static str, &'static s
                 ("c", "copy the coordinates"),
                 ("S", "sessions: open one, or save this view"),
                 ("B", "places: fly to one, or save this spot"),
+                ("w", "walk mode, from a street-level photo (WASD, Q/E)"),
             ],
         ),
         (
@@ -3243,7 +3483,8 @@ fn apply_toggles(map: &mut Map, base: &std::collections::HashMap<String, bool>, 
             || id == ROUTE
             || id == format!("{ROUTE}-line")
             || [CLOSURES, GAUGES, FIRES, QUAKES, TRAFFIC].iter().any(|l| id == *l || id.strip_prefix(l).is_some_and(|r| r.starts_with('-')))
-            || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS, LAUNCH_SITES].contains(&id.as_str())
+            || [STATIONS, STATION_LINKS, NASA, NASA_TRACKS, LAUNCH_SITES, TOWERS, CELLS].contains(&id.as_str())
+            || id.starts_with(MLY)
             || id.starts_with(STATION_AREAS);
         if live || id == AIRCRAFT || id == TRAILS || id == SHIPS || id == SATS || id == ALERT_TILES || id == BALLOONS || ALERT_LAYERS.contains(&id.as_str()) {
             continue;
@@ -3278,6 +3519,9 @@ const STARTABLE: &[(&str, &str)] = &[
     ("aircraft", "--adsb"),
     ("balloons", "--sondes"),
     ("nasa", "--nasa-balloons"),
+    ("towers", "--towers"),
+    ("cells", "--cells"),
+    ("mapillary", "--streetview"),
     ("alerts", "--alerts"),
     ("quakes", "--quakes"),
     ("fires", "--fires"),
@@ -3290,6 +3534,29 @@ const STARTABLE: &[(&str, &str)] = &[
     ("ships", "--ais"),
     ("outages", "--outages"),
 ];
+
+/// Mapillary's coverage (where there are street-level photos) as source and layers [`MLY`],
+/// under what moves.
+fn add_mapillary(map: &mut Map, token: &str) -> Result<()> {
+    let mut src = Source::xyz(&mapterm::mapillary::coverage_tiles(token));
+    src.name = "Mapillary coverage".into();
+    src.attribution = Some(mapterm::mapillary::CREDIT.into());
+    map.add_source(MLY, MapSource::vector(src)).map_err(|e| anyhow::anyhow!("{}", format!("{e:#}").replace(token, "<token>")))?;
+    let before = under(map, MOVING);
+    // Where the terminal shows images, the lines are smooth image lines (the braille ones
+    // hidden); the dots stay.
+    if mapterm::kitty::supported() {
+        let tiles: Arc<dyn mapterm::raster::TileRender> = Arc::new(mapterm::mapillary::CoverageTiles::new(token));
+        let src = mapterm::areas::tile_source_to(tiles, "mapillary-lines", mapterm::mapillary::CREDIT, mapterm::mapillary::IMAGE_LINES_MAX)?;
+        map.add_source(MLY_TILES, MapSource::raster(src))?;
+        let layer = StyleLayer::raster(MLY_TILES, MLY_TILES).min_zoom(mapterm::mapillary::LINES_FROM as f64).max_zoom(mapterm::mapillary::IMAGE_LINES_UNTIL);
+        map.add_layers(vec![layer], before.as_deref())?;
+    }
+    // The braille lines: only past the image lines where there are some.
+    let lines_from = if mapterm::kitty::supported() { mapterm::mapillary::IMAGE_LINES_UNTIL } else { mapterm::mapillary::LINES_FROM as f64 };
+    map.add_layers(mapterm::mapillary::coverage_layers(MLY, MLY, lines_from), before.as_deref())?;
+    Ok(())
+}
 
 /// Where a layer started later goes: under the first layer drawing from one of `sources`
 /// (what's drawn over it), else under the markers.
@@ -3806,6 +4073,19 @@ fn spawn_outages(outx: mpsc::UnboundedSender<OutageMsg>) {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut a = args()?;
+    // --cells-download: fetch OpenCelliD's files with your key, then exit.
+    if let Some(areas) = a.cells_download.take() {
+        let key = mapterm::raster::find_key(a.opencellid_key_cmd.as_deref(), &["OPENCELLID_KEY"])?
+            .context("--cells-download needs your OpenCelliD key: sign up free at opencellid.org, then set OPENCELLID_KEY or pass --opencellid-key-cmd")?;
+        for (name, r) in mapterm::opencellid::download(&areas, &key).await {
+            match r {
+                Ok(what) => println!("{name}: {what}"),
+                Err(e) => println!("{name}: {e:#}"),
+            }
+        }
+        println!("kept in {} · show them with mapterm --cells", mapterm::opencellid::dir().display());
+        return Ok(());
+    }
     // Live or hazard data on the map: the disclaimer shows with the credits.
     let live_data = a.adsb.is_some()
         || a.ais
@@ -4168,6 +4448,14 @@ async fn main() -> Result<()> {
     if a.nasa.is_some() {
         let above = map.layer_ids().into_iter().find(|id| *id == TRAILS || *id == AIRCRAFT).map(str::to_string);
         add_nasa(&mut map, above.as_deref())?;
+    }
+    if a.towers {
+        let above = under(&map, MOVING);
+        add_points(&mut map, TOWERS, mapterm::towers::CREDIT, mapterm::towers::layer(TOWERS, TOWERS), above.as_deref())?;
+    }
+    if a.cells {
+        let above = under(&map, MOVING);
+        add_points(&mut map, CELLS, mapterm::opencellid::CREDIT, mapterm::opencellid::layer(CELLS, CELLS), above.as_deref())?;
     }
     // The lines from a selected balloon to the stations hearing it, as image tiles.
     let link_tiles = std::sync::Arc::new(mapterm::areas::AreaTiles::default());
@@ -4727,6 +5015,43 @@ async fn main() -> Result<()> {
     // Where balloons are launched (NOAA's list, kept 30 days), and the one clicked.
     let mut launch_sites: Vec<mapterm::upperair::Site> = Vec::new();
     let mut selected_site: Option<String> = None;
+    // --cells: the cells last read for the view (to click), and those clicked: all within a
+    // few dots of the click, as a mast often has several.
+    let mut cells_data: Vec<serde_json::Value> = Vec::new();
+    let mut selected_cells: Vec<serde_json::Value> = Vec::new();
+    // --streetview: the token, the photos near the spot clicked and the one shown, its image
+    // (photo id, width, height, RGBA), where in the panel it goes and what was last placed.
+    let mut mapillary_token = if a.streetview {
+        Some(mapterm::raster::find_key(a.mapillary_key_cmd.as_deref(), &["MAPILLARY_TOKEN"])?.context(
+            "--streetview needs your Mapillary client token: register an app at mapillary.com/dashboard/developers, then set MAPILLARY_TOKEN or pass --mapillary-key-cmd",
+        )?)
+    } else {
+        None
+    };
+    // Where there are photos: Mapillary's coverage tiles, under what moves.
+    if let Some(token) = &mapillary_token {
+        add_mapillary(&mut map, token)?;
+    }
+    let mut photos: Vec<mapterm::mapillary::Photo> = Vec::new();
+    let mut photo_at = 0usize;
+    let mut photos_asking = false;
+    let mut photo_img: Option<(String, u32, u32, Vec<u8>)> = None;
+    let mut photo_rect = Rect::default();
+    let mut photo_placed: Option<(String, Rect)> = None;
+    // Walk mode (w with a photo shown): on, what it knows (taken while a step is under way),
+    // and which way you face.
+    let mut walking = false;
+    let mut walk: Option<mapterm::mapillary::Walk> = None;
+    let mut facing = 0.0f64;
+    let (walktx, mut walkrx) = mpsc::unbounded_channel::<WalkDone>();
+    let (photostx, mut photosrx) = mpsc::unbounded_channel::<Result<Vec<mapterm::mapillary::Photo>>>();
+    let (imgtx, mut imgrx) = mpsc::unbounded_channel::<PhotoImage>();
+    let fetch_image = |p: mapterm::mapillary::Photo, tx: mpsc::UnboundedSender<PhotoImage>| {
+        tokio::spawn(async move {
+            let r = mapterm::mapillary::image(&p).await;
+            let _ = tx.send((p.id.clone(), r));
+        });
+    };
     let (sitetx, mut siterx) = mpsc::unbounded_channel::<Result<Vec<mapterm::upperair::Site>>>();
     let load_sites = |tx: mpsc::UnboundedSender<Result<Vec<mapterm::upperair::Site>>>| {
         tokio::spawn(async move {
@@ -4753,6 +5078,29 @@ async fn main() -> Result<()> {
     let mut nasa_tracks: std::collections::HashMap<String, Vec<mapterm::csbf::TrackPoint>> = std::collections::HashMap::new();
     let mut nasa_new = false;
     let (nasatx, mut nasarx) = mpsc::unbounded_channel::<NasaMsg>();
+    // --towers: the FCC's structures (read once, kept a week), and the view they were last
+    // drawn for.
+    let mut towers: Vec<mapterm::towers::Tower> = Vec::new();
+    let mut towers_drawn: Option<(i32, i64, i64)> = None;
+    let (towertx, mut towerrx) = mpsc::unbounded_channel::<Result<Vec<mapterm::towers::Tower>>>();
+    let load_towers = |tx: mpsc::UnboundedSender<Result<Vec<mapterm::towers::Tower>>>| {
+        tokio::spawn(async move {
+            let _ = tx.send(mapterm::towers::load().await);
+        });
+    };
+    if a.towers {
+        load_towers(towertx.clone());
+    }
+    // --cells: OpenCelliD's GeoParquet files (only the chunks in view are read, as it moves),
+    // the view last asked for, whether a read is under way, and how many cells came.
+    let mut cell_files: Vec<std::path::PathBuf> = if a.cells { mapterm::opencellid::files() } else { Vec::new() };
+    let mut cells_drawn: Option<(i32, i64, i64)> = None;
+    let mut cells_reading = false;
+    let mut cells_shown: Option<usize> = None;
+    let (celltx, mut cellrx) = mpsc::unbounded_channel::<Result<serde_json::Value>>();
+    if a.cells && cell_files.is_empty() {
+        note = Some((Instant::now(), "no cells downloaded yet: mapterm --cells-download us (or world)".into()));
+    }
     if let Some(all) = a.nasa {
         spawn_nasa(nasatx.clone(), all);
     }
@@ -4834,6 +5182,9 @@ async fn main() -> Result<()> {
             "satellites" => a.sats.is_some(),
             "balloons" => a.sondes,
             "nasa" => a.nasa.is_some(),
+            "towers" => a.towers,
+            "cells" => a.cells,
+            "mapillary" => a.streetview,
             "radar" => radar.is_some(),
             "alerts" => a.alerts,
             "quakes" => a.quakes.is_some(),
@@ -5021,6 +5372,15 @@ async fn main() -> Result<()> {
                 let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255)).add_modifier(ratatui::style::Modifier::BOLD);
                 overlays.push(Overlay::Marker { lon: at.lon, lat: at.lat, glyph: b.glyph().into(), style: st, label: Some((b.latest.serial.clone(), st)), priority: 101 });
             }
+            // Where the street-level photo shown was taken, and which way it looks.
+            if let Some(p) = photos.get(photo_at)
+                && let Some((lon, lat)) = p.at
+            {
+                const ARROWS: [&str; 8] = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
+                let glyph = if p.pano { "◎" } else { p.heading.map_or("◎", |h| ARROWS[((h.rem_euclid(360.0) + 22.5) / 45.0) as usize % 8]) };
+                let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(0x05, 0xcb, 0x63)).add_modifier(ratatui::style::Modifier::BOLD);
+                overlays.push(Overlay::Marker { lon, lat, glyph: glyph.into(), style: st, label: Some((" photo ".into(), st)), priority: 102 });
+            }
             // The selected ship, the same way.
             if let Some((s, at)) = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY)) {
                 let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255)).add_modifier(ratatui::style::Modifier::BOLD);
@@ -5120,8 +5480,9 @@ async fn main() -> Result<()> {
                 let gauge = selected_gauge.as_deref().and_then(|id| gauges.iter().find(|g| g.lid == id));
                 let site = selected_site.as_deref().and_then(|id| launch_sites.iter().find(|s| s.id == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() || site.is_some() {
-                        52.min(main.width / 2)
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() || site.is_some() || !selected_cells.is_empty() || !photos.is_empty() {
+                        // Walking, the photo takes more of the screen.
+                        if walking && !photos.is_empty() { (main.width * 3 / 5).max(52.min(main.width)) } else { 52.min(main.width / 2) }
                     } else {
                         0
                     };
@@ -5178,6 +5539,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 station_rows.clear();
+                photo_rect = Rect::default();
                 list_rows = match &search {
                     _ if let Some(fd) = finder.as_ref() => {
                         draw_finder(f, panel, fd);
@@ -5198,6 +5560,17 @@ async fn main() -> Result<()> {
                         let heard = balloons.heard_by(&b.0.latest.serial, unix_now());
                         let from = launch_site(&launch_sites, b.0);
                         station_rows = draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), &heard, from, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if !photos.is_empty() => {
+                        // The image held (the last photo's, until the new one is in).
+                        let dims = photo_img.as_ref().map(|(_, w, h, _)| (*w, *h));
+                        let loading = photos.get(photo_at).is_some_and(|p| photo_img.as_ref().is_none_or(|(id, ..)| *id != p.id));
+                        photo_rect = draw_photo(f, panel, &photos, photo_at, dims, loading, kitty, cpx, unix_now());
+                        Vec::new()
+                    }
+                    _ if !selected_cells.is_empty() => {
+                        draw_cells(f, panel, &selected_cells, unix_now());
                         Vec::new()
                     }
                     _ if let Some(s) = site => {
@@ -5351,6 +5724,30 @@ async fn main() -> Result<()> {
                     let of = sat_filter.describe();
                     spans.push(Span::styled(format!("◇ {} sats{of} ", sats.len()), st));
                 }
+                if a.cells && !live_off.contains_key("cells") {
+                    let text = match (cell_files.is_empty(), cells_shown) {
+                        (true, _) => "▴ no cells downloaded ".to_string(),
+                        _ if cam.zoom < CELLS_MIN_ZOOM => "▴ zoom in for cells ".to_string(),
+                        (_, None) => "▴ … ".to_string(),
+                        (_, Some(n)) if n >= CELLS_MAX => format!("▴ {}+ cells (the most measured) ", thousands(n)),
+                        (_, Some(n)) => format!("▴ {} cells ", thousands(n)),
+                    };
+                    spans.push(Span::styled(text, TStyle::new().fg(Color::Rgb(0x60, 0xa5, 0xfa))));
+                }
+                if a.towers && !live_off.contains_key("towers") {
+                    let text = if towers.is_empty() {
+                        "Ψ … ".to_string()
+                    } else if cam.zoom < TOWERS_MIN_ZOOM {
+                        "Ψ zoom in for towers ".to_string()
+                    } else {
+                        let vp = Viewport::new(&cam, map_area);
+                        let (w, n) = vp.cell_to_lonlat(0, 0);
+                        let (e, s) = vp.cell_to_lonlat(map_area.width, map_area.height);
+                        let inview = towers.iter().filter(|t| t.lon >= w && t.lon <= e && t.lat >= s && t.lat <= n).count();
+                        format!("Ψ {} towers ", thousands(inview))
+                    };
+                    spans.push(Span::styled(text, TStyle::new().fg(Color::Rgb(0x8a, 0xa4, 0xc8))));
+                }
                 if a.nasa.is_some() && !live_off.contains_key("nasa") {
                     let flying = nasa_flights.iter().filter(|f| unix_now() - f.t <= mapterm::csbf::RECENT).count();
                     let text = match (flying, status.get("nasa").and_then(|s| s.updated)) {
@@ -5490,7 +5887,7 @@ async fn main() -> Result<()> {
                                 ("○", Some("not started · enter starts it"))
                             } else if !live_on(i) {
                                 ("☐", None)
-                            } else if status.get(key).is_none_or(|s| s.updated.is_none()) && !matches!(key, "satellites" | "gauges") {
+                            } else if status.get(key).is_none_or(|s| s.updated.is_none()) && !matches!(key, "satellites" | "gauges" | "mapillary") {
                                 ("◌", Some("starting…"))
                             } else {
                                 ("☑", None)
@@ -5569,6 +5966,13 @@ async fn main() -> Result<()> {
                         Span::styled("  ↑↓ choose · enter go · esc close ", dim),
                     ];
                 }
+                // Walk mode says so, with its keys.
+                if walking {
+                    let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(0x05, 0xcb, 0x63)).add_modifier(ratatui::style::Modifier::BOLD);
+                    let busy = if walk.is_none() { " stepping…" } else { "" };
+                    spans.insert(0, Span::styled(format!(" ⇡ WALK {}{busy} ", mapterm::mapillary::compass8(facing)), st));
+                    spans.insert(1, Span::styled(" W/S step · A/D turn · Q/E older/newer · esc ", dim));
+                }
                 // While naming a place, the status line is its prompt.
                 if let Some(name) = &place_naming {
                     spans = vec![
@@ -5645,6 +6049,19 @@ async fn main() -> Result<()> {
             frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
             if sync {
                 let mut out = std::io::stdout();
+                // The street-level photo, in the panel (taken down when it closes or changes).
+                let want = photo_img.as_ref().filter(|_| photo_rect.width > 0 && kitty).map(|(id, ..)| (id.clone(), photo_rect));
+                if want != photo_placed {
+                    // A new photo replaces the old one in place (same image id): taking it
+                    // down first would flash. Only taken down when there's none to show.
+                    if photo_placed.is_some() && want.is_none() {
+                        out.write_all(mapterm::kitty::free(PHOTO_IMAGE).as_bytes())?;
+                    }
+                    if let (Some((_, w, h, rgba)), Some((_, r))) = (photo_img.as_ref(), want.as_ref()) {
+                        out.write_all(mapterm::kitty::show_rgba(PHOTO_IMAGE, *w, *h, rgba, r.x, r.y, r.width, r.height, 1, shm).as_bytes())?;
+                    }
+                    photo_placed = want;
+                }
                 // Images of live layers just turned off.
                 for id in free_images.drain(..) {
                     out.write_all(mapterm::kitty::free(id).as_bytes())?;
@@ -6060,6 +6477,45 @@ async fn main() -> Result<()> {
                 map.put_raster_tile(FIRE_TILES, None, true);
                 (fires_new, fires_shown_selected) = (false, selected_fire.clone());
             }
+            // Towers around the view, drawn again when it moves a quarter of its width (or the
+            // zoom changes); none zoomed out.
+            if a.towers && !towers.is_empty() && map_area.width > 0 {
+                let vp = Viewport::new(&cam, map_area);
+                let (west, north) = vp.cell_to_lonlat(0, 0);
+                let (east, south) = vp.cell_to_lonlat(map_area.width, map_area.height);
+                let step = ((east - west).abs() / 4.0).max(1e-9);
+                let key = if cam.zoom >= TOWERS_MIN_ZOOM { (cam.zoom.floor() as i32, (cam.lon / step).round() as i64, (cam.lat / step).round() as i64) } else { (-1, 0, 0) };
+                if towers_drawn != Some(key) {
+                    towers_drawn = Some(key);
+                    let (dx, dy) = ((east - west).abs() / 2.0, (north - south).abs() / 2.0);
+                    let pts = if key.0 < 0 { serde_json::json!({"type": "FeatureCollection", "features": []}) } else { mapterm::towers::points(&towers, (west - dx, south - dy, east + dx, north + dy)) };
+                    map.set_data(TOWERS, &pts)?;
+                }
+            }
+            // Cells around the view, the same way (more of them: from zoom 11, capped).
+            if a.cells && !cell_files.is_empty() && map_area.width > 0 && !cells_reading {
+                let vp = Viewport::new(&cam, map_area);
+                let (west, north) = vp.cell_to_lonlat(0, 0);
+                let (east, south) = vp.cell_to_lonlat(map_area.width, map_area.height);
+                let step = ((east - west).abs() / 4.0).max(1e-9);
+                let key = if cam.zoom >= CELLS_MIN_ZOOM { (cam.zoom.floor() as i32, (cam.lon / step).round() as i64, (cam.lat / step).round() as i64) } else { (-1, 0, 0) };
+                if cells_drawn != Some(key) {
+                    cells_drawn = Some(key);
+                    if key.0 < 0 {
+                        cells_shown = None;
+                        map.set_data(CELLS, &serde_json::json!({"type": "FeatureCollection", "features": []}))?;
+                    } else {
+                        // Read in the background: only the chunks this view covers.
+                        let (dx, dy) = ((east - west).abs() / 2.0, (north - south).abs() / 2.0);
+                        let bounds = (west - dx, south - dy, east + dx, north + dy);
+                        let (files, tx) = (cell_files.clone(), celltx.clone());
+                        cells_reading = true;
+                        tokio::task::spawn_blocking(move || {
+                            let _ = tx.send(mapterm::opencellid::read_view(&files, bounds, CELLS_MAX));
+                        });
+                    }
+                }
+            }
             if let (Some(all), true) = (a.nasa, nasa_new) {
                 nasa_new = false;
                 let now = unix_now();
@@ -6355,6 +6811,29 @@ async fn main() -> Result<()> {
                                         let _ = map.set_visibility(TRAILS, false);
                                     }
                                     adsb_feed = Some(feed);
+                                }
+                                "cells" => {
+                                    a.cells = true;
+                                    let before = under(&map, MOVING);
+                                    add_points(&mut map, CELLS, mapterm::opencellid::CREDIT, mapterm::opencellid::layer(CELLS, CELLS), before.as_deref())?;
+                                    cell_files = mapterm::opencellid::files();
+                                    if cell_files.is_empty() {
+                                        bail!("no cells downloaded yet: mapterm --cells-download us (or world)");
+                                    }
+                                }
+                                "mapillary" => {
+                                    let token = mapterm::raster::find_key(a.mapillary_key_cmd.as_deref(), &["MAPILLARY_TOKEN"])?.context(
+                                        "street view needs your Mapillary token: set MAPILLARY_TOKEN or pass --mapillary-key-cmd",
+                                    )?;
+                                    add_mapillary(&mut map, &token)?;
+                                    mapillary_token = Some(token);
+                                    a.streetview = true;
+                                }
+                                "towers" => {
+                                    a.towers = true;
+                                    let before = under(&map, MOVING);
+                                    add_points(&mut map, TOWERS, mapterm::towers::CREDIT, mapterm::towers::layer(TOWERS, TOWERS), before.as_deref())?;
+                                    load_towers(towertx.clone());
                                 }
                                 "nasa" => {
                                     a.nasa = Some(false);
@@ -6934,6 +7413,74 @@ async fn main() -> Result<()> {
                         Err(e) => note = Some((Instant::now(), format!("launch sites: {e:#}"))),
                     }
                 }
+                Some((w, r)) = walkrx.recv() => {
+                    walk = Some(w);
+                    match r {
+                        Ok(Some((p, face))) => {
+                            facing = face;
+                            if let Some((lon, lat)) = p.at {
+                                ctl.fly_to(beside_panel(Camera::new(lon, lat, ctl.cam.zoom.max(18.0)), map_area, panel_area));
+                            }
+                            // The last photo stays up until this one's in: no gap, no jump.
+                            photos = vec![p];
+                            photo_at = 0;
+                            fetch_image(photos[0].clone(), imgtx.clone());
+                        }
+                        Ok(None) => note = Some((Instant::now(), "no photo that way".into())),
+                        Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                    }
+                }
+                Some(r) = photosrx.recv() => {
+                    photos_asking = false;
+                    match r {
+                        Ok(v) if v.is_empty() => note = Some((Instant::now(), format!("no street-level photos within {} m", mapterm::mapillary::RADIUS))),
+                        Ok(v) => {
+                            photos = v;
+                            photo_at = 0;
+                            fetch_image(photos[0].clone(), imgtx.clone());
+                        }
+                        Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                    }
+                }
+                Some((id, r)) = imgrx.recv() => {
+                    // Only the photo still shown.
+                    if photos.get(photo_at).is_some_and(|p| p.id == id) {
+                        match r {
+                            Ok((w, h, rgba)) => photo_img = Some((id, w, h, rgba)),
+                            Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                        }
+                    }
+                }
+                Some(r) = cellrx.recv() => {
+                    cells_reading = false;
+                    match r {
+                        Ok(v) => {
+                            let n = v["features"].as_array().map_or(0, Vec::len);
+                            status.entry("cells").or_default().heard(unix_now(), Some(n));
+                            cells_shown = Some(n);
+                            map.set_data(CELLS, &v)?;
+                            cells_data = v["features"].as_array().cloned().unwrap_or_default();
+                        }
+                        Err(e) => {
+                            status.entry("cells").or_default().fail(unix_now(), format!("{e:#}"));
+                            note = Some((Instant::now(), format!("cells: {e:#}")));
+                        }
+                    }
+                }
+                Some(r) = towerrx.recv() => {
+                    match r {
+                        Ok(v) => {
+                            status.entry("towers").or_default().ok(unix_now(), Some(v.len()));
+                            dlog(|| format!("towers: {}", v.len()));
+                            towers = v;
+                            towers_drawn = None;
+                        }
+                        Err(e) => {
+                            status.entry("towers").or_default().fail(unix_now(), format!("{e:#}"));
+                            note = Some((Instant::now(), format!("towers: {e:#}")));
+                        }
+                    }
+                }
                 Some(m) = nasarx.recv() => {
                     match m {
                         NasaMsg::Flights(f) => {
@@ -7222,6 +7769,37 @@ async fn main() -> Result<()> {
                                         _ => {}
                                     }
                                     continue;
+                                }
+                                // Walk mode: WASD and the arrows step and turn, Q/E older and newer
+                                // photos of the spot, esc leaves it. Other keys work as usual.
+                                if walking {
+                                    use mapterm::mapillary::Step;
+                                    let step = match k.code {
+                                        KeyCode::Char('w' | 'W') | KeyCode::Up => Some(Step::Forward),
+                                        KeyCode::Char('s' | 'S') | KeyCode::Down => Some(Step::Back),
+                                        KeyCode::Char('a' | 'A') | KeyCode::Left => Some(Step::Left),
+                                        KeyCode::Char('d' | 'D') | KeyCode::Right => Some(Step::Right),
+                                        KeyCode::Char('q' | 'Q') => Some(Step::Older),
+                                        KeyCode::Char('e' | 'E') => Some(Step::Newer),
+                                        _ => None,
+                                    };
+                                    if k.code == KeyCode::Esc {
+                                        walking = false;
+                                        note = Some((Instant::now(), "left walk mode".into()));
+                                        continue;
+                                    }
+                                    if let Some(step) = step {
+                                        // One step at a time: keys while one is under way wait their turn.
+                                        if let (Some(mut w), Some(cur), Some(token)) = (walk.take(), photos.get(photo_at).cloned(), mapillary_token.clone()) {
+                                            let tx = walktx.clone();
+                                            let face = facing;
+                                            tokio::spawn(async move {
+                                                let r = w.step(&cur, face, step, &token).await;
+                                                let _ = tx.send((w, r));
+                                            });
+                                        }
+                                        continue;
+                                    }
                                 }
                                 // The base map switcher takes every key while it's open, as fzf:
                                 // typing filters, up/down (ctrl-n/p, ctrl-j/k) choose and preview,
@@ -7625,6 +8203,17 @@ async fn main() -> Result<()> {
                                         route_new = true;
                                     }
                                     KeyCode::Esc if selected_site.is_some() && !inspect => selected_site = None,
+                                    KeyCode::Esc if !selected_cells.is_empty() && !inspect => selected_cells.clear(),
+                                    KeyCode::Esc if !photos.is_empty() && !inspect => {
+                                        (photos, photo_img) = (Vec::new(), None);
+                                        walking = false;
+                                    }
+                                    // Tab, shift-tab: the next or previous photo nearby.
+                                    KeyCode::Tab | KeyCode::BackTab if photos.len() > 1 && !inspect => {
+                                        let n = photos.len();
+                                        photo_at = if k.code == KeyCode::Tab { (photo_at + 1) % n } else { (photo_at + n - 1) % n };
+                                        fetch_image(photos[photo_at].clone(), imgtx.clone());
+                                    }
                                     KeyCode::Esc if route.is_some() && route_panel && selected.is_none() && selected_ship.is_none() && selected_sat.is_none() && selected_alert.is_none() && selected_outage.is_none() && selected_quake.is_none() && selected_fire.is_none() && selected_gauge.is_none() && selected_tfr.is_none() && selected_closure.is_none() && selected_balloon.is_none() && !inspect && !matches!(search, Search::Results { .. }) => {
                                         route_panel = false;
                                     }
@@ -7796,6 +8385,16 @@ async fn main() -> Result<()> {
                                         place_list = mapterm::places::load();
                                         place_forget = None;
                                         switcher = Some(mapterm::basemaps::Switcher::places(place_rows(&place_list)));
+                                    }
+                                    // w: walk mode, from the street-level photo shown.
+                                    KeyCode::Char('w') if !photos.is_empty() && mapillary_token.is_some() => {
+                                        walking = true;
+                                        walk.get_or_insert_with(Default::default);
+                                        facing = photos.get(photo_at).and_then(|p| p.heading).unwrap_or(0.0);
+                                        if let Some((lon, lat)) = photos.get(photo_at).and_then(|p| p.at) {
+                                            ctl.fly_to(Camera::new(lon, lat, ctl.cam.zoom.max(18.0)));
+                                        }
+                                        note = Some((Instant::now(), "walk mode: W/S step · A/D turn · Q/E older/newer · esc leaves".into()));
                                     }
                                     // S: the sessions, to open one or save this.
                                     KeyCode::Char('S') => {
@@ -7978,13 +8577,16 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires || a.floods || a.tfrs || a.closures {
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires || a.floods || a.tfrs || a.closures || a.cells || a.streetview {
                                         // A click on (or next to) an aircraft, else a balloon, else a
                                         // ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
                                         let dot = vp.dot_ll(k.lon, k.lat);
                                         selected_site = None;
-                                        if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, dot, 6.0) {
+                                        selected_cells.clear();
+                                        // Layers turned off in L don't catch clicks.
+                                        let off = |k: &str| live_off.contains_key(k);
+                                        if let Some(hex) = aircraft.nearest(unix_now() - adsb_delay, &vp, dot, 6.0).filter(|_| !off("aircraft")) {
                                             if selected.as_deref() != Some(hex.as_str()) {
                                                 follow = false;
                                             }
@@ -7992,7 +8594,7 @@ async fn main() -> Result<()> {
                                             selected_ship = None;
                                             selected_sat = None;
                                             selected_balloon = None;
-                                        } else if let Some(serial) = balloons.nearest(unix_now() - SONDE_DELAY, &vp, dot, 6.0) {
+                                        } else if let Some(serial) = balloons.nearest(unix_now() - SONDE_DELAY, &vp, dot, 6.0).filter(|_| !off("balloons")) {
                                             if selected_balloon.as_deref() != Some(serial.as_str()) {
                                                 follow = false;
                                             }
@@ -8000,7 +8602,7 @@ async fn main() -> Result<()> {
                                             selected = None;
                                             selected_ship = None;
                                             selected_sat = None;
-                                        } else if let Some((_, mmsi)) = fleet.nearest(unix_now() - AIS_DELAY, &vp, dot, 6.0) {
+                                        } else if let Some((_, mmsi)) = fleet.nearest(unix_now() - AIS_DELAY, &vp, dot, 6.0).filter(|_| !off("ships")) {
                                             if selected_ship != Some(mmsi) {
                                                 follow = false;
                                             }
@@ -8008,7 +8610,7 @@ async fn main() -> Result<()> {
                                             selected_sat = None;
                                             selected = None;
                                             selected_balloon = None;
-                                        } else if let Some(norad) = mapterm::satellites::nearest(&sats, unix_now(), &vp, dot, 6.0) {
+                                        } else if let Some(norad) = mapterm::satellites::nearest(&sats, unix_now(), &vp, dot, 6.0).filter(|_| !off("satellites")) {
                                             if selected_sat != Some(norad) {
                                                 follow = false;
                                             }
@@ -8016,30 +8618,32 @@ async fn main() -> Result<()> {
                                             selected = None;
                                             selected_ship = None;
                                             selected_alert = None;
-                                        } else if let Some(id) = mapterm::floods::nearest(&gauges, &vp, dot, 4.0) {
+                                        } else if let Some(id) = mapterm::floods::nearest(&gauges, &vp, dot, 4.0).filter(|_| !off("gauges")) {
                                             selected_gauge = Some(id);
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake, selected_fire) =
                                                 (None, None, None, None, None, None, None, None);
                                             follow = false;
-                                        } else if let Some(id) = mapterm::fires::nearest(&fires, &vp, dot, 4.0).or_else(|| {
-                                            // Or the perimeter under the click.
-                                            map.query_features(&last_cam, map_area, dot)
-                                                .iter()
-                                                .filter(|p| p.source.as_deref() == Some(FIRE_AREAS))
-                                                .find_map(|p| p.prop("id").and_then(|v| v.as_str()).map(str::to_string))
-                                        }) {
+                                        } else if let Some(id) = mapterm::fires::nearest(&fires, &vp, dot, 4.0)
+                                            .or_else(|| {
+                                                // Or the perimeter under the click.
+                                                map.query_features(&last_cam, map_area, dot)
+                                                    .iter()
+                                                    .filter(|p| p.source.as_deref() == Some(FIRE_AREAS))
+                                                    .find_map(|p| p.prop("id").and_then(|v| v.as_str()).map(str::to_string))
+                                            })
+                                            .filter(|_| !off("fires"))
+                                        {
                                             selected_fire = Some(id);
                                             selected_gauge = None;
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake) =
                                                 (None, None, None, None, None, None, None);
                                             follow = false;
-                                        } else if let Some(id) = mapterm::quakes::nearest(&quakes, unix_now(), &vp, dot, 4.0) {
+                                        } else if let Some(id) = mapterm::quakes::nearest(&quakes, unix_now(), &vp, dot, 4.0).filter(|_| !off("quakes")) {
                                             selected_fire = None;
                                             selected_quake = Some(id);
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage) = (None, None, None, None, None, None);
                                             follow = false;
-                                        } else if let Some(id) = a
-                                            .sondes
+                                        } else if let Some(id) = (a.sondes && !off("balloons"))
                                             .then(|| mapterm::upperair::nearest(&launch_sites, &vp, dot, 4.0).map(|s| s.id.clone()))
                                             .flatten()
                                         {
@@ -8048,8 +8652,16 @@ async fn main() -> Result<()> {
                                             (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake, selected_fire) =
                                                 (None, None, None, None, None, None, None, None);
                                             follow = false;
-                                        } else if let Some(k) = a
-                                            .closures
+                                        } else if let Some(near) = (a.cells && !off("cells") && cam.zoom >= CELLS_MIN_ZOOM)
+                                            .then(|| cells_near(&cells_data, &vp, dot, 4.0))
+                                            .filter(|v| !v.is_empty())
+                                        {
+                                            // The cells there (a mast often carries several).
+                                            selected_cells = near;
+                                            (selected, selected_ship, selected_sat, selected_balloon, selected_alert, selected_outage, selected_quake, selected_fire) =
+                                                (None, None, None, None, None, None, None, None);
+                                            follow = false;
+                                        } else if let Some(k) = (a.closures && !off("closures"))
                                             .then(|| map.query_features(&last_cam, map_area, dot))
                                             .and_then(|hits| hits.iter().filter(|p| p.source.as_deref() == Some(CLOSURES)).find_map(|p| p.prop("key").and_then(|v| v.as_str()).map(str::to_string)))
                                         {
@@ -8066,6 +8678,7 @@ async fn main() -> Result<()> {
                                             // its outline, braille or not, is what's picked).
                                             selected_tfr = hits
                                                 .iter()
+                                                .filter(|_| !off("tfrs"))
                                                 .filter(|p| p.source.as_deref() == Some(TFRS))
                                                 .filter_map(|p| p.prop("key").and_then(|v| v.as_str()))
                                                 .max_by_key(|k| !k.starts_with("stadium:") && !k.starts_with("rules:"))
@@ -8077,6 +8690,7 @@ async fn main() -> Result<()> {
                                                     tfr_live
                                                         .iter()
                                                         .chain(&tfr_standing)
+                                                        .filter(|_| !off("tfrs"))
                                                         .filter(|r| mapterm::tfrs::contains(&r.geometry, lon, lat))
                                                         .min_by(|a, b| mapterm::tfrs::extent(&a.geometry).total_cmp(&mapterm::tfrs::extent(&b.geometry)))
                                                         .map(|r| r.key.clone())
@@ -8084,6 +8698,7 @@ async fn main() -> Result<()> {
                                             // An alert area under the click: the most severe.
                                             selected_alert = hits
                                                 .iter()
+                                                .filter(|_| !off("alerts"))
                                                 .filter(|p| p.source.as_deref() == Some(ALERTS))
                                                 .filter_map(|p| p.prop("id").and_then(|v| v.as_str()))
                                                 .filter_map(|id| alerts.iter().find(|a| a.id == id))
@@ -8095,6 +8710,7 @@ async fn main() -> Result<()> {
                                                 None
                                             } else {
                                                 hits.iter()
+                                                    .filter(|_| !off("outages"))
                                                     .filter(|p| p.source.as_deref() == Some(OUTAGES))
                                                     .filter(|p| p.prop("level").and_then(|v| v.as_str()) == Some(level.name()))
                                                     .filter_map(|p| p.prop("key").and_then(|v| v.as_str()))
@@ -8104,6 +8720,32 @@ async fn main() -> Result<()> {
                                             if selected_alert.is_some() || selected_outage.is_some() {
                                                 (selected, selected_ship, selected_sat) = (None, None, None);
                                             }
+                                        }
+                                        // Nothing else there: the street-level photos nearest it.
+                                        let picked = selected.is_some()
+                                            || selected_ship.is_some()
+                                            || selected_sat.is_some()
+                                            || selected_balloon.is_some()
+                                            || selected_alert.is_some()
+                                            || selected_outage.is_some()
+                                            || selected_quake.is_some()
+                                            || selected_fire.is_some()
+                                            || selected_gauge.is_some()
+                                            || selected_tfr.is_some()
+                                            || selected_closure.is_some()
+                                            || selected_site.is_some()
+                                            || !selected_cells.is_empty();
+                                        if let Some(token) = mapillary_token.clone().filter(|_| !picked && !photos_asking && !off("mapillary")) {
+                                            photos_asking = true;
+                                            (photos, photo_at, photo_img) = (Vec::new(), 0, None);
+                                            let tx = photostx.clone();
+                                            let (lon, lat) = (k.lon, k.lat);
+                                            note = Some((Instant::now(), "looking for street-level photos…".into()));
+                                            tokio::spawn(async move {
+                                                let _ = tx.send(mapterm::mapillary::near(lon, lat, &token).await);
+                                            });
+                                        } else if picked {
+                                            (photos, photo_img) = (Vec::new(), None);
                                         }
                                     }
                                 }

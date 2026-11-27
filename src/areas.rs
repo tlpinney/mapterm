@@ -42,6 +42,11 @@ impl Shape {
         Shape { rgb, fill: 0, line: 255, selected, open: true, width, rings: Vec::new() }
     }
 
+    /// Add a line or ring already in world coordinates (0 to 1, Web Mercator).
+    pub fn add_world(&mut self, ring: Vec<(f64, f64)>) {
+        self.rings.push(ring);
+    }
+
     /// Add a GeoJSON Polygon or MultiPolygon geometry (lon/lat) to the area; anything else is
     /// ignored.
     pub fn add(&mut self, g: &Value) {
@@ -171,7 +176,7 @@ pub fn tile_source(tiles: Arc<AreaTiles>, name: &str, credit: &str) -> Result<Ar
 }
 
 /// [`tile_source`], drawn to zoom `max_zoom`: higher for lines, which would thicken enlarged.
-pub fn tile_source_to(tiles: Arc<AreaTiles>, name: &str, credit: &str, max_zoom: u8) -> Result<Arc<crate::raster::RasterSource>> {
+pub fn tile_source_to(tiles: Arc<dyn crate::raster::TileRender>, name: &str, credit: &str, max_zoom: u8) -> Result<Arc<crate::raster::RasterSource>> {
     // Never fetched (the renderer comes first); .invalid never resolves, should anything try.
     let mut s = crate::raster::RasterSource::new(&format!("https://{name}.mapterm.invalid/{{z}}/{{x}}/{{y}}.png"), false, max_zoom)?;
     s.tile_px = 512;

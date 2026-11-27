@@ -8,6 +8,37 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Street-level photos (`--streetview`) from Mapillary (CC BY-SA 4.0): click the map where
+  nothing else is and the panel shows the nearest photo within 50 m (as an image where the
+  terminal shows them), when and which way it was taken, who took it and its Mapillary page;
+  tab steps through the others, and the map marks where it was taken. Needs your own
+  Mapillary client token (`--mapillary-key-cmd`, else `MAPILLARY_TOKEN`); photos are kept a
+  week by id, their expiring links never. Walk mode (`w` with a photo shown): W/S (or ↑/↓)
+  step along the street, following the photographer's sequence and then the nearest photo
+  ahead, A/D (←/→) turn onto a photo facing left or right, Q/E older and newer photos of the
+  spot, esc leaves; the map follows, the photo takes more of the screen. Where there are
+  photos shows as a coverage layer (green: dots zoomed out, then the sequences' lines), from Mapillary's tiles kept in the tile cache. "street view" in `L`
+  starts it while running (with your token) and turns it off and on; off, clicks don't
+  look for photos. Where the terminal shows images, the sequence lines are smooth
+  image lines (drawn from the same cached vector tiles), the braille ones hidden.
+  `mapterm::mapillary`.
+
+- Mobile network cells (`--cells`, or from `L`) from OpenCelliD (CC BY-SA 4.0): each cell's
+  estimated position as ▴ colored by radio (5G NR magenta, LTE blue, 3G green, 2G grey),
+  from zoom 11; inspect for the carrier, ids, range and samples. `--cells-download
+  [us|world|MCC]` fetches OpenCelliD's files with your own free key (`--opencellid-key-cmd`,
+  else `OPENCELLID_KEY`), each at most once in 12 hours, and keeps them as GeoParquet sorted
+  along a Z-order curve with bbox columns, so a view reads only the chunks it covers (the
+  world's 5.5 million cells: 168 MB, a city view in tens of milliseconds). Click a cell
+  for every cell there (a mast often has several), by carrier: radio, cell and area ids,
+  estimated range, samples, when last seen. `mapterm::opencellid`;
+  `geoparquet::read_file_all`.
+
+- Antenna structures (`--towers`, or from `L`): the towers and other structures registered
+  with the FCC (US, public domain), 142,000 constructed ones, as Ψ with their height from
+  zoom 8; inspect for the structure type, owner and registration. The FCC's weekly file
+  (~38 MB) is kept for a week. `mapterm::towers`, with a small zip reader.
+
 - Weather balloon launch sites (with `--sondes`): NOAA's upper-air stations still
   launching (~800 worldwide, from the IGRA station list, public domain, cached 30 days) as
   ⊙. Click one for its WMO number, how long it's launched, its usual launch times and the
@@ -125,6 +156,8 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Fixed
 
+- Layers turned off in `L` no longer catch clicks (an outage area, a restriction, a quake...
+  under the pointer was still picked).
 - Weather balloon receiving stations and NASA balloons no longer disappear with the map's
   names (`n`) or the overlay over imagery (`v`); like the other live layers, they stay.
 

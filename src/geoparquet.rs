@@ -53,6 +53,20 @@ pub fn read_file(path: &str, bbox: Option<Bbox>) -> Result<Json> {
     read_sync(builder, bbox)
 }
 
+/// Like [`read_file`], with every column (none skipped as heavy): for files whose every
+/// column is wanted, such as mapterm's own.
+pub fn read_file_all(path: &str, bbox: Option<Bbox>) -> Result<Json> {
+    FORCE_ALL.with(|f| f.set(true));
+    let r = read_file(path, bbox);
+    FORCE_ALL.with(|f| f.set(false));
+    r
+}
+
+thread_local! {
+    /// Every column for this thread's read ([`read_file_all`]).
+    static FORCE_ALL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// A GeoParquet file at an http(s) URL, read with range requests: its footer, then only the
 /// chunks inside `bbox` (all of them without one).
 pub async fn read_url(url: &str, bbox: Option<Bbox>) -> Result<Json> {
@@ -131,7 +145,7 @@ fn projection(meta: &ParquetMetaData, groups: &[usize], geometry: &str, covering
     let total = size.iter().sum::<i64>().max(1) as f64;
     // Small reads keep every column: skipping saves little there, and in a small file every
     // column is a large share.
-    let all = ALL_COLUMNS.load(std::sync::atomic::Ordering::Relaxed) || total < SKIP_ABOVE as f64;
+    let all = ALL_COLUMNS.load(std::sync::atomic::Ordering::Relaxed) || FORCE_ALL.with(|f| f.get()) || total < SKIP_ABOVE as f64;
     let keep: Vec<usize> = roots
         .iter()
         .enumerate()

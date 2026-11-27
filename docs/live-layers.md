@@ -134,6 +134,54 @@ recover one, read SondeHub's
 [Radiosonde Hunting Etiquette](https://github.com/projecthorus/sondehub-tracker/wiki/Radiosonde-Hunting-Etiquette)
 first.
 
+## Antenna structures
+
+`--towers` draws the structures registered with the FCC's
+[Antenna Structure Registration](https://www.fcc.gov/wireless/systems-utilities/antenna-structure-registration)
+(US; public domain, no key): towers, masts, poles and antennas on buildings that are tall or
+near airports, about 142,000 standing. Each is a Ψ (an antenna) with its height (from zoom 8, as there
+are so many); `i` shows the structure type, owner, place and registration number. These are
+the physical structures only: which carriers or radios are on them isn't in the database.
+mapterm keeps the FCC's weekly file (~38 MB) for a week.
+
+## Mobile cells
+
+`--cells` draws mobile network cells from [OpenCelliD](https://opencellid.org)
+([CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)), the open database of
+cells measured by volunteers' phones: each cell (a radio on a mast; a mast often carries
+several) at its *estimated* position, ▴ colored by radio: 5G NR magenta, LTE blue, 3G
+green, 2G grey. They show from zoom 11 (the US alone has about 720,000); `i` shows the
+carrier (for the big US networks; others by their network code), the cell and area ids,
+the estimated range and how many measurements it rests on.
+
+OpenCelliD needs a free account and key, and its live API is too tight for a map, so
+mapterm uses its files: `mapterm --cells-download` (the US; `world` for all 5.5 million
+cells; or mobile country codes, `--cells-download 234,235`) fetches them with your key, from
+`--opencellid-key-cmd 'pass opencellid/token'` or `OPENCELLID_KEY`, at most once in 12 hours
+each (OpenCelliD allows two downloads a day), and keeps them in
+`~/.cache/mapterm/opencellid` as GeoParquet sorted so nearby cells sit together: a view
+reads only the chunks it covers. Run it again now and then for newer data. The key is yours: keep it to yourself.
+
+## Street-level photos
+
+`--streetview` shows street-level photos from [Mapillary](https://www.mapillary.com)
+([CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)), taken by its
+contributors with phones, dashcams and 360° cameras. Click the map where nothing else is
+and the panel shows the nearest photo within 50 m: the photo itself where the terminal
+shows images (kitty graphics), when it was taken and which way it looks, who took it, and
+its page on Mapillary; **tab** steps through the others nearby, and the map marks where
+it was taken (an arrow the way it looks, ◎ for a 360° panorama).
+
+It needs your own Mapillary client token: sign up, register an application at
+mapillary.com/dashboard/developers (read access is enough), and pass
+`--mapillary-key-cmd 'pass mapillary/token'` or set `MAPILLARY_TOKEN`.
+
+Green dots (zoomed out) and lines show where there are photos. It's
+"street view" in `L`: start it there while running (the token still comes from
+`--mapillary-key-cmd` or `MAPILLARY_TOKEN`), and turn it off and on; while it's off,
+clicks don't look for photos. Photos are kept in
+`~/.cache/mapterm/mapillary` for a week; Mapillary's links to them expire and aren't kept.
+
 ## Satellites
 
 `--sats` shows satellites, placed from [CelesTrak](https://celestrak.org)'s orbital
