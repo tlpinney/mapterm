@@ -99,6 +99,7 @@ pub mod legend;
 pub mod locate;
 pub mod map;
 pub mod mapbox;
+pub mod mapillary;
 pub mod mbtiles;
 pub mod msbuildings;
 pub mod mvt;

@@ -8,6 +8,13 @@ All notable changes to mapterm are listed here. The format follows
 
 ### Added
 
+- Street-level photos (`--streetview`) from Mapillary (CC BY-SA 4.0): click the map where
+  nothing else is and the panel shows the nearest photo within 50 m (as an image where the
+  terminal shows them), when and which way it was taken, who took it and its Mapillary page;
+  tab steps through the others, and the map marks where it was taken. Needs your own
+  Mapillary client token (`--mapillary-key-cmd`, else `MAPILLARY_TOKEN`); photos are kept a
+  week by id, their expiring links never. `mapterm::mapillary`.
+
 - Mobile network cells (`--cells`, or from `L`) from OpenCelliD (CC BY-SA 4.0): each cell's
   estimated position as ▴ colored by radio (5G NR magenta, LTE blue, 3G green, 2G grey),
   from zoom 11; inspect for the carrier, ids, range and samples. `--cells-download

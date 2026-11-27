@@ -162,6 +162,21 @@ each (OpenCelliD allows two downloads a day), and keeps them in
 `~/.cache/mapterm/opencellid` as GeoParquet sorted so nearby cells sit together: a view
 reads only the chunks it covers. Run it again now and then for newer data. The key is yours: keep it to yourself.
 
+## Street-level photos
+
+`--streetview` shows street-level photos from [Mapillary](https://www.mapillary.com)
+([CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)), taken by its
+contributors with phones, dashcams and 360° cameras. Click the map where nothing else is
+and the panel shows the nearest photo within 50 m: the photo itself where the terminal
+shows images (kitty graphics), when it was taken and which way it looks, who took it, and
+its page on Mapillary; **tab** steps through the others nearby, and the map marks where
+it was taken (an arrow the way it looks, ◎ for a 360° panorama).
+
+It needs your own Mapillary client token: sign up, register an application at
+mapillary.com/dashboard/developers (read access is enough), and pass
+`--mapillary-key-cmd 'pass mapillary/token'` or set `MAPILLARY_TOKEN`. Photos are kept in
+`~/.cache/mapterm/mapillary` for a week; Mapillary's links to them expire and aren't kept.
+
 ## Satellites
 
 `--sats` shows satellites, placed from [CelesTrak](https://celestrak.org)'s orbital

@@ -185,6 +185,12 @@ usage: mapterm [SOURCE | --style STYLE] [--geojson FILE|URL]... [--raster NAME|U
                 once in 12 hours (OpenCelliD allows two a day), then exit
   --opencellid-key-cmd CMD
                 print your OpenCelliD key with a command (e.g. pass opencellid/token)
+  --streetview  street-level photos from Mapillary (CC BY-SA 4.0): click the map where
+                nothing else is and the panel shows the nearest photo (an image where the
+                terminal shows them), when and which way it was taken, who took it and its
+                page; tab steps through the others nearby. Needs your Mapillary client token
+                (register an app at mapillary.com/dashboard/developers):
+                --mapillary-key-cmd 'pass mapillary/token', else MAPILLARY_TOKEN
   --nasa-balloons [all]
                 NASA's scientific balloons from its balloon facility (CSBF, no key): ◓ with
                 the payload's name and its track so far, for flights heard in the last 3
@@ -329,6 +335,10 @@ struct Args {
     towers: bool,
     /// --cells: OpenCelliD's cells, from the files downloaded.
     cells: bool,
+    /// --streetview: Mapillary's street-level photos where the map is clicked.
+    streetview: bool,
+    /// --mapillary-key-cmd: prints the Mapillary token.
+    mapillary_key_cmd: Option<String>,
     /// --cells-download: the areas to download (and turn into GeoParquet), then exit.
     cells_download: Option<Vec<mapterm::opencellid::Area>>,
     /// --opencellid-key-cmd: prints the OpenCelliD key.
@@ -421,6 +431,8 @@ fn args() -> Result<Args> {
         nasa: None,
         towers: false,
         cells: false,
+        streetview: false,
+        mapillary_key_cmd: None,
         cells_download: None,
         opencellid_key_cmd: None,
         alerts: false,
@@ -597,6 +609,8 @@ fn args() -> Result<Args> {
             "--nasa-balloons" => a.nasa = Some(it.next_if(|n| n == "all").is_some()),
             "--towers" => a.towers = true,
             "--cells" => a.cells = true,
+            "--streetview" | "--mapillary" => a.streetview = true,
+            "--mapillary-key-cmd" => a.mapillary_key_cmd = Some(it.next().context("--mapillary-key-cmd CMD")?),
             "--cells-download" => {
                 use mapterm::opencellid::Area;
                 let v = it.next_if(|n| !n.starts_with('-')).unwrap_or_else(|| "us".into());
@@ -1070,6 +1084,77 @@ fn draw_cells(f: &mut ratatui::Frame, area: Rect, cells: &[serde_json::Value], n
     f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
 }
 
+/// The street-level photo panel: the photo (where the terminal shows images, placed later in
+/// the rect returned), then when and which way it was taken, by whom, its page and the
+/// credit. `dims`: the image's size once it's in. Returns where the image goes (empty when it
+/// can't be shown).
+#[allow(clippy::too_many_arguments)]
+fn draw_photo(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    photos: &[mapterm::mapillary::Photo],
+    at: usize,
+    dims: Option<(u32, u32)>,
+    images: bool,
+    cell_px: (f64, f64),
+    now: f64,
+) -> Rect {
+    use ratatui::style::Modifier;
+    use ratatui::widgets::{Borders, Wrap};
+    let dim = TStyle::new().fg(Color::DarkGray);
+    let block = Block::new().borders(Borders::LEFT).border_style(dim).title(" street view ");
+    let inner = block.inner(area);
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(block, area);
+    let Some(p) = photos.get(at) else { return Rect::default() };
+    // The image: the panel's width, as tall as its shape needs (at most half the panel).
+    let width = inner.width.saturating_sub(1);
+    let rows = match dims {
+        Some((w, h)) if images && w > 0 => {
+            let px_w = width as f64 * cell_px.0;
+            ((px_w * h as f64 / w as f64) / cell_px.1).round().clamp(3.0, (inner.height / 2).max(3) as f64) as u16
+        }
+        _ if images => 8,
+        _ => 0,
+    };
+    let image = Rect { x: inner.x, y: inner.y, width, height: rows.min(inner.height) };
+    let mut l: Vec<Line> = vec![Line::default(); image.height as usize];
+    if images
+        && dims.is_none()
+        && let Some(first) = l.first_mut()
+    {
+        *first = Line::from(Span::styled(" loading the photo…", dim));
+    }
+    let key = |k: &str| Span::styled(format!(" {k:<10}"), dim);
+    let what = if p.pano { "360° panorama".to_string() } else { "photo".to_string() };
+    l.push(Line::from(vec![
+        Span::styled(format!(" {what}"), TStyle::new().fg(Color::Rgb(0x05, 0xcb, 0x63)).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("  {} of {} within {} m", at + 1, photos.len(), mapterm::mapillary::RADIUS), dim),
+    ]));
+    if p.taken > 0.0 {
+        let date = mapterm::clock::Zone::Local.hhmm_zone(p.taken);
+        l.push(Line::from(vec![key("taken"), Span::raw(mapterm::sessions::ago(p.taken, now)), Span::styled(format!("  {date}"), dim)]));
+    }
+    if let (Some(h), false) = (p.heading, p.pano) {
+        l.push(Line::from(vec![key("looking"), Span::raw(format!("{} ({h:.0}°)", mapterm::mapillary::compass8(h)))]));
+    }
+    if let Some(c) = &p.creator {
+        l.push(Line::from(vec![key("by"), Span::raw(c.clone())]));
+    }
+    l.push(Line::from(vec![key("open"), Span::styled(p.page(), TStyle::new().fg(Color::Rgb(127, 178, 255)))]));
+    if !images {
+        l.push(Line::from(Span::styled(" (this terminal doesn't show images: open the page)", dim)));
+    }
+    l.push(Line::default());
+    let credit =
+        p.creator.as_deref().map(|c| format!(" {} · by {c}", mapterm::mapillary::CREDIT)).unwrap_or_else(|| format!(" {}", mapterm::mapillary::CREDIT));
+    l.push(Line::from(Span::styled(credit, dim)));
+    let more = if photos.len() > 1 { "tab next · " } else { "" };
+    l.push(Line::from(Span::styled(format!(" {more}esc close"), dim)));
+    f.render_widget(Paragraph::new(l).wrap(Wrap { trim: false }), inner);
+    if images && dims.is_some() { image } else { Rect::default() }
+}
+
 /// The launch site balloon `b` went up from: the nearest to where it was first heard, if that
 /// was low and near one.
 fn launch_site<'a>(sites: &'a [mapterm::upperair::Site], b: &mapterm::sondehub::Balloon) -> Option<&'a mapterm::upperair::Site> {
@@ -1306,6 +1391,10 @@ const SHIP_TRAIL_IMAGE: u32 = 4_000_000_003;
 const PATH_IMAGE: u32 = 4_000_000_005;
 /// The kitty image of satellite dots and their names.
 const SAT_IMAGE: u32 = 4_000_000_006;
+/// A street-level photo's image as it comes: its id, and its size and RGBA pixels.
+type PhotoImage = (String, Result<(u32, u32, Vec<u8>)>);
+/// The kitty image of the street-level photo shown in the panel.
+const PHOTO_IMAGE: u32 = 4_000_000_007;
 /// The alert areas' style layers (braille, where the terminal doesn't show images).
 const ALERT_LAYERS: [&str; 3] = ["alerts-fill", "alerts-line", "alerts-selected"];
 /// The alert areas as image tiles drawn here (where it does).
@@ -4888,6 +4977,29 @@ async fn main() -> Result<()> {
     // few dots of the click, as a mast often has several.
     let mut cells_data: Vec<serde_json::Value> = Vec::new();
     let mut selected_cells: Vec<serde_json::Value> = Vec::new();
+    // --streetview: the token, the photos near the spot clicked and the one shown, its image
+    // (photo id, width, height, RGBA), where in the panel it goes and what was last placed.
+    let mapillary_token = if a.streetview {
+        Some(mapterm::raster::find_key(a.mapillary_key_cmd.as_deref(), &["MAPILLARY_TOKEN"])?.context(
+            "--streetview needs your Mapillary client token: register an app at mapillary.com/dashboard/developers, then set MAPILLARY_TOKEN or pass --mapillary-key-cmd",
+        )?)
+    } else {
+        None
+    };
+    let mut photos: Vec<mapterm::mapillary::Photo> = Vec::new();
+    let mut photo_at = 0usize;
+    let mut photos_asking = false;
+    let mut photo_img: Option<(String, u32, u32, Vec<u8>)> = None;
+    let mut photo_rect = Rect::default();
+    let mut photo_placed: Option<(String, Rect)> = None;
+    let (photostx, mut photosrx) = mpsc::unbounded_channel::<Result<Vec<mapterm::mapillary::Photo>>>();
+    let (imgtx, mut imgrx) = mpsc::unbounded_channel::<PhotoImage>();
+    let fetch_image = |p: mapterm::mapillary::Photo, tx: mpsc::UnboundedSender<PhotoImage>| {
+        tokio::spawn(async move {
+            let r = mapterm::mapillary::image(&p).await;
+            let _ = tx.send((p.id.clone(), r));
+        });
+    };
     let (sitetx, mut siterx) = mpsc::unbounded_channel::<Result<Vec<mapterm::upperair::Site>>>();
     let load_sites = |tx: mpsc::UnboundedSender<Result<Vec<mapterm::upperair::Site>>>| {
         tokio::spawn(async move {
@@ -5207,6 +5319,15 @@ async fn main() -> Result<()> {
                 let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255)).add_modifier(ratatui::style::Modifier::BOLD);
                 overlays.push(Overlay::Marker { lon: at.lon, lat: at.lat, glyph: b.glyph().into(), style: st, label: Some((b.latest.serial.clone(), st)), priority: 101 });
             }
+            // Where the street-level photo shown was taken, and which way it looks.
+            if let Some(p) = photos.get(photo_at)
+                && let Some((lon, lat)) = p.at
+            {
+                const ARROWS: [&str; 8] = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
+                let glyph = if p.pano { "◎" } else { p.heading.map_or("◎", |h| ARROWS[((h.rem_euclid(360.0) + 22.5) / 45.0) as usize % 8]) };
+                let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(0x05, 0xcb, 0x63)).add_modifier(ratatui::style::Modifier::BOLD);
+                overlays.push(Overlay::Marker { lon, lat, glyph: glyph.into(), style: st, label: Some((" photo ".into(), st)), priority: 102 });
+            }
             // The selected ship, the same way.
             if let Some((s, at)) = selected_ship.and_then(|m| fleet.get(m, unix_now() - AIS_DELAY)) {
                 let st = TStyle::new().fg(Color::Black).bg(Color::Rgb(127, 178, 255)).add_modifier(ratatui::style::Modifier::BOLD);
@@ -5306,7 +5427,7 @@ async fn main() -> Result<()> {
                 let gauge = selected_gauge.as_deref().and_then(|id| gauges.iter().find(|g| g.lid == id));
                 let site = selected_site.as_deref().and_then(|id| launch_sites.iter().find(|s| s.id == id));
                 let panel_w =
-                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() || site.is_some() || !selected_cells.is_empty() {
+                    if results || (inspect && !picks.is_empty()) || plane.is_some() || ship.is_some() || sat.is_some() || alert.is_some() || outage.is_some() || quake.is_some() || fire.is_some() || gauge.is_some() || tfr.is_some() || closure.is_some() || show_route.is_some() || balloon.is_some() || site.is_some() || !selected_cells.is_empty() || !photos.is_empty() {
                         52.min(main.width / 2)
                     } else {
                         0
@@ -5364,6 +5485,7 @@ async fn main() -> Result<()> {
                     }
                 }
                 station_rows.clear();
+                photo_rect = Rect::default();
                 list_rows = match &search {
                     _ if let Some(fd) = finder.as_ref() => {
                         draw_finder(f, panel, fd);
@@ -5384,6 +5506,11 @@ async fn main() -> Result<()> {
                         let heard = balloons.heard_by(&b.0.latest.serial, unix_now());
                         let from = launch_site(&launch_sites, b.0);
                         station_rows = draw_balloon(f, panel, b, balloons.prediction(&b.0.latest.serial), &heard, from, unix_now(), follow, me.as_ref());
+                        Vec::new()
+                    }
+                    _ if !photos.is_empty() => {
+                        let dims = photo_img.as_ref().map(|(_, w, h, _)| (*w, *h));
+                        photo_rect = draw_photo(f, panel, &photos, photo_at, dims, kitty, cpx, unix_now());
                         Vec::new()
                     }
                     _ if !selected_cells.is_empty() => {
@@ -5859,6 +5986,17 @@ async fn main() -> Result<()> {
             frame_ms = t0.elapsed().as_secs_f64() * 1000.0;
             if sync {
                 let mut out = std::io::stdout();
+                // The street-level photo, in the panel (taken down when it closes or changes).
+                let want = photo_img.as_ref().filter(|_| photo_rect.width > 0 && kitty).map(|(id, ..)| (id.clone(), photo_rect));
+                if want != photo_placed {
+                    if photo_placed.is_some() {
+                        out.write_all(mapterm::kitty::free(PHOTO_IMAGE).as_bytes())?;
+                    }
+                    if let (Some((_, w, h, rgba)), Some((_, r))) = (photo_img.as_ref(), want.as_ref()) {
+                        out.write_all(mapterm::kitty::show_rgba(PHOTO_IMAGE, *w, *h, rgba, r.x, r.y, r.width, r.height, 1, shm).as_bytes())?;
+                    }
+                    photo_placed = want;
+                }
                 // Images of live layers just turned off.
                 for id in free_images.drain(..) {
                     out.write_all(mapterm::kitty::free(id).as_bytes())?;
@@ -7202,6 +7340,27 @@ async fn main() -> Result<()> {
                         Err(e) => note = Some((Instant::now(), format!("launch sites: {e:#}"))),
                     }
                 }
+                Some(r) = photosrx.recv() => {
+                    photos_asking = false;
+                    match r {
+                        Ok(v) if v.is_empty() => note = Some((Instant::now(), format!("no street-level photos within {} m", mapterm::mapillary::RADIUS))),
+                        Ok(v) => {
+                            photos = v;
+                            photo_at = 0;
+                            fetch_image(photos[0].clone(), imgtx.clone());
+                        }
+                        Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                    }
+                }
+                Some((id, r)) = imgrx.recv() => {
+                    // Only the photo still shown.
+                    if photos.get(photo_at).is_some_and(|p| p.id == id) {
+                        match r {
+                            Ok((w, h, rgba)) => photo_img = Some((id, w, h, rgba)),
+                            Err(e) => note = Some((Instant::now(), format!("{e:#}"))),
+                        }
+                    }
+                }
                 Some(r) = cellrx.recv() => {
                     cells_reading = false;
                     match r {
@@ -7924,6 +8083,14 @@ async fn main() -> Result<()> {
                                     }
                                     KeyCode::Esc if selected_site.is_some() && !inspect => selected_site = None,
                                     KeyCode::Esc if !selected_cells.is_empty() && !inspect => selected_cells.clear(),
+                                    KeyCode::Esc if !photos.is_empty() && !inspect => (photos, photo_img) = (Vec::new(), None),
+                                    // Tab, shift-tab: the next or previous photo nearby.
+                                    KeyCode::Tab | KeyCode::BackTab if photos.len() > 1 && !inspect => {
+                                        let n = photos.len();
+                                        photo_at = if k.code == KeyCode::Tab { (photo_at + 1) % n } else { (photo_at + n - 1) % n };
+                                        photo_img = None;
+                                        fetch_image(photos[photo_at].clone(), imgtx.clone());
+                                    }
                                     KeyCode::Esc if route.is_some() && route_panel && selected.is_none() && selected_ship.is_none() && selected_sat.is_none() && selected_alert.is_none() && selected_outage.is_none() && selected_quake.is_none() && selected_fire.is_none() && selected_gauge.is_none() && selected_tfr.is_none() && selected_closure.is_none() && selected_balloon.is_none() && !inspect && !matches!(search, Search::Results { .. }) => {
                                         route_panel = false;
                                     }
@@ -8277,7 +8444,7 @@ async fn main() -> Result<()> {
                                         if picks.is_empty() {
                                             note = Some((Instant::now(), "nothing here".into()));
                                         }
-                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires || a.floods || a.tfrs || a.closures || a.cells {
+                                    } else if adsb_feed.is_some() || ais_key.is_some() || a.sats.is_some() || a.alerts || a.outages || a.sondes || a.quakes.is_some() || a.fires || a.floods || a.tfrs || a.closures || a.cells || a.streetview {
                                         // A click on (or next to) an aircraft, else a balloon, else a
                                         // ship, selects it.
                                         let vp = Viewport::new(&last_cam, map_area);
@@ -8420,6 +8587,32 @@ async fn main() -> Result<()> {
                                             if selected_alert.is_some() || selected_outage.is_some() {
                                                 (selected, selected_ship, selected_sat) = (None, None, None);
                                             }
+                                        }
+                                        // Nothing else there: the street-level photos nearest it.
+                                        let picked = selected.is_some()
+                                            || selected_ship.is_some()
+                                            || selected_sat.is_some()
+                                            || selected_balloon.is_some()
+                                            || selected_alert.is_some()
+                                            || selected_outage.is_some()
+                                            || selected_quake.is_some()
+                                            || selected_fire.is_some()
+                                            || selected_gauge.is_some()
+                                            || selected_tfr.is_some()
+                                            || selected_closure.is_some()
+                                            || selected_site.is_some()
+                                            || !selected_cells.is_empty();
+                                        if let Some(token) = mapillary_token.clone().filter(|_| !picked && !photos_asking) {
+                                            photos_asking = true;
+                                            (photos, photo_at, photo_img) = (Vec::new(), 0, None);
+                                            let tx = photostx.clone();
+                                            let (lon, lat) = (k.lon, k.lat);
+                                            note = Some((Instant::now(), "looking for street-level photos…".into()));
+                                            tokio::spawn(async move {
+                                                let _ = tx.send(mapterm::mapillary::near(lon, lat, &token).await);
+                                            });
+                                        } else if picked {
+                                            (photos, photo_img) = (Vec::new(), None);
                                         }
                                     }
                                 }
